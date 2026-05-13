@@ -25,19 +25,23 @@ export function SectionNumber({ number, side = "right", className }: Props) {
       aria-hidden
       className={cn(
         "pointer-events-none absolute top-1/2 -translate-y-1/2 select-none",
-        // Smaller offset on mobile keeps the number from sitting on top of text.
-        side === "left" ? "-left-6 md:-left-12 lg:-left-24" : "-right-6 md:-right-12 lg:-right-24",
+        // Mobile: positive offset so the full number is visible inside the section.
+        // md+: negative offset for the brief's "partially clipped by the section edge" feel,
+        // which only reads as intentional when the viewport is wide enough that the clip is subtle.
+        side === "left"
+          ? "left-4 md:-left-12 lg:-left-24"
+          : "right-4 md:-right-12 lg:-right-24",
         className,
       )}
     >
       <motion.div
         style={{ y }}
-        className="font-display font-light text-fg-faint/30 leading-none"
+        className="font-display font-light text-fg-faint/20 leading-none"
       >
         <span
-          // Min reduced from 12rem to 5rem so the number stays a faint background ornament
-          // on a 375px viewport instead of dominating the section.
-          style={{ fontSize: "clamp(5rem, 22vw, 24rem)" }}
+          // Min sized so the "01" fits inside the content area on a 375px viewport,
+          // not pushing past the right edge.
+          style={{ fontSize: "clamp(4.5rem, 20vw, 24rem)" }}
           className="block"
         >
           {number}

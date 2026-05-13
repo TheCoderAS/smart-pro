@@ -5,13 +5,14 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        bg: "var(--bg)",
-        "bg-elevated": "var(--bg-elevated)",
-        "bg-subtle": "var(--bg-subtle)",
-        fg: "var(--fg)",
-        "fg-muted": "var(--fg-muted)",
-        "fg-faint": "var(--fg-faint)",
-        accent: "var(--accent)",
+        // Use the rgb-channels form so `/<alpha>` opacity modifiers work.
+        bg: "rgb(var(--bg-rgb) / <alpha-value>)",
+        "bg-elevated": "rgb(var(--bg-elevated-rgb) / <alpha-value>)",
+        "bg-subtle": "rgb(var(--bg-subtle-rgb) / <alpha-value>)",
+        fg: "rgb(var(--fg-rgb) / <alpha-value>)",
+        "fg-muted": "rgb(var(--fg-muted-rgb) / <alpha-value>)",
+        "fg-faint": "rgb(var(--fg-faint-rgb) / <alpha-value>)",
+        accent: "rgb(var(--accent-rgb) / <alpha-value>)",
         "accent-glow": "var(--accent-glow)",
       },
       fontFamily: {

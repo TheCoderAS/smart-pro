@@ -3,13 +3,27 @@
 @tailwind utilities;
 
 :root {
+  /*
+   * Colors are defined twice:
+   *   --x      = hex form, for direct CSS use (e.g. `fill="var(--accent)"`)
+   *   --x-rgb  = space-separated channels, consumed by Tailwind via
+   *              `rgb(var(--x-rgb) / <alpha-value>)` so the /opacity
+   *              modifier (`bg-bg/70`, `text-fg-faint/30`) actually works.
+   */
   --bg: #0a0a0b;
+  --bg-rgb: 10 10 11;
   --bg-elevated: #111113;
+  --bg-elevated-rgb: 17 17 19;
   --bg-subtle: #16161a;
+  --bg-subtle-rgb: 22 22 26;
   --fg: #f4f2ee;
+  --fg-rgb: 244 242 238;
   --fg-muted: #8a8780;
+  --fg-muted-rgb: 138 135 128;
   --fg-faint: #44423e;
+  --fg-faint-rgb: 68 66 62;
   --accent: #d97757;
+  --accent-rgb: 217 119 87;
   --accent-glow: rgba(217, 119, 87, 0.15);
   --grain-opacity: 0.04;
   --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
