@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { X } from "lucide-react";
 import { SMOOTH } from "@/lib/motion";
 import { cn } from "@/lib/utils";
@@ -65,16 +65,18 @@ export function WaitlistModalProvider({ children }: { children: React.ReactNode 
   }, [isOpen]);
 
   return (
-    <WaitlistContext.Provider value={{ open, close, isOpen }}>
-      {children}
-      {mounted &&
-        createPortal(
-          <AnimatePresence>
-            {isOpen && <WaitlistModal onClose={close} />}
-          </AnimatePresence>,
-          document.body,
-        )}
-    </WaitlistContext.Provider>
+    <MotionConfig reducedMotion="user">
+      <WaitlistContext.Provider value={{ open, close, isOpen }}>
+        {children}
+        {mounted &&
+          createPortal(
+            <AnimatePresence>
+              {isOpen && <WaitlistModal onClose={close} />}
+            </AnimatePresence>,
+            document.body,
+          )}
+      </WaitlistContext.Provider>
+    </MotionConfig>
   );
 }
 

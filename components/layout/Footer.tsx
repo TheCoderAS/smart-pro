@@ -21,10 +21,11 @@ const COLUMNS = [
   {
     title: "Resources",
     links: [
-      { label: "FAQ", href: "/#faq" },
-      { label: "Updates", href: "#waitlist" },
+      { label: "Early access", href: "#waitlist" },
       // TODO: replace investors email domain
       { label: "Investors", href: "mailto:investors@brand.com" },
+      // TODO: replace press email domain
+      { label: "Press", href: "/press" },
     ],
   },
   {

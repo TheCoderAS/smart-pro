@@ -1,0 +1,11 @@
+<!-- TODO: replace with the real [BRAND] wordmark before launch -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 80" fill="none">
+  <text
+    x="20"
+    y="56"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="48"
+    letter-spacing="-1.2"
+    fill="#0A0A0B"
+  >[BRAND]</text>
+</svg>

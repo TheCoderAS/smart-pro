@@ -6,33 +6,34 @@ export const metadata: Metadata = {
   description: "Press resources, brand assets, and contact for [BRAND].",
 };
 
+// TODO: replace founder placeholders with real names, roles, and bios
 const FOUNDERS = [
   {
     initial: "A",
-    // TODO: replace founder details
     name: "[Founder Name]",
     role: "[Role]",
-    bio: "Two decades in connected-device hardware. Has shipped to millions of homes across three regions.",
+    bio: "[Two- to three-line founder bio placeholder.]",
   },
   {
     initial: "B",
     name: "[Founder Name]",
     role: "[Role]",
-    bio: "Industrial design and brand. Previously led product at companies you have heard of.",
+    bio: "[Two- to three-line founder bio placeholder.]",
   },
   {
     initial: "C",
     name: "[Founder Name]",
     role: "[Role]",
-    bio: "Operations, manufacturing, and the realities of moving atoms at scale.",
+    bio: "[Two- to three-line founder bio placeholder.]",
   },
 ];
 
-const ASSETS = [
-  // TODO: place real brand asset downloads in /public
-  { label: "Wordmark — SVG", href: "/brand/wordmark.svg" },
-  { label: "Wordmark — PNG", href: "/brand/wordmark.png" },
-  { label: "Wordmark — PDF", href: "/brand/wordmark.pdf" },
+// Real wordmark currently only exists as the placeholder SVG.
+// TODO: add wordmark.png and wordmark.pdf to /public/brand and mark them ready
+const ASSETS: Array<{ label: string; href: string; ready: boolean }> = [
+  { label: "Wordmark — SVG", href: "/brand/wordmark.svg", ready: true },
+  { label: "Wordmark — PNG", href: "/brand/wordmark.png", ready: false },
+  { label: "Wordmark — PDF", href: "/brand/wordmark.pdf", ready: false },
 ];
 
 export default function PressPage() {
@@ -77,16 +78,28 @@ export default function PressPage() {
         <section className="mt-24 border-t border-fg-faint/40 pt-16">
           <EyebrowLabel>Brand assets</EyebrowLabel>
           <ul className="mt-10 space-y-4">
-            {ASSETS.map((a) => (
-              <li key={a.label}>
-                <a
-                  href={a.href}
-                  className="text-body-lg link-underline hover:text-accent transition-colors"
+            {ASSETS.map((a) =>
+              a.ready ? (
+                <li key={a.label}>
+                  <a
+                    href={a.href}
+                    className="text-body-lg link-underline hover:text-accent transition-colors"
+                  >
+                    {a.label} ↓
+                  </a>
+                </li>
+              ) : (
+                <li
+                  key={a.label}
+                  className="text-body-lg text-fg-muted flex items-baseline gap-3"
                 >
-                  {a.label} ↓
-                </a>
-              </li>
-            ))}
+                  <span>{a.label}</span>
+                  <span className="text-xs font-mono tracking-eyebrow uppercase text-fg-faint">
+                    Coming soon
+                  </span>
+                </li>
+              ),
+            )}
           </ul>
         </section>
 

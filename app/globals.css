@@ -27,12 +27,13 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  max-width: 100%;
+  overflow-x: clip;
 }
 
 body {
   position: relative;
   min-height: 100vh;
-  overflow-x: hidden;
   background-color: var(--bg);
   background-image:
     radial-gradient(
@@ -112,14 +113,20 @@ select {
   border-radius: 2px;
 }
 
-/* Reduced motion: kill decorative motion, keep essentials */
+/*
+ * Reduced motion:
+ *  - Kill CSS keyframe animations and any long transitions outright.
+ *  - Preserve short transitions (≤300ms) so hover/focus state changes still feel responsive,
+ *    per the brief: "keep only essential transitions (hover state changes, modal opens)".
+ *  - Framer Motion is wrapped in <MotionConfig reducedMotion="user"> at the app root,
+ *    which independently skips entrance/decorative motion for these users.
+ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
 }
@@ -129,6 +136,9 @@ select {
   font-family: var(--font-display), Georgia, serif;
   letter-spacing: -0.02em;
   line-height: 1.02;
+  /* Break the rare oversized word (e.g. "infrastructure") before it overflows a narrow viewport. */
+  overflow-wrap: break-word;
+  hyphens: auto;
 }
 
 .eyebrow {

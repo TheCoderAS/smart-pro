@@ -20,10 +20,11 @@ const config: Config = {
         mono: ["var(--font-mono)", "ui-monospace", "monospace"],
       },
       fontSize: {
-        hero: "clamp(3.5rem, 9vw, 8rem)",
-        h1: "clamp(2.5rem, 6vw, 5rem)",
-        h2: "clamp(1.75rem, 3vw, 2.5rem)",
-        "body-lg": "clamp(1.125rem, 1.5vw, 1.5rem)",
+        // Mins lowered so long words ("infrastructure") fit on a 375px viewport.
+        hero: "clamp(2.5rem, 9vw, 8rem)",
+        h1: "clamp(1.875rem, 6vw, 5rem)",
+        h2: "clamp(1.5rem, 3vw, 2.5rem)",
+        "body-lg": "clamp(1.0625rem, 1.5vw, 1.5rem)",
       },
       letterSpacing: {
         display: "-0.02em",

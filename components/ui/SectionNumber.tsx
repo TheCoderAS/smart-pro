@@ -25,7 +25,8 @@ export function SectionNumber({ number, side = "right", className }: Props) {
       aria-hidden
       className={cn(
         "pointer-events-none absolute top-1/2 -translate-y-1/2 select-none",
-        side === "left" ? "-left-12 lg:-left-24" : "-right-12 lg:-right-24",
+        // Smaller offset on mobile keeps the number from sitting on top of text.
+        side === "left" ? "-left-6 md:-left-12 lg:-left-24" : "-right-6 md:-right-12 lg:-right-24",
         className,
       )}
     >
@@ -34,7 +35,9 @@ export function SectionNumber({ number, side = "right", className }: Props) {
         className="font-display font-light text-fg-faint/30 leading-none"
       >
         <span
-          style={{ fontSize: "clamp(12rem, 25vw, 24rem)" }}
+          // Min reduced from 12rem to 5rem so the number stays a faint background ornament
+          // on a 375px viewport instead of dominating the section.
+          style={{ fontSize: "clamp(5rem, 22vw, 24rem)" }}
           className="block"
         >
           {number}
