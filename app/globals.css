@@ -112,14 +112,20 @@ select {
   border-radius: 2px;
 }
 
-/* Reduced motion: kill decorative motion, keep essentials */
+/*
+ * Reduced motion:
+ *  - Kill CSS keyframe animations and any long transitions outright.
+ *  - Preserve short transitions (≤300ms) so hover/focus state changes still feel responsive,
+ *    per the brief: "keep only essential transitions (hover state changes, modal opens)".
+ *  - Framer Motion is wrapped in <MotionConfig reducedMotion="user"> at the app root,
+ *    which independently skips entrance/decorative motion for these users.
+ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
 }
