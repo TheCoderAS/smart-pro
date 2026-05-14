@@ -5,15 +5,11 @@ import { SMOOTH } from "@/lib/motion";
 import { RevealText } from "@/components/ui/RevealText";
 import { Button } from "@/components/ui/Button";
 import { HeroSchematic } from "@/components/illustrations/HeroSchematic";
-import { NodesBackground } from "@/components/illustrations/NodesBackground";
 
 export function Hero() {
   return (
     <section className="relative pt-40 pb-[clamp(6rem,12vw,12rem)] overflow-hidden">
-      {/* Ambient connected-nodes mesh, behind everything in this section */}
-      <NodesBackground />
-
-      <div className="relative max-w-content mx-auto px-6 lg:px-24">
+      <div className="max-w-content mx-auto px-6 lg:px-24">
         <motion.div
           initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
           animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}

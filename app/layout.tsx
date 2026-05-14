@@ -6,6 +6,7 @@ import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { ScrollProgress } from "@/components/layout/ScrollProgress";
 import { ReducedMotionProvider } from "@/components/layout/ReducedMotionProvider";
+import { NodesBackground } from "@/components/illustrations/NodesBackground";
 
 const fraunces = Fraunces({
   subsets: ["latin"],
@@ -65,6 +66,7 @@ export default function RootLayout({
     >
       <body>
         <ReducedMotionProvider>
+          <NodesBackground />
           <ScrollProgress />
           <Nav />
           <main>{children}</main>
