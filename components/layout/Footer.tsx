@@ -72,7 +72,7 @@ const SOCIALS = [
 
 export function Footer() {
   return (
-    <footer className="border-t border-fg-faint/50 mt-32">
+    <footer className="bg-black border-t border-fg-faint/50 mt-32">
       <div className="max-w-content mx-auto px-6 lg:px-24 py-20">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-12">
           <div className="md:col-span-4">
