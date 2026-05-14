@@ -2,7 +2,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Privacy — [BRAND]",
+  title: "Privacy — Unisync",
 };
 
 export default function PrivacyPage() {
@@ -14,7 +14,7 @@ export default function PrivacyPage() {
 
         <div className="prose-custom space-y-6 text-fg/90 leading-relaxed">
           <p>
-            This page describes how [BRAND] collects, uses, and protects
+            This page describes how Unisync collects, uses, and protects
             information when you visit this website or sign up for early access.
             It is a placeholder template. The final version of this policy will
             be reviewed by counsel before public launch.
@@ -22,7 +22,7 @@ export default function PrivacyPage() {
           <h2 className="font-display text-h2 mt-12">What we collect</h2>
           <p>
             If you submit your email through one of our forms, we store that
-            email so we can contact you about [BRAND]. We do not sell your
+            email so we can contact you about Unisync. We do not sell your
             data, ever.
           </p>
           <h2 className="font-display text-h2 mt-12">Cookies</h2>
@@ -34,10 +34,10 @@ export default function PrivacyPage() {
           <p>
             For any privacy-related questions, write to{" "}
             <a
-              href="mailto:privacy@brand.com"
+              href="mailto:aalokmamtasah@gmail.com"
               className="link-underline hover:text-accent transition-colors"
             >
-              privacy@brand.com
+              aalokmamtasah@gmail.com
             </a>
             .
           </p>

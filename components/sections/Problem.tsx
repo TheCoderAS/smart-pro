@@ -7,10 +7,12 @@ import { SectionNumber } from "@/components/ui/SectionNumber";
 import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
 
 const PARAGRAPHS = [
-  "The expensive ones cost as much as a phone, for a switch. The cheap ones stop working when a Chinese server goes dark.",
+  "The expensive ones cost as much as a phone, for a switch. The cheap ones stop working when a server somewhere goes dark.",
   "Both require an electrician for a day, a re-wiring of the board, and a bet that the company that sold it to you will still exist in three years.",
   "Most of them, in most homes, end up on a manual override within a month. Not because the technology failed. Because the product was never made for the way people actually live.",
 ];
+
+const CLOSING_LINE = "The product is fine. The architecture is wrong.";
 
 export function Problem() {
   return (
@@ -67,6 +69,20 @@ export function Problem() {
                   {p}
                 </motion.p>
               ))}
+
+              <motion.p
+                variants={{
+                  hidden: { opacity: 0, y: 16 },
+                  visible: {
+                    opacity: 1,
+                    y: 0,
+                    transition: { duration: 0.8, ease: SMOOTH },
+                  },
+                }}
+                className="font-display text-h2 text-fg pt-6"
+              >
+                {CLOSING_LINE}
+              </motion.p>
             </motion.div>
           </div>
         </div>

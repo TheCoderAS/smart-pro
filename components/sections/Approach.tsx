@@ -8,24 +8,20 @@ import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
 
 const PRINCIPLES = [
   {
-    n: "i",
-    title: "Local first",
-    body: "If your internet dies, your lights do not. Everything that matters works without us.",
+    title: "Networked first",
+    body: "Switches in different rooms talk to each other. Your whole home is one system, not four lonely switchboards.",
   },
   {
-    n: "ii",
+    title: "Local always",
+    body: "Wi-Fi can go down. The cloud can go away. Your lights work either way — schedules, scenes, and physical switches all run on the wall, not in the sky.",
+  },
+  {
     title: "Open by default",
     body: "Your switches should work with whatever app, voice, or system you already use. Not just ours.",
   },
   {
-    n: "iii",
     title: "Built for installers",
     body: "The person fitting it to your wall is our customer too. We design for the ladder, not just the couch.",
-  },
-  {
-    n: "iv",
-    title: "Honest hardware",
-    body: "Mains voltage deserves engineering discipline, not consumer-electronics corner-cutting. We over-build, on purpose.",
   },
 ];
 
@@ -35,7 +31,7 @@ export function Approach() {
       id="approach"
       className="relative py-[clamp(6rem,12vw,12rem)] border-t border-fg-faint/40 overflow-hidden"
     >
-      <SectionNumber number="02" side="left" />
+      <SectionNumber number="03" side="left" />
 
       <div className="relative max-w-content mx-auto px-6 lg:px-24">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
@@ -46,7 +42,7 @@ export function Approach() {
               viewport={VIEWPORT_ONCE}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
-              <EyebrowLabel withMark>02 — Our approach</EyebrowLabel>
+              <EyebrowLabel withMark>03 — Our approach</EyebrowLabel>
             </motion.div>
           </div>
 
@@ -81,7 +77,7 @@ export function Approach() {
         >
           {PRINCIPLES.map((p) => (
             <motion.div
-              key={p.n}
+              key={p.title}
               variants={{
                 hidden: { opacity: 0, y: 20 },
                 visible: {
@@ -90,11 +86,7 @@ export function Approach() {
                   transition: { duration: 0.8, ease: SMOOTH },
                 },
               }}
-              className="relative pl-10"
             >
-              <div className="absolute left-0 top-1 font-mono text-xs tracking-eyebrow uppercase text-fg-muted">
-                {p.n}
-              </div>
               <h3 className="font-display text-h2 mb-3">{p.title}</h3>
               <p className="text-fg-muted leading-relaxed max-w-md">
                 {p.body}

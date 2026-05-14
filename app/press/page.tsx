@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 
 export const metadata: Metadata = {
-  title: "Press — [BRAND]",
-  description: "Press resources, brand assets, and contact for [BRAND].",
+  title: "Press — Unisync",
+  description: "Press resources, brand assets, and contact for Unisync.",
 };
 
 // TODO: replace founder placeholders with real names, roles, and bios
@@ -42,14 +42,14 @@ export default function PressPage() {
       <div className="max-w-content mx-auto px-6 lg:px-24">
         <EyebrowLabel withMark>Press</EyebrowLabel>
         <h1 className="font-display text-h1 mt-6 mb-12 max-w-3xl">
-          About [BRAND].
+          About Unisync.
         </h1>
 
         <p className="text-body-lg text-fg/90 leading-relaxed max-w-3xl">
-          [BRAND] is a pre-launch hardware company based in India, rebuilding
+          Unisync is a pre-launch hardware company based in India, rebuilding
           the most-touched object in the home. The company is developing a new
           kind of electrical switch, designed to fit the homes, the boards, and
-          the people who actually install them. Founded in [CITY] in 2025.
+          the people who actually install them. Founded in Bangalore in 2025.
         </p>
 
         <section className="mt-24 border-t border-fg-faint/40 pt-16">
@@ -106,10 +106,10 @@ export default function PressPage() {
         <section className="mt-24 border-t border-fg-faint/40 pt-16">
           <EyebrowLabel>Press contact</EyebrowLabel>
           <a
-            href="mailto:press@brand.com"
+            href="mailto:aalokmamtasah@gmail.com"
             className="block mt-6 text-body-lg link-underline hover:text-accent transition-colors"
           >
-            press@brand.com
+            aalokmamtasah@gmail.com
           </a>
         </section>
       </div>
