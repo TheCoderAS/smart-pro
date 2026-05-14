@@ -6,9 +6,14 @@ import { useEffect, useRef } from "react";
  * Full-page connected-nodes mesh.
  *
  *  - Nodes drift slowly across the viewport (gentle ambient motion).
- *    Initial placement is stratified-random for even coverage; on
- *    window resize the positions scale proportionally so the mesh
- *    pattern is preserved.
+ *    Initial placement uses Poisson-disc rejection sampling so no two
+ *    nodes start within MIN_DISTANCE of each other; a per-frame
+ *    repulsion keeps that constraint while they drift.
+ *  - The target node count auto-scales to what the viewport can hold
+ *    at MIN_DISTANCE spacing (capped at NODE_COUNT_MAX). Small screens
+ *    get a sparser mesh; large screens get the full count.
+ *  - Motion is strictly planar (2D x/y); no depth dimension, no
+ *    parallax, no scale-by-z effects.
  *  - Edges are rebuilt every frame: all pairs within CONNECT_DISTANCE
  *    are candidates, sorted by distance and greedily added so no node
  *    exceeds MAX_DEGREE peer connections. Any node still isolated
@@ -25,8 +30,7 @@ import { useEffect, useRef } from "react";
  *  - `visibilitychange` pauses the loop when the tab is hidden.
  *  - Skipped entirely for `prefers-reduced-motion: reduce`.
  *  - DPR capped at 2.
- *  - O(N^2) edge build per frame on N=60 ≈ 1.8k checks + small sort,
- *    plus a quick fallback pass — trivial.
+ *  - Two O(N^2) passes per frame (repulsion + edge build) on N ≤ 60.
  */
 export function NodesBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -50,8 +54,9 @@ export function NodesBackground() {
     let height = 0;
 
     // Tuning
-    const NODE_COUNT = 60;
-    const CONNECT_DISTANCE = 220;
+    const NODE_COUNT_MAX = 60;
+    const MIN_DISTANCE = 150; // no two nodes ever closer than this
+    const CONNECT_DISTANCE = 260; // edge threshold (must be > MIN_DISTANCE so peers can still connect)
     const MAX_DEGREE = 8; // max peer connections per node (cursor link is separate)
     const DRIFT = 0.08; // base velocity, px per ~16ms frame
     const NODE_RADIUS = 1.8;
@@ -68,40 +73,41 @@ export function NodesBackground() {
 
     const pointer = { x: -10000, y: -10000, active: false };
 
-    // Stratified random placement — divide viewport into a grid, pick a random cell
-    // per node, jitter inside the cell. Even visual coverage, no clumping.
+    // Poisson-disc rejection sampling — keep trying random positions until
+    // we find one at least MIN_DISTANCE from every existing node. Auto-caps
+    // the count at what the viewport can hold so small screens don't try
+    // to pack 60 nodes into 13 nodes' worth of space.
     const seed = () => {
-      const aspect = width / height;
-      let cols = Math.max(1, Math.round(Math.sqrt(NODE_COUNT * aspect)));
-      let rows = Math.max(1, Math.ceil(NODE_COUNT / cols));
-      while (rows * cols < NODE_COUNT) cols++;
-      const cellW = width / cols;
-      const cellH = height / rows;
-
-      const allCells: Array<[number, number]> = [];
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          allCells.push([r, c]);
-        }
-      }
-      for (let k = allCells.length - 1; k > 0; k--) {
-        const m = Math.floor(Math.random() * (k + 1));
-        const tmp = allCells[k];
-        allCells[k] = allCells[m];
-        allCells[m] = tmp;
-      }
+      // Empirical: each Poisson-disc node "owns" ~0.9 × MIN_DISTANCE^2 of area.
+      const areaPerNode = MIN_DISTANCE * MIN_DISTANCE * 0.9;
+      const fitsCount = Math.floor((width * height) / areaPerNode);
+      const target = Math.max(8, Math.min(NODE_COUNT_MAX, fitsCount));
 
       nodes = [];
-      for (let k = 0; k < NODE_COUNT; k++) {
-        const [r, c] = allCells[k];
-        const jx = 0.15 + Math.random() * 0.7;
-        const jy = 0.15 + Math.random() * 0.7;
-        nodes.push({
-          x: (c + jx) * cellW,
-          y: (r + jy) * cellH,
-          vx: (Math.random() - 0.5) * DRIFT * 2,
-          vy: (Math.random() - 0.5) * DRIFT * 2,
-        });
+      const minD2 = MIN_DISTANCE * MIN_DISTANCE;
+      const maxAttempts = target * 80;
+      let attempts = 0;
+      while (nodes.length < target && attempts < maxAttempts) {
+        attempts++;
+        const x = Math.random() * width;
+        const y = Math.random() * height;
+        let ok = true;
+        for (const n of nodes) {
+          const dx = n.x - x;
+          const dy = n.y - y;
+          if (dx * dx + dy * dy < minD2) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) {
+          nodes.push({
+            x,
+            y,
+            vx: (Math.random() - 0.5) * DRIFT * 2,
+            vy: (Math.random() - 0.5) * DRIFT * 2,
+          });
+        }
       }
     };
 
@@ -275,23 +281,51 @@ export function NodesBackground() {
       const dt = Math.min((t - lastT) / 16.67, 2);
       lastT = t;
 
-      // Drift positions, bounce off viewport edges.
+      // Drift
       for (const n of nodes) {
         n.x += n.vx * dt;
         n.y += n.vy * dt;
+      }
+
+      // Min-distance repulsion — any pair closer than MIN_DISTANCE is pushed
+      // apart along the line between them. Push is capped per frame so
+      // overlap resolves smoothly over several frames rather than snapping.
+      const minD2 = MIN_DISTANCE * MIN_DISTANCE;
+      const maxPush = MIN_DISTANCE * 0.1;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const dx = nodes[i].x - nodes[j].x;
+          const dy = nodes[i].y - nodes[j].y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < minD2 && d2 > 0.0001) {
+            const d = Math.sqrt(d2);
+            const overlap = MIN_DISTANCE - d;
+            const push = Math.min(overlap * 0.5, maxPush);
+            const nx = (dx / d) * push;
+            const ny = (dy / d) * push;
+            nodes[i].x += nx;
+            nodes[i].y += ny;
+            nodes[j].x -= nx;
+            nodes[j].y -= ny;
+          }
+        }
+      }
+
+      // Viewport bounce — applied after repulsion so a pushed node can't escape the canvas.
+      for (const n of nodes) {
         if (n.x < 0) {
           n.x = 0;
-          n.vx *= -1;
+          n.vx = Math.abs(n.vx);
         } else if (n.x > width) {
           n.x = width;
-          n.vx *= -1;
+          n.vx = -Math.abs(n.vx);
         }
         if (n.y < 0) {
           n.y = 0;
-          n.vy *= -1;
+          n.vy = Math.abs(n.vy);
         } else if (n.y > height) {
           n.y = height;
-          n.vy *= -1;
+          n.vy = -Math.abs(n.vy);
         }
       }
 
