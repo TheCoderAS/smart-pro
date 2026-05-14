@@ -23,6 +23,7 @@ const COLUMNS = [
     title: "Resources",
     links: [
       { label: "Early access", href: "/#waitlist" },
+      { label: "Brochure (PDF)", href: "/Smart_Switch_Pitch_v1.pdf", download: true },
       {
         label: "Investors",
         href: "mailto:aalokmamtasah@gmail.com?subject=Investors",
@@ -87,16 +88,24 @@ export function Footer() {
                 <div className="eyebrow mb-4">{col.title}</div>
                 <ul className="space-y-3">
                   {col.links.map((link) => {
-                    const isAnchorOrMail =
+                    const linkClass =
+                      "text-sm text-fg-muted hover:text-fg link-underline";
+                    // Use a plain <a> for in-page anchors, mailto, and downloadable static files;
+                    // Next <Link> for in-app route navigation.
+                    const isPlainAnchor =
                       link.href.startsWith("#") ||
                       link.href.startsWith("/#") ||
-                      link.href.startsWith("mailto:");
-                    if (isAnchorOrMail) {
+                      link.href.startsWith("mailto:") ||
+                      "download" in link;
+                    if (isPlainAnchor) {
                       return (
                         <li key={link.label}>
                           <a
                             href={link.href}
-                            className="text-sm text-fg-muted hover:text-fg link-underline"
+                            className={linkClass}
+                            {...("download" in link && link.download
+                              ? { download: true }
+                              : {})}
                           >
                             {link.label}
                           </a>
@@ -105,10 +114,7 @@ export function Footer() {
                     }
                     return (
                       <li key={link.label}>
-                        <Link
-                          href={link.href}
-                          className="text-sm text-fg-muted hover:text-fg link-underline"
-                        >
+                        <Link href={link.href} className={linkClass}>
                           {link.label}
                         </Link>
                       </li>

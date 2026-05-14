@@ -51,6 +51,16 @@ export function Hero() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 2.1, duration: 0.6, ease: SMOOTH }}
+            href="/Smart_Switch_Pitch_v1.pdf"
+            download
+            className="text-sm text-fg-muted hover:text-accent link-underline inline-flex items-center gap-2 transition-colors duration-300"
+          >
+            Download brochure <span aria-hidden>↓</span>
+          </motion.a>
+          <motion.a
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 2.2, duration: 0.6, ease: SMOOTH }}
             href="mailto:aalokmamtasah@gmail.com"
             className="text-sm text-fg-muted hover:text-accent link-underline inline-flex items-center gap-2 transition-colors duration-300"
           >
@@ -61,7 +71,7 @@ export function Hero() {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ delay: 2.2, duration: 0.6, ease: SMOOTH }}
+          transition={{ delay: 2.3, duration: 0.6, ease: SMOOTH }}
           className="mt-24 lg:mt-32"
         >
           <HeroSchematic />
