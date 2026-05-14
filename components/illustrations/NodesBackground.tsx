@@ -3,23 +3,29 @@
 import { useEffect, useRef } from "react";
 
 /**
- * Full-page connected-nodes mesh that dramatises the product story:
- *  - Drifting peer nodes scattered across the viewport.
- *  - The cursor is the "user". A small accent marker tracks it.
- *  - The nearest physical node to the cursor is the "main". An accent
- *    line runs from cursor → main, and brighter accent lines fan out
- *    from main → its in-range peers.
- *  - Every node is guaranteed at least one connection — if no peer is
- *    within the threshold, a faint fallback line is drawn to its
- *    single nearest neighbour.
+ * Full-page connected-nodes mesh.
+ *
+ *  - Nodes are **static** — placed once at mount with stratified-random
+ *    distribution, then they don't move. On window resize their
+ *    positions scale proportionally (mesh pattern is preserved).
+ *  - Edges are computed once per layout: every pair within
+ *    CONNECT_DISTANCE is a candidate, sorted by distance, greedily
+ *    added so no node exceeds MAX_DEGREE peer connections. Any node
+ *    still isolated after that gets one fallback edge to its nearest
+ *    neighbour (guaranteeing every node has ≥1 connection).
+ *  - The cursor is the "user". The nearest node to the cursor is the
+ *    "main". An accent line runs from cursor → main, independent of
+ *    the MAX_DEGREE cap (the "+1 user connection"). The main is
+ *    rendered larger, accent-coloured, with a softer outer ring, and
+ *    its peer connections are drawn in accent.
  *
  * Performance discipline:
- *  - Single canvas, single RAF loop.
- *  - `position: fixed` covers the viewport regardless of scroll.
- *  - `visibilitychange` pauses the loop when the tab is hidden.
+ *  - No continuous animation loop. The canvas repaints only when the
+ *    pointer moves (RAF-batched) or the window resizes. CPU at idle: 0.
  *  - Skipped entirely for `prefers-reduced-motion: reduce`.
  *  - DPR capped at 2.
- *  - O(N^2) scan on ~60 nodes ≈ 1.8k checks per frame.
+ *  - O(N^2) edge build runs once per layout; per-frame work is O(N + E)
+ *    with N=60, E ≤ 240.
  */
 export function NodesBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -44,163 +50,177 @@ export function NodesBackground() {
 
     // Tuning
     const NODE_COUNT = 60;
-    const CONNECT_DISTANCE = 200;
-    const DRIFT = 0.2;
+    const CONNECT_DISTANCE = 220;
+    const MAX_DEGREE = 8; // max peer connections per node (cursor link is separate)
     const NODE_RADIUS = 1.8;
     const MAIN_RADIUS = 4.5;
     const CURSOR_RADIUS = 3;
-    const POINTER_REACH = 360; // cursor must be at least this close to *some* node to "activate"
+    const POINTER_REACH = 360; // cursor must be within this distance of *some* node to activate
     const ACCENT = "217, 119, 87";
     const MUTED = "138, 135, 128";
 
-    type Node = { x: number; y: number; vx: number; vy: number };
+    type Node = { x: number; y: number };
+    type Edge = { i: number; j: number; d: number };
     let nodes: Node[] = [];
+    let edges: Edge[] = [];
 
     const pointer = { x: -10000, y: -10000, active: false };
 
+    // Stratified random sampling — divide the viewport into a grid,
+    // pick a random cell per node, jitter inside the cell. Gives
+    // visually even coverage with no aggressive clustering.
     const seed = () => {
-      nodes = Array.from({ length: NODE_COUNT }, () => ({
-        x: Math.random() * width,
-        y: Math.random() * height,
-        vx: (Math.random() - 0.5) * DRIFT * 2,
-        vy: (Math.random() - 0.5) * DRIFT * 2,
-      }));
-    };
+      const aspect = width / height;
+      let cols = Math.max(1, Math.round(Math.sqrt(NODE_COUNT * aspect)));
+      let rows = Math.max(1, Math.ceil(NODE_COUNT / cols));
+      while (rows * cols < NODE_COUNT) cols++;
+      const cellW = width / cols;
+      const cellH = height / rows;
 
-    const resize = () => {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (nodes.length === 0) seed();
-    };
-
-    resize();
-    window.addEventListener("resize", resize);
-
-    const onPointerMove = (e: PointerEvent) => {
-      pointer.x = e.clientX;
-      pointer.y = e.clientY;
-      pointer.active = true;
-    };
-    const onPointerOut = (e: PointerEvent) => {
-      // Only deactivate when the cursor leaves the window entirely.
-      if (e.relatedTarget === null) {
-        pointer.active = false;
-      }
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerout", onPointerOut);
-
-    let raf = 0;
-    let lastT = performance.now();
-    let running = true;
-
-    const step = (t: number) => {
-      const dt = Math.min((t - lastT) / 16.67, 2);
-      lastT = t;
-
-      ctx.clearRect(0, 0, width, height);
-
-      // Drift positions
-      for (const n of nodes) {
-        n.x += n.vx * dt;
-        n.y += n.vy * dt;
-        if (n.x < 0) {
-          n.x = 0;
-          n.vx *= -1;
-        } else if (n.x > width) {
-          n.x = width;
-          n.vx *= -1;
-        }
-        if (n.y < 0) {
-          n.y = 0;
-          n.vy *= -1;
-        } else if (n.y > height) {
-          n.y = height;
-          n.vy *= -1;
+      const allCells: Array<[number, number]> = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          allCells.push([r, c]);
         }
       }
-
-      // Find the main: nearest physical node to the pointer
-      let mainIdx = -1;
-      if (pointer.active) {
-        let bestD = Infinity;
-        for (let i = 0; i < nodes.length; i++) {
-          const dx = nodes[i].x - pointer.x;
-          const dy = nodes[i].y - pointer.y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < bestD) {
-            bestD = d2;
-            mainIdx = i;
-          }
-        }
-        if (bestD > POINTER_REACH * POINTER_REACH) mainIdx = -1;
+      // Fisher-Yates shuffle, then take the first NODE_COUNT cells.
+      for (let k = allCells.length - 1; k > 0; k--) {
+        const m = Math.floor(Math.random() * (k + 1));
+        const tmp = allCells[k];
+        allCells[k] = allCells[m];
+        allCells[m] = tmp;
       }
 
-      // Track which nodes have at least one in-range connection so we can
-      // backfill isolated nodes with a fallback nearest-neighbour edge.
-      const hasConnection = new Array<boolean>(nodes.length).fill(false);
+      nodes = [];
+      for (let k = 0; k < NODE_COUNT; k++) {
+        const [r, c] = allCells[k];
+        const jx = 0.15 + Math.random() * 0.7;
+        const jy = 0.15 + Math.random() * 0.7;
+        nodes.push({
+          x: (c + jx) * cellW,
+          y: (r + jy) * cellH,
+        });
+      }
+    };
 
-      // First pass: all in-range pairs
+    // Greedy edge construction: shortest candidate edges first, capped at MAX_DEGREE per node.
+    // Then a fallback pass guarantees ≥1 connection per node.
+    const buildEdges = () => {
+      const cands: Edge[] = [];
       for (let i = 0; i < nodes.length; i++) {
-        const a = nodes[i];
         for (let j = i + 1; j < nodes.length; j++) {
-          const b = nodes[j];
-          const dx = a.x - b.x;
-          const dy = a.y - b.y;
+          const dx = nodes[i].x - nodes[j].x;
+          const dy = nodes[i].y - nodes[j].y;
           const d2 = dx * dx + dy * dy;
           if (d2 < CONNECT_DISTANCE * CONNECT_DISTANCE) {
-            const d = Math.sqrt(d2);
-            const isMainConn = i === mainIdx || j === mainIdx;
-            if (isMainConn) {
-              const alpha = (1 - d / CONNECT_DISTANCE) * 0.7;
-              ctx.strokeStyle = `rgba(${ACCENT}, ${alpha})`;
-              ctx.lineWidth = 1.3;
-            } else {
-              const alpha = (1 - d / CONNECT_DISTANCE) * 0.4;
-              ctx.strokeStyle = `rgba(${MUTED}, ${alpha})`;
-              ctx.lineWidth = 1;
-            }
-            ctx.beginPath();
-            ctx.moveTo(a.x, a.y);
-            ctx.lineTo(b.x, b.y);
-            ctx.stroke();
-            hasConnection[i] = true;
-            hasConnection[j] = true;
+            cands.push({ i, j, d: Math.sqrt(d2) });
           }
         }
       }
+      cands.sort((a, b) => a.d - b.d);
 
-      // Second pass: every isolated node gets one fallback line to its nearest neighbour
-      ctx.lineWidth = 1;
+      const deg = new Array<number>(nodes.length).fill(0);
+      edges = [];
+      for (const c of cands) {
+        if (deg[c.i] >= MAX_DEGREE) continue;
+        if (deg[c.j] >= MAX_DEGREE) continue;
+        edges.push(c);
+        deg[c.i]++;
+        deg[c.j]++;
+      }
+
+      // Backfill: any node still at degree 0 gets one edge to its absolute nearest neighbour.
+      // This may push the neighbour over MAX_DEGREE — that's acceptable to keep the "no isolated node" guarantee.
       for (let i = 0; i < nodes.length; i++) {
-        if (hasConnection[i]) continue;
-        const a = nodes[i];
+        if (deg[i] > 0) continue;
         let nearestJ = -1;
-        let nearestD2 = Infinity;
+        let nearestD = Infinity;
         for (let j = 0; j < nodes.length; j++) {
           if (j === i) continue;
-          const dx = a.x - nodes[j].x;
-          const dy = a.y - nodes[j].y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < nearestD2) {
-            nearestD2 = d2;
+          const dx = nodes[i].x - nodes[j].x;
+          const dy = nodes[i].y - nodes[j].y;
+          const d = Math.hypot(dx, dy);
+          if (d < nearestD) {
+            nearestD = d;
             nearestJ = j;
           }
         }
         if (nearestJ >= 0) {
-          ctx.strokeStyle = `rgba(${MUTED}, 0.22)`;
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(nodes[nearestJ].x, nodes[nearestJ].y);
-          ctx.stroke();
-          hasConnection[i] = true;
+          edges.push({ i, j: nearestJ, d: nearestD });
+          deg[i]++;
+          deg[nearestJ]++;
         }
       }
+    };
 
-      // Cursor → main link (the "user is connected to the master node")
+    const resize = () => {
+      const newW = window.innerWidth;
+      const newH = window.innerHeight;
+      const oldW = width;
+      const oldH = height;
+      width = newW;
+      height = newH;
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      if (nodes.length === 0) {
+        seed();
+      } else if (oldW > 0 && oldH > 0) {
+        // Preserve the mesh pattern through resize by scaling positions proportionally.
+        const sx = newW / oldW;
+        const sy = newH / oldH;
+        for (const n of nodes) {
+          n.x *= sx;
+          n.y *= sy;
+        }
+      }
+      buildEdges();
+      draw();
+    };
+
+    const findMain = (): number => {
+      if (!pointer.active) return -1;
+      let best = -1;
+      let bestD = Infinity;
+      for (let i = 0; i < nodes.length; i++) {
+        const dx = nodes[i].x - pointer.x;
+        const dy = nodes[i].y - pointer.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD) {
+          bestD = d2;
+          best = i;
+        }
+      }
+      if (bestD > POINTER_REACH * POINTER_REACH) return -1;
+      return best;
+    };
+
+    const draw = () => {
+      ctx.clearRect(0, 0, width, height);
+      const mainIdx = findMain();
+
+      // Edges — main-incident ones in accent, the rest in muted.
+      for (const e of edges) {
+        const a = nodes[e.i];
+        const b = nodes[e.j];
+        const isMainEdge = e.i === mainIdx || e.j === mainIdx;
+        if (isMainEdge) {
+          const alpha = (1 - e.d / CONNECT_DISTANCE) * 0.75;
+          ctx.strokeStyle = `rgba(${ACCENT}, ${alpha})`;
+          ctx.lineWidth = 1.3;
+        } else {
+          const alpha = (1 - e.d / CONNECT_DISTANCE) * 0.45;
+          ctx.strokeStyle = `rgba(${MUTED}, ${alpha})`;
+          ctx.lineWidth = 1;
+        }
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // Cursor → main link — the "+1 user connection", outside the MAX_DEGREE budget.
       if (pointer.active && mainIdx >= 0) {
         const m = nodes[mainIdx];
         ctx.strokeStyle = `rgba(${ACCENT}, 0.75)`;
@@ -221,7 +241,7 @@ export function NodesBackground() {
         ctx.fill();
       }
 
-      // Main node — accent, larger, ringed
+      // Main node
       if (mainIdx >= 0) {
         const m = nodes[mainIdx];
         ctx.fillStyle = `rgba(${ACCENT}, 0.95)`;
@@ -235,7 +255,7 @@ export function NodesBackground() {
         ctx.stroke();
       }
 
-      // Cursor marker — the "user" node
+      // Cursor marker
       if (pointer.active) {
         ctx.fillStyle = `rgba(${ACCENT}, 0.9)`;
         ctx.beginPath();
@@ -247,31 +267,45 @@ export function NodesBackground() {
         ctx.arc(pointer.x, pointer.y, CURSOR_RADIUS + 4, 0, Math.PI * 2);
         ctx.stroke();
       }
-
-      if (running) raf = requestAnimationFrame(step);
     };
 
-    raf = requestAnimationFrame(step);
+    // RAF-batched repaint scheduler — coalesces bursts of pointermove events
+    // into one repaint per frame at most.
+    let scheduled = false;
+    const requestDraw = () => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        draw();
+      });
+    };
 
-    const onVisibility = () => {
-      if (document.hidden) {
-        running = false;
-        if (raf) cancelAnimationFrame(raf);
-      } else if (!running) {
-        running = true;
-        lastT = performance.now();
-        raf = requestAnimationFrame(step);
+    resize();
+
+    const onResize = () => resize();
+    const onPointerMove = (e: PointerEvent) => {
+      pointer.x = e.clientX;
+      pointer.y = e.clientY;
+      pointer.active = true;
+      requestDraw();
+    };
+    const onPointerOut = (e: PointerEvent) => {
+      // Only deactivate when the cursor leaves the window entirely.
+      if (e.relatedTarget === null) {
+        pointer.active = false;
+        requestDraw();
       }
     };
-    document.addEventListener("visibilitychange", onVisibility);
+
+    window.addEventListener("resize", onResize);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerout", onPointerOut);
 
     return () => {
-      running = false;
-      if (raf) cancelAnimationFrame(raf);
-      window.removeEventListener("resize", resize);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerout", onPointerOut);
-      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
