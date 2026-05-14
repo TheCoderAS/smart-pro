@@ -5,27 +5,28 @@ import { useEffect, useRef } from "react";
 /**
  * Full-page connected-nodes mesh.
  *
- *  - Nodes are **static** — placed once at mount with stratified-random
- *    distribution, then they don't move. On window resize their
- *    positions scale proportionally (mesh pattern is preserved).
- *  - Edges are computed once per layout: every pair within
- *    CONNECT_DISTANCE is a candidate, sorted by distance, greedily
- *    added so no node exceeds MAX_DEGREE peer connections. Any node
- *    still isolated after that gets one fallback edge to its nearest
- *    neighbour (guaranteeing every node has ≥1 connection).
+ *  - Nodes drift slowly across the viewport (gentle ambient motion).
+ *    Initial placement is stratified-random for even coverage; on
+ *    window resize the positions scale proportionally so the mesh
+ *    pattern is preserved.
+ *  - Edges are rebuilt every frame: all pairs within CONNECT_DISTANCE
+ *    are candidates, sorted by distance and greedily added so no node
+ *    exceeds MAX_DEGREE peer connections. Any node still isolated
+ *    after that gets one fallback edge to its nearest neighbour, so
+ *    every node always has ≥1 connection.
  *  - The cursor is the "user". The nearest node to the cursor is the
  *    "main". An accent line runs from cursor → main, independent of
  *    the MAX_DEGREE cap (the "+1 user connection"). The main is
- *    rendered larger, accent-coloured, with a softer outer ring, and
- *    its peer connections are drawn in accent.
+ *    rendered larger and accent-coloured, and its peer edges are
+ *    drawn in accent.
  *
  * Performance discipline:
- *  - No continuous animation loop. The canvas repaints only when the
- *    pointer moves (RAF-batched) or the window resizes. CPU at idle: 0.
+ *  - Single canvas, single RAF loop.
+ *  - `visibilitychange` pauses the loop when the tab is hidden.
  *  - Skipped entirely for `prefers-reduced-motion: reduce`.
  *  - DPR capped at 2.
- *  - O(N^2) edge build runs once per layout; per-frame work is O(N + E)
- *    with N=60, E ≤ 240.
+ *  - O(N^2) edge build per frame on N=60 ≈ 1.8k checks + small sort,
+ *    plus a quick fallback pass — trivial.
  */
 export function NodesBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -52,23 +53,23 @@ export function NodesBackground() {
     const NODE_COUNT = 60;
     const CONNECT_DISTANCE = 220;
     const MAX_DEGREE = 8; // max peer connections per node (cursor link is separate)
+    const DRIFT = 0.08; // base velocity, px per ~16ms frame
     const NODE_RADIUS = 1.8;
     const MAIN_RADIUS = 4.5;
     const CURSOR_RADIUS = 3;
-    const POINTER_REACH = 360; // cursor must be within this distance of *some* node to activate
+    const POINTER_REACH = 360;
     const ACCENT = "217, 119, 87";
     const MUTED = "138, 135, 128";
 
-    type Node = { x: number; y: number };
+    type Node = { x: number; y: number; vx: number; vy: number };
     type Edge = { i: number; j: number; d: number };
     let nodes: Node[] = [];
     let edges: Edge[] = [];
 
     const pointer = { x: -10000, y: -10000, active: false };
 
-    // Stratified random sampling — divide the viewport into a grid,
-    // pick a random cell per node, jitter inside the cell. Gives
-    // visually even coverage with no aggressive clustering.
+    // Stratified random placement — divide viewport into a grid, pick a random cell
+    // per node, jitter inside the cell. Even visual coverage, no clumping.
     const seed = () => {
       const aspect = width / height;
       let cols = Math.max(1, Math.round(Math.sqrt(NODE_COUNT * aspect)));
@@ -83,7 +84,6 @@ export function NodesBackground() {
           allCells.push([r, c]);
         }
       }
-      // Fisher-Yates shuffle, then take the first NODE_COUNT cells.
       for (let k = allCells.length - 1; k > 0; k--) {
         const m = Math.floor(Math.random() * (k + 1));
         const tmp = allCells[k];
@@ -99,12 +99,13 @@ export function NodesBackground() {
         nodes.push({
           x: (c + jx) * cellW,
           y: (r + jy) * cellH,
+          vx: (Math.random() - 0.5) * DRIFT * 2,
+          vy: (Math.random() - 0.5) * DRIFT * 2,
         });
       }
     };
 
-    // Greedy edge construction: shortest candidate edges first, capped at MAX_DEGREE per node.
-    // Then a fallback pass guarantees ≥1 connection per node.
+    // Greedy edge construction, capped at MAX_DEGREE. Backfill guarantees ≥1 per node.
     const buildEdges = () => {
       const cands: Edge[] = [];
       for (let i = 0; i < nodes.length; i++) {
@@ -129,8 +130,7 @@ export function NodesBackground() {
         deg[c.j]++;
       }
 
-      // Backfill: any node still at degree 0 gets one edge to its absolute nearest neighbour.
-      // This may push the neighbour over MAX_DEGREE — that's acceptable to keep the "no isolated node" guarantee.
+      // Backfill — any node still at degree 0 gets one edge to its absolute nearest neighbour.
       for (let i = 0; i < nodes.length; i++) {
         if (deg[i] > 0) continue;
         let nearestJ = -1;
@@ -167,7 +167,6 @@ export function NodesBackground() {
       if (nodes.length === 0) {
         seed();
       } else if (oldW > 0 && oldH > 0) {
-        // Preserve the mesh pattern through resize by scaling positions proportionally.
         const sx = newW / oldW;
         const sy = newH / oldH;
         for (const n of nodes) {
@@ -175,8 +174,6 @@ export function NodesBackground() {
           n.y *= sy;
         }
       }
-      buildEdges();
-      draw();
     };
 
     const findMain = (): number => {
@@ -200,20 +197,18 @@ export function NodesBackground() {
       ctx.clearRect(0, 0, width, height);
       const mainIdx = findMain();
 
-      // Edges — main-incident ones in accent, the rest in muted.
-      // Alpha has a brightness floor so even the longest edges remain
-      // clearly visible; the gradient on top gives a subtle near/far cue.
+      // Edges — alpha has a brightness floor so even the longest edges remain visible.
       for (const e of edges) {
         const a = nodes[e.i];
         const b = nodes[e.j];
-        const near = 1 - e.d / CONNECT_DISTANCE; // 1 at zero distance, 0 at threshold
+        const near = 1 - e.d / CONNECT_DISTANCE;
         const isMainEdge = e.i === mainIdx || e.j === mainIdx;
         if (isMainEdge) {
-          const alpha = 0.55 + near * 0.35; // 0.55 → 0.90
+          const alpha = 0.55 + near * 0.35;
           ctx.strokeStyle = `rgba(${ACCENT}, ${alpha})`;
           ctx.lineWidth = 1.3;
         } else {
-          const alpha = 0.35 + near * 0.25; // 0.35 → 0.60
+          const alpha = 0.35 + near * 0.25;
           ctx.strokeStyle = `rgba(${MUTED}, ${alpha})`;
           ctx.lineWidth = 1;
         }
@@ -223,7 +218,7 @@ export function NodesBackground() {
         ctx.stroke();
       }
 
-      // Cursor → main link — the "+1 user connection", outside the MAX_DEGREE budget.
+      // Cursor → main link — outside the MAX_DEGREE cap.
       if (pointer.active && mainIdx >= 0) {
         const m = nodes[mainIdx];
         ctx.strokeStyle = `rgba(${ACCENT}, 0.75)`;
@@ -272,43 +267,77 @@ export function NodesBackground() {
       }
     };
 
-    // RAF-batched repaint scheduler — coalesces bursts of pointermove events
-    // into one repaint per frame at most.
-    let scheduled = false;
-    const requestDraw = () => {
-      if (scheduled) return;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
-        draw();
-      });
+    let raf = 0;
+    let lastT = performance.now();
+    let running = true;
+
+    const step = (t: number) => {
+      const dt = Math.min((t - lastT) / 16.67, 2);
+      lastT = t;
+
+      // Drift positions, bounce off viewport edges.
+      for (const n of nodes) {
+        n.x += n.vx * dt;
+        n.y += n.vy * dt;
+        if (n.x < 0) {
+          n.x = 0;
+          n.vx *= -1;
+        } else if (n.x > width) {
+          n.x = width;
+          n.vx *= -1;
+        }
+        if (n.y < 0) {
+          n.y = 0;
+          n.vy *= -1;
+        } else if (n.y > height) {
+          n.y = height;
+          n.vy *= -1;
+        }
+      }
+
+      buildEdges();
+      draw();
+
+      if (running) raf = requestAnimationFrame(step);
     };
 
     resize();
+    raf = requestAnimationFrame(step);
 
     const onResize = () => resize();
     const onPointerMove = (e: PointerEvent) => {
       pointer.x = e.clientX;
       pointer.y = e.clientY;
       pointer.active = true;
-      requestDraw();
     };
     const onPointerOut = (e: PointerEvent) => {
-      // Only deactivate when the cursor leaves the window entirely.
       if (e.relatedTarget === null) {
         pointer.active = false;
-        requestDraw();
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        running = false;
+        if (raf) cancelAnimationFrame(raf);
+      } else if (!running) {
+        running = true;
+        lastT = performance.now();
+        raf = requestAnimationFrame(step);
       }
     };
 
     window.addEventListener("resize", onResize);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerout", onPointerOut);
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerout", onPointerOut);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
