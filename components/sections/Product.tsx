@@ -4,7 +4,6 @@ import { motion } from "framer-motion";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
 import { SectionNumber } from "@/components/ui/SectionNumber";
-import { ArchitectureDiagram } from "@/components/illustrations/ArchitectureDiagram";
 import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 
 const PARAGRAPHS = [
@@ -89,17 +88,6 @@ export function Product() {
             </motion.div>
           </div>
         </div>
-
-        {/* The architecture diagram — the single most important visual on the page */}
-        <motion.div
-          initial={{ opacity: 0, y: 24 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={VIEWPORT_REPEAT}
-          transition={{ duration: 1.2, ease: SMOOTH, delay: 0.3 }}
-          className="mt-20 lg:mt-28 max-w-5xl mx-auto"
-        >
-          <ArchitectureDiagram />
-        </motion.div>
 
         {/* Sub-bullets that add concrete differentiation */}
         <motion.div

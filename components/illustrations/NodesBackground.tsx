@@ -5,16 +5,19 @@ import { useEffect, useRef } from "react";
 /**
  * Full-page connected-nodes mesh.
  *
+ *  - Always places NODE_COUNT (60) nodes regardless of viewport. When
+ *    the viewport is too small to comfortably fit them at the target
+ *    spacing, the spacing shrinks rather than dropping nodes — the
+ *    mesh density story stays the same on every device, only the gap
+ *    adjusts. CONNECT_DISTANCE scales in lockstep with MIN_DISTANCE
+ *    so the connectivity feel is preserved.
  *  - Nodes drift slowly across the viewport (gentle ambient motion).
  *    Initial placement uses Poisson-disc rejection sampling so no two
- *    nodes start within MIN_DISTANCE of each other; a per-frame
+ *    nodes start within minDistance of each other; a per-frame
  *    repulsion keeps that constraint while they drift.
- *  - The target node count auto-scales to what the viewport can hold
- *    at MIN_DISTANCE spacing (capped at NODE_COUNT_MAX). Small screens
- *    get a sparser mesh; large screens get the full count.
  *  - Motion is strictly planar (2D x/y); no depth dimension, no
  *    parallax, no scale-by-z effects.
- *  - Edges are rebuilt every frame: all pairs within CONNECT_DISTANCE
+ *  - Edges are rebuilt every frame: all pairs within connectDistance
  *    are candidates, sorted by distance and greedily added so no node
  *    exceeds MAX_DEGREE peer connections. Any node still isolated
  *    after that gets one fallback edge to its nearest neighbour, so
@@ -30,7 +33,7 @@ import { useEffect, useRef } from "react";
  *  - `visibilitychange` pauses the loop when the tab is hidden.
  *  - Skipped entirely for `prefers-reduced-motion: reduce`.
  *  - DPR capped at 2.
- *  - Two O(N^2) passes per frame (repulsion + edge build) on N ≤ 60.
+ *  - Two O(N^2) passes per frame (repulsion + edge build) on N = 60.
  */
 export function NodesBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -53,10 +56,10 @@ export function NodesBackground() {
     let width = 0;
     let height = 0;
 
-    // Tuning
-    const NODE_COUNT_MAX = 60;
-    const MIN_DISTANCE = 150; // no two nodes ever closer than this
-    const CONNECT_DISTANCE = 260; // edge threshold (must be > MIN_DISTANCE so peers can still connect)
+    // Tuning targets
+    const NODE_COUNT = 60;
+    const MIN_DISTANCE_TARGET = 150; // ideal min-spacing on a big enough viewport
+    const CONNECT_DISTANCE_RATIO = 260 / 150; // peer-edge threshold relative to min-spacing
     const MAX_DEGREE = 8; // max peer connections per node (cursor link is separate)
     const DRIFT = 0.08; // base velocity, px per ~16ms frame
     const NODE_RADIUS = 1.8;
@@ -66,6 +69,11 @@ export function NodesBackground() {
     const ACCENT = "217, 119, 87";
     const MUTED = "138, 135, 128";
 
+    // Runtime spacing — auto-shrunk on small viewports so all NODE_COUNT
+    // nodes still fit. Recomputed in computeSpacing() on mount and resize.
+    let minDistance = MIN_DISTANCE_TARGET;
+    let connectDistance = MIN_DISTANCE_TARGET * CONNECT_DISTANCE_RATIO;
+
     type Node = { x: number; y: number; vx: number; vy: number };
     type Edge = { i: number; j: number; d: number };
     let nodes: Node[] = [];
@@ -73,21 +81,27 @@ export function NodesBackground() {
 
     const pointer = { x: -10000, y: -10000, active: false };
 
-    // Poisson-disc rejection sampling — keep trying random positions until
-    // we find one at least MIN_DISTANCE from every existing node. Auto-caps
-    // the count at what the viewport can hold so small screens don't try
-    // to pack 60 nodes into 13 nodes' worth of space.
-    const seed = () => {
-      // Empirical: each Poisson-disc node "owns" ~0.9 × MIN_DISTANCE^2 of area.
-      const areaPerNode = MIN_DISTANCE * MIN_DISTANCE * 0.9;
-      const fitsCount = Math.floor((width * height) / areaPerNode);
-      const target = Math.max(8, Math.min(NODE_COUNT_MAX, fitsCount));
+    // Largest min-distance that still lets all NODE_COUNT nodes pack into
+    // the current viewport, capped at the design target. Factor 1.3
+    // accounts for real-world Poisson-disc packing inefficiency — the disc
+    // sampler fills roughly half the area before getting stuck, so each
+    // node empirically claims ~1.3 × d² of working area.
+    const computeSpacing = () => {
+      const dCap = Math.sqrt((width * height) / (NODE_COUNT * 1.3));
+      minDistance = Math.min(MIN_DISTANCE_TARGET, dCap);
+      connectDistance = minDistance * CONNECT_DISTANCE_RATIO;
+    };
 
+    // Poisson-disc rejection sampling — accept a candidate only if it's
+    // ≥ minDistance from every already-placed node. Node count is fixed
+    // at NODE_COUNT; the spacing is what flexes for small viewports.
+    const seed = () => {
+      computeSpacing();
       nodes = [];
-      const minD2 = MIN_DISTANCE * MIN_DISTANCE;
-      const maxAttempts = target * 80;
+      const minD2 = minDistance * minDistance;
+      const maxAttempts = NODE_COUNT * 120;
       let attempts = 0;
-      while (nodes.length < target && attempts < maxAttempts) {
+      while (nodes.length < NODE_COUNT && attempts < maxAttempts) {
         attempts++;
         const x = Math.random() * width;
         const y = Math.random() * height;
@@ -113,13 +127,14 @@ export function NodesBackground() {
 
     // Greedy edge construction, capped at MAX_DEGREE. Backfill guarantees ≥1 per node.
     const buildEdges = () => {
+      const cd2 = connectDistance * connectDistance;
       const cands: Edge[] = [];
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const dx = nodes[i].x - nodes[j].x;
           const dy = nodes[i].y - nodes[j].y;
           const d2 = dx * dx + dy * dy;
-          if (d2 < CONNECT_DISTANCE * CONNECT_DISTANCE) {
+          if (d2 < cd2) {
             cands.push({ i, j, d: Math.sqrt(d2) });
           }
         }
@@ -179,6 +194,8 @@ export function NodesBackground() {
           n.x *= sx;
           n.y *= sy;
         }
+        // Adapt spacing to the new viewport so connectivity and repulsion stay sensible.
+        computeSpacing();
       }
     };
 
@@ -207,7 +224,7 @@ export function NodesBackground() {
       for (const e of edges) {
         const a = nodes[e.i];
         const b = nodes[e.j];
-        const near = 1 - e.d / CONNECT_DISTANCE;
+        const near = 1 - e.d / connectDistance;
         const isMainEdge = e.i === mainIdx || e.j === mainIdx;
         if (isMainEdge) {
           const alpha = 0.55 + near * 0.35;
@@ -224,7 +241,7 @@ export function NodesBackground() {
         ctx.stroke();
       }
 
-      // Cursor → main link — outside the MAX_DEGREE cap.
+      // Cursor → main link — outside the MAX_DEGREE cap (the "+1 user connection").
       if (pointer.active && mainIdx >= 0) {
         const m = nodes[mainIdx];
         ctx.strokeStyle = `rgba(${ACCENT}, 0.75)`;
@@ -287,11 +304,11 @@ export function NodesBackground() {
         n.y += n.vy * dt;
       }
 
-      // Min-distance repulsion — any pair closer than MIN_DISTANCE is pushed
+      // Min-distance repulsion — any pair closer than minDistance is pushed
       // apart along the line between them. Push is capped per frame so
       // overlap resolves smoothly over several frames rather than snapping.
-      const minD2 = MIN_DISTANCE * MIN_DISTANCE;
-      const maxPush = MIN_DISTANCE * 0.1;
+      const minD2 = minDistance * minDistance;
+      const maxPush = minDistance * 0.1;
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const dx = nodes[i].x - nodes[j].x;
@@ -299,7 +316,7 @@ export function NodesBackground() {
           const d2 = dx * dx + dy * dy;
           if (d2 < minD2 && d2 > 0.0001) {
             const d = Math.sqrt(d2);
-            const overlap = MIN_DISTANCE - d;
+            const overlap = minDistance - d;
             const push = Math.min(overlap * 0.5, maxPush);
             const nx = (dx / d) * push;
             const ny = (dy / d) * push;

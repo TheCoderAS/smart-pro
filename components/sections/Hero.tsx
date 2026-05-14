@@ -4,7 +4,6 @@ import { motion } from "framer-motion";
 import { SMOOTH } from "@/lib/motion";
 import { RevealText } from "@/components/ui/RevealText";
 import { Button } from "@/components/ui/Button";
-import { HeroSchematic } from "@/components/illustrations/HeroSchematic";
 
 export function Hero() {
   return (
@@ -67,15 +66,6 @@ export function Hero() {
             For investors <span aria-hidden>→</span>
           </motion.a>
         </div>
-
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 2.3, duration: 0.6, ease: SMOOTH }}
-          className="mt-24 lg:mt-32"
-        >
-          <HeroSchematic />
-        </motion.div>
       </div>
     </section>
   );
