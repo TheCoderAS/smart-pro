@@ -201,16 +201,19 @@ export function NodesBackground() {
       const mainIdx = findMain();
 
       // Edges — main-incident ones in accent, the rest in muted.
+      // Alpha has a brightness floor so even the longest edges remain
+      // clearly visible; the gradient on top gives a subtle near/far cue.
       for (const e of edges) {
         const a = nodes[e.i];
         const b = nodes[e.j];
+        const near = 1 - e.d / CONNECT_DISTANCE; // 1 at zero distance, 0 at threshold
         const isMainEdge = e.i === mainIdx || e.j === mainIdx;
         if (isMainEdge) {
-          const alpha = (1 - e.d / CONNECT_DISTANCE) * 0.75;
+          const alpha = 0.55 + near * 0.35; // 0.55 → 0.90
           ctx.strokeStyle = `rgba(${ACCENT}, ${alpha})`;
           ctx.lineWidth = 1.3;
         } else {
-          const alpha = (1 - e.d / CONNECT_DISTANCE) * 0.45;
+          const alpha = 0.35 + near * 0.25; // 0.35 → 0.60
           ctx.strokeStyle = `rgba(${MUTED}, ${alpha})`;
           ctx.lineWidth = 1;
         }
