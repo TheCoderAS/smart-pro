@@ -3,20 +3,23 @@
 import { useEffect, useRef } from "react";
 
 /**
- * Connected-nodes ambient background.
- *
- * Lightweight canvas mesh: ~35 nodes drift very slowly, lines connect any
- * pair within a distance threshold, line opacity fades with distance.
- * Sits absolutely behind hero content with low overall opacity so it
- * reads as live drafting paper, not "tech startup vibes".
+ * Full-page connected-nodes mesh that dramatises the product story:
+ *  - Drifting peer nodes scattered across the viewport.
+ *  - The cursor is the "user". A small accent marker tracks it.
+ *  - The nearest physical node to the cursor is the "main". An accent
+ *    line runs from cursor → main, and brighter accent lines fan out
+ *    from main → its in-range peers.
+ *  - Every node is guaranteed at least one connection — if no peer is
+ *    within the threshold, a faint fallback line is drawn to its
+ *    single nearest neighbour.
  *
  * Performance discipline:
- *  - Single canvas, drawn with requestAnimationFrame.
- *  - Paused when the host element scrolls offscreen (IntersectionObserver).
- *  - Paused when the tab is hidden (visibilitychange).
+ *  - Single canvas, single RAF loop.
+ *  - `position: fixed` covers the viewport regardless of scroll.
+ *  - `visibilitychange` pauses the loop when the tab is hidden.
  *  - Skipped entirely for `prefers-reduced-motion: reduce`.
- *  - DPR-aware so it stays crisp on retina displays without ballooning
- *    the offscreen buffer on low-end devices (capped at 2).
+ *  - DPR capped at 2.
+ *  - O(N^2) scan on ~60 nodes ≈ 1.8k checks per frame.
  */
 export function NodesBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -39,14 +42,23 @@ export function NodesBackground() {
     let width = 0;
     let height = 0;
 
+    // Tuning
+    const NODE_COUNT = 60;
+    const CONNECT_DISTANCE = 200;
+    const DRIFT = 0.2;
+    const NODE_RADIUS = 1.8;
+    const MAIN_RADIUS = 4.5;
+    const CURSOR_RADIUS = 3;
+    const POINTER_REACH = 360; // cursor must be at least this close to *some* node to "activate"
+    const ACCENT = "217, 119, 87";
+    const MUTED = "138, 135, 128";
+
     type Node = { x: number; y: number; vx: number; vy: number };
     let nodes: Node[] = [];
 
-    const NODE_COUNT = 35;
-    const CONNECT_DISTANCE = 160;
-    const DRIFT = 0.12; // base velocity px / 16ms frame
+    const pointer = { x: -10000, y: -10000, active: false };
 
-    const seedNodes = () => {
+    const seed = () => {
       nodes = Array.from({ length: NODE_COUNT }, () => ({
         x: Math.random() * width,
         y: Math.random() * height,
@@ -56,23 +68,34 @@ export function NodesBackground() {
     };
 
     const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      width = rect.width;
-      height = rect.height;
-      if (width === 0 || height === 0) return;
+      width = window.innerWidth;
+      height = window.innerHeight;
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (nodes.length === 0) seedNodes();
+      if (nodes.length === 0) seed();
     };
 
     resize();
-    const ro = new ResizeObserver(resize);
-    ro.observe(canvas);
+    window.addEventListener("resize", resize);
+
+    const onPointerMove = (e: PointerEvent) => {
+      pointer.x = e.clientX;
+      pointer.y = e.clientY;
+      pointer.active = true;
+    };
+    const onPointerOut = (e: PointerEvent) => {
+      // Only deactivate when the cursor leaves the window entirely.
+      if (e.relatedTarget === null) {
+        pointer.active = false;
+      }
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerout", onPointerOut);
 
     let raf = 0;
     let lastT = performance.now();
-    let running = false;
+    let running = true;
 
     const step = (t: number) => {
       const dt = Math.min((t - lastT) / 16.67, 2);
@@ -80,7 +103,7 @@ export function NodesBackground() {
 
       ctx.clearRect(0, 0, width, height);
 
-      // Update positions; reflect off edges
+      // Drift positions
       for (const n of nodes) {
         n.x += n.vx * dt;
         n.y += n.vy * dt;
@@ -100,8 +123,27 @@ export function NodesBackground() {
         }
       }
 
-      // Connections — fg-muted (138 135 128) at distance-decayed alpha
-      ctx.lineWidth = 1;
+      // Find the main: nearest physical node to the pointer
+      let mainIdx = -1;
+      if (pointer.active) {
+        let bestD = Infinity;
+        for (let i = 0; i < nodes.length; i++) {
+          const dx = nodes[i].x - pointer.x;
+          const dy = nodes[i].y - pointer.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < bestD) {
+            bestD = d2;
+            mainIdx = i;
+          }
+        }
+        if (bestD > POINTER_REACH * POINTER_REACH) mainIdx = -1;
+      }
+
+      // Track which nodes have at least one in-range connection so we can
+      // backfill isolated nodes with a fallback nearest-neighbour edge.
+      const hasConnection = new Array<boolean>(nodes.length).fill(false);
+
+      // First pass: all in-range pairs
       for (let i = 0; i < nodes.length; i++) {
         const a = nodes[i];
         for (let j = i + 1; j < nodes.length; j++) {
@@ -111,59 +153,124 @@ export function NodesBackground() {
           const d2 = dx * dx + dy * dy;
           if (d2 < CONNECT_DISTANCE * CONNECT_DISTANCE) {
             const d = Math.sqrt(d2);
-            const alpha = (1 - d / CONNECT_DISTANCE) * 0.18;
-            ctx.strokeStyle = `rgba(138, 135, 128, ${alpha})`;
+            const isMainConn = i === mainIdx || j === mainIdx;
+            if (isMainConn) {
+              const alpha = (1 - d / CONNECT_DISTANCE) * 0.7;
+              ctx.strokeStyle = `rgba(${ACCENT}, ${alpha})`;
+              ctx.lineWidth = 1.3;
+            } else {
+              const alpha = (1 - d / CONNECT_DISTANCE) * 0.4;
+              ctx.strokeStyle = `rgba(${MUTED}, ${alpha})`;
+              ctx.lineWidth = 1;
+            }
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
             ctx.stroke();
+            hasConnection[i] = true;
+            hasConnection[j] = true;
           }
         }
       }
 
-      // Nodes — small, fg-muted dots
-      ctx.fillStyle = "rgba(138, 135, 128, 0.55)";
-      for (const n of nodes) {
+      // Second pass: every isolated node gets one fallback line to its nearest neighbour
+      ctx.lineWidth = 1;
+      for (let i = 0; i < nodes.length; i++) {
+        if (hasConnection[i]) continue;
+        const a = nodes[i];
+        let nearestJ = -1;
+        let nearestD2 = Infinity;
+        for (let j = 0; j < nodes.length; j++) {
+          if (j === i) continue;
+          const dx = a.x - nodes[j].x;
+          const dy = a.y - nodes[j].y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < nearestD2) {
+            nearestD2 = d2;
+            nearestJ = j;
+          }
+        }
+        if (nearestJ >= 0) {
+          ctx.strokeStyle = `rgba(${MUTED}, 0.22)`;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(nodes[nearestJ].x, nodes[nearestJ].y);
+          ctx.stroke();
+          hasConnection[i] = true;
+        }
+      }
+
+      // Cursor → main link (the "user is connected to the master node")
+      if (pointer.active && mainIdx >= 0) {
+        const m = nodes[mainIdx];
+        ctx.strokeStyle = `rgba(${ACCENT}, 0.75)`;
+        ctx.lineWidth = 1.4;
         ctx.beginPath();
-        ctx.arc(n.x, n.y, 1.4, 0, Math.PI * 2);
+        ctx.moveTo(pointer.x, pointer.y);
+        ctx.lineTo(m.x, m.y);
+        ctx.stroke();
+      }
+
+      // Peer nodes
+      ctx.fillStyle = `rgba(${MUTED}, 0.85)`;
+      for (let i = 0; i < nodes.length; i++) {
+        if (i === mainIdx) continue;
+        const n = nodes[i];
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, NODE_RADIUS, 0, Math.PI * 2);
         ctx.fill();
+      }
+
+      // Main node — accent, larger, ringed
+      if (mainIdx >= 0) {
+        const m = nodes[mainIdx];
+        ctx.fillStyle = `rgba(${ACCENT}, 0.95)`;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, MAIN_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${ACCENT}, 0.4)`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, MAIN_RADIUS + 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Cursor marker — the "user" node
+      if (pointer.active) {
+        ctx.fillStyle = `rgba(${ACCENT}, 0.9)`;
+        ctx.beginPath();
+        ctx.arc(pointer.x, pointer.y, CURSOR_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${ACCENT}, 0.3)`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(pointer.x, pointer.y, CURSOR_RADIUS + 4, 0, Math.PI * 2);
+        ctx.stroke();
       }
 
       if (running) raf = requestAnimationFrame(step);
     };
 
-    const start = () => {
-      if (running) return;
-      running = true;
-      lastT = performance.now();
-      raf = requestAnimationFrame(step);
-    };
-    const stop = () => {
-      running = false;
-      if (raf) cancelAnimationFrame(raf);
-    };
+    raf = requestAnimationFrame(step);
 
-    // Pause when off-screen (long pages — hero exits viewport quickly)
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) start();
-        else stop();
-      },
-      { threshold: 0 },
-    );
-    io.observe(canvas);
-
-    // Pause when tab hidden
     const onVisibility = () => {
-      if (document.hidden) stop();
-      else if (canvas.getBoundingClientRect().bottom > 0) start();
+      if (document.hidden) {
+        running = false;
+        if (raf) cancelAnimationFrame(raf);
+      } else if (!running) {
+        running = true;
+        lastT = performance.now();
+        raf = requestAnimationFrame(step);
+      }
     };
     document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
-      stop();
-      ro.disconnect();
-      io.disconnect();
+      running = false;
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerout", onPointerOut);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
@@ -172,7 +279,8 @@ export function NodesBackground() {
     <canvas
       ref={canvasRef}
       aria-hidden
-      className="absolute inset-0 w-full h-full pointer-events-none"
+      className="fixed inset-0 w-full h-full pointer-events-none"
+      style={{ zIndex: 0 }}
     />
   );
 }
