@@ -39,4 +39,16 @@ export const wordReveal: Variants = {
   },
 };
 
-export const VIEWPORT_ONCE = { once: true, margin: "-100px" } as const;
+/**
+ * Viewport config for scroll-triggered reveals.
+ *
+ * `once: false` means animations replay each time the element enters the
+ * viewport — scroll down past a section, scroll back up, you'll see it
+ * fade in again. The `-100px` margin shrinks the trigger zone so partial
+ * scrolls don't cause flicker; the element animates back to its hidden
+ * state only after it's fully out of view + 100px of buffer.
+ *
+ * Use this for whileInView animations. Hero entrance uses initial/animate
+ * on mount instead, which is unaffected.
+ */
+export const VIEWPORT_REPEAT = { once: false, margin: "-100px" } as const;

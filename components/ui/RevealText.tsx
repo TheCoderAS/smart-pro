@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, type Variants } from "framer-motion";
-import { SMOOTH, VIEWPORT_ONCE, wordReveal } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT, wordReveal } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -43,7 +43,7 @@ export function RevealText({
     : {
         initial: "hidden" as const,
         whileInView: "visible" as const,
-        viewport: VIEWPORT_ONCE,
+        viewport: VIEWPORT_REPEAT,
       };
 
   return (

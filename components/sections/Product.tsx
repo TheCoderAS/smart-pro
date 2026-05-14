@@ -5,7 +5,7 @@ import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
 import { SectionNumber } from "@/components/ui/SectionNumber";
 import { ArchitectureDiagram } from "@/components/illustrations/ArchitectureDiagram";
-import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 
 const PARAGRAPHS = [
   "A single Master unit fits a standard switchboard. It has the Wi-Fi, the brains, and the radios.",
@@ -46,7 +46,7 @@ export function Product() {
             <motion.div
               initial={{ opacity: 0, y: 16 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
               <EyebrowLabel withMark>02 — The product</EyebrowLabel>
@@ -61,7 +61,7 @@ export function Product() {
             <motion.div
               initial="hidden"
               whileInView="visible"
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               variants={{
                 hidden: {},
                 visible: {
@@ -94,7 +94,7 @@ export function Product() {
         <motion.div
           initial={{ opacity: 0, y: 24 }}
           whileInView={{ opacity: 1, y: 0 }}
-          viewport={VIEWPORT_ONCE}
+          viewport={VIEWPORT_REPEAT}
           transition={{ duration: 1.2, ease: SMOOTH, delay: 0.3 }}
           className="mt-20 lg:mt-28 max-w-5xl mx-auto"
         >
@@ -105,7 +105,7 @@ export function Product() {
         <motion.div
           initial="hidden"
           whileInView="visible"
-          viewport={VIEWPORT_ONCE}
+          viewport={VIEWPORT_REPEAT}
           variants={{
             hidden: {},
             visible: {

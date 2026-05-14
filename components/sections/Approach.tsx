@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
 import { SectionNumber } from "@/components/ui/SectionNumber";
-import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 
 const PRINCIPLES = [
   {
@@ -39,7 +39,7 @@ export function Approach() {
             <motion.div
               initial={{ opacity: 0, y: 16 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
               <EyebrowLabel withMark>03 — Our approach</EyebrowLabel>
@@ -54,7 +54,7 @@ export function Approach() {
             <motion.p
               initial={{ opacity: 0, y: 16 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH, delay: 0.3 }}
               className="text-body-lg leading-relaxed text-fg/90 mt-12 max-w-2xl"
             >
@@ -68,7 +68,7 @@ export function Approach() {
         <motion.div
           initial="hidden"
           whileInView="visible"
-          viewport={VIEWPORT_ONCE}
+          viewport={VIEWPORT_REPEAT}
           variants={{
             hidden: {},
             visible: { transition: { staggerChildren: 0.12, delayChildren: 0.4 } },

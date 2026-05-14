@@ -3,7 +3,7 @@
 import { motion } from "framer-motion";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
-import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 
 const VALUES = [
   {
@@ -38,7 +38,7 @@ export function InstallersValue() {
         <motion.div
           initial="hidden"
           whileInView="visible"
-          viewport={VIEWPORT_ONCE}
+          viewport={VIEWPORT_REPEAT}
           variants={{
             hidden: {},
             visible: { transition: { staggerChildren: 0.12, delayChildren: 0.2 } },
