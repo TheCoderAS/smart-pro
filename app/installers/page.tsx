@@ -5,7 +5,7 @@ import { InstallersProfile } from "./InstallersProfile";
 import { InstallerForm } from "./InstallerForm";
 
 export const metadata: Metadata = {
-  title: "[BRAND] for Installers — The smart switch your customer won't return.",
+  title: "Unisync for Installers — The smart switch your customer won't return.",
   description:
     "A smart switch built around the professional on the ladder. Fits the boards you already install. Trains in a day.",
 };

@@ -8,8 +8,8 @@ import { SMOOTH } from "@/lib/motion";
 
 const NAV_LINKS = [
   { href: "/#problem", label: "Problem" },
+  { href: "/#product", label: "Product" },
   { href: "/#approach", label: "Approach" },
-  { href: "/#team", label: "Team" },
 ];
 
 export function Nav() {
@@ -38,9 +38,9 @@ export function Nav() {
         <Link
           href="/"
           className="font-display text-lg tracking-tight"
-          aria-label="[BRAND] home"
+          aria-label="Unisync home"
         >
-          [BRAND]
+          Unisync
         </Link>
 
         <nav className="hidden md:flex items-center gap-10">
@@ -61,13 +61,12 @@ export function Nav() {
           ))}
         </nav>
 
-        <a
-          href="#waitlist"
-          data-waitlist-trigger
+        <Link
+          href="/#waitlist"
           className="text-xs font-mono tracking-eyebrow uppercase px-4 py-2 border border-fg-faint hover:border-accent hover:text-accent transition-colors duration-300"
         >
           Get Early Access
-        </a>
+        </Link>
       </div>
     </motion.header>
   );

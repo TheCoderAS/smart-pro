@@ -13,17 +13,15 @@ type Card = {
   body: string;
   cta: string;
   href: string;
-  trigger?: "waitlist";
 };
 
 const CARDS: Card[] = [
   {
     title: "Homeowners",
     subtitle: "For the home you're actually building",
-    body: "Whether you're renovating one room or wiring a new flat, the system that runs your lights should not feel like a project. It should feel like furniture.",
+    body: "Renovating one room or wiring a new flat — the system that runs your lights shouldn't feel like a project. It should feel like furniture.",
     cta: "Join the waitlist →",
     href: "#waitlist",
-    trigger: "waitlist",
   },
   {
     title: "Electricians",
@@ -35,10 +33,9 @@ const CARDS: Card[] = [
   {
     title: "Builders & Developers",
     subtitle: "For the people specifying tomorrow's homes",
-    body: "A standardised, certifiable, repairable switching system designed for the realities of Indian construction at scale.",
+    body: "Standardised. BIS-certified. Repairable in five minutes by anyone you already employ. Designed for Indian construction, at scale.",
     cta: "Talk to us →",
-    // TODO: replace builders contact email domain
-    href: "mailto:builders@brand.com",
+    href: "mailto:aalokmamtasah@gmail.com",
   },
 ];
 
@@ -64,14 +61,8 @@ function AudienceCard({ card }: { card: Card }) {
   const className =
     "group relative block pt-6 px-2 transition-transform duration-500 ease-smooth hover:-translate-y-1";
 
-  if (card.trigger === "waitlist") {
-    return (
-      <a href={card.href} data-waitlist-trigger className={className}>
-        {inner}
-      </a>
-    );
-  }
-  if (card.href.startsWith("mailto:")) {
+  // Use a plain <a> for in-page anchors and mailto, Next <Link> for route navigation.
+  if (card.href.startsWith("#") || card.href.startsWith("mailto:")) {
     return (
       <a href={card.href} className={className}>
         {inner}
@@ -91,7 +82,7 @@ export function Audiences() {
       id="audiences"
       className="relative py-[clamp(6rem,12vw,12rem)] border-t border-fg-faint/40 overflow-hidden"
     >
-      <SectionNumber number="03" side="right" />
+      <SectionNumber number="04" side="right" />
 
       <div className="relative max-w-content mx-auto px-6 lg:px-24">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
@@ -102,7 +93,7 @@ export function Audiences() {
               viewport={VIEWPORT_ONCE}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
-              <EyebrowLabel withMark>03 — Built for</EyebrowLabel>
+              <EyebrowLabel withMark>04 — Built for</EyebrowLabel>
             </motion.div>
           </div>
           <div className="lg:col-span-8">

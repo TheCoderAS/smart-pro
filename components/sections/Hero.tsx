@@ -16,7 +16,7 @@ export function Hero() {
           transition={{ delay: 0.4, duration: 0.8, ease: SMOOTH }}
           className="eyebrow"
         >
-          A new kind of electrical switch. Coming to India, 2026.
+          A new kind of electrical switch. Pilot launching Bangalore, Q3 2026.
         </motion.div>
 
         <RevealText
@@ -45,13 +45,13 @@ export function Hero() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 2.0, duration: 0.6, ease: SMOOTH }}
           >
-            <Button data-waitlist-trigger>Request early access</Button>
+            <Button href="#waitlist">Request early access</Button>
           </motion.div>
           <motion.a
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 2.1, duration: 0.6, ease: SMOOTH }}
-            href="mailto:investors@brand.com"
+            href="mailto:aalokmamtasah@gmail.com"
             className="text-sm text-fg-muted hover:text-accent link-underline inline-flex items-center gap-2 transition-colors duration-300"
           >
             For investors <span aria-hidden>→</span>

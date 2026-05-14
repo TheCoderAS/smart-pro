@@ -2,7 +2,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Terms — [BRAND]",
+  title: "Terms — Unisync",
 };
 
 export default function TermsPage() {
@@ -26,17 +26,17 @@ export default function TermsPage() {
           </p>
           <h2 className="font-display text-h2 mt-12">Intellectual property</h2>
           <p>
-            All content on this site, including the [BRAND] name and wordmark,
-            is the property of [BRAND] and its respective owners.
+            All content on this site, including the Unisync name and wordmark,
+            is the property of Unisync and its respective owners.
           </p>
           <h2 className="font-display text-h2 mt-12">Contact</h2>
           <p>
             Questions about these terms can be sent to{" "}
             <a
-              href="mailto:legal@brand.com"
+              href="mailto:aalokmamtasah@gmail.com"
               className="link-underline hover:text-accent transition-colors"
             >
-              legal@brand.com
+              aalokmamtasah@gmail.com
             </a>
             .
           </p>

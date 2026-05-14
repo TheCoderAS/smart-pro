@@ -5,7 +5,7 @@ import "./globals.css";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { ScrollProgress } from "@/components/layout/ScrollProgress";
-import { WaitlistModalProvider } from "@/components/ui/WaitlistModal";
+import { ReducedMotionProvider } from "@/components/layout/ReducedMotionProvider";
 
 const fraunces = Fraunces({
   subsets: ["latin"],
@@ -21,23 +21,23 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "[BRAND] — The wall should be smarter than the bulb.",
+  title: "Unisync — The wall should be smarter than the bulb.",
   description:
-    "[BRAND] is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch, coming to India in 2026.",
-  metadataBase: new URL("https://brand.com"),
+    "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — pilot launching Bangalore, Q3 2026.",
+  metadataBase: new URL("https://unisync.in"),
   alternates: {
-    canonical: "https://brand.com",
+    canonical: "https://unisync.in",
   },
   robots: {
     index: true,
     follow: true,
   },
   openGraph: {
-    title: "[BRAND] — The wall should be smarter than the bulb.",
+    title: "Unisync — The wall should be smarter than the bulb.",
     description:
-      "[BRAND] is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch, coming to India in 2026.",
-    url: "https://brand.com",
-    siteName: "[BRAND]",
+      "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — pilot launching Bangalore, Q3 2026.",
+    url: "https://unisync.in",
+    siteName: "Unisync",
     // TODO: add og-image.jpg at /public/og-image.jpg
     images: [{ url: "/og-image.jpg", width: 1200, height: 630 }],
     locale: "en_IN",
@@ -45,9 +45,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "[BRAND] — The wall should be smarter than the bulb.",
+    title: "Unisync — The wall should be smarter than the bulb.",
     description:
-      "[BRAND] is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch, coming to India in 2026.",
+      "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — pilot launching Bangalore, Q3 2026.",
     // TODO: add og-image.jpg at /public/og-image.jpg
     images: ["/og-image.jpg"],
   },
@@ -64,12 +64,12 @@ export default function RootLayout({
       className={`${fraunces.variable} ${GeistSans.variable} ${jetbrains.variable}`}
     >
       <body>
-        <WaitlistModalProvider>
+        <ReducedMotionProvider>
           <ScrollProgress />
           <Nav />
           <main>{children}</main>
           <Footer />
-        </WaitlistModalProvider>
+        </ReducedMotionProvider>
       </body>
     </html>
   );
