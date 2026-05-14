@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
 import { SectionNumber } from "@/components/ui/SectionNumber";
-import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 
 type Card = {
   title: string;
@@ -90,7 +90,7 @@ export function Audiences() {
             <motion.div
               initial={{ opacity: 0, y: 16 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
               <EyebrowLabel withMark>04 — Built for</EyebrowLabel>
@@ -106,7 +106,7 @@ export function Audiences() {
         <motion.div
           initial="hidden"
           whileInView="visible"
-          viewport={VIEWPORT_ONCE}
+          viewport={VIEWPORT_REPEAT}
           variants={{
             hidden: {},
             visible: { transition: { staggerChildren: 0.12, delayChildren: 0.3 } },

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
-import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 const CITIES = [
@@ -72,7 +72,7 @@ export function Waitlist() {
             <motion.div
               initial={{ opacity: 0, y: 16 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
               <EyebrowLabel withMark>Early access</EyebrowLabel>
@@ -87,7 +87,7 @@ export function Waitlist() {
             <motion.p
               initial={{ opacity: 0, y: 16 }}
               whileInView={{ opacity: 1, y: 0 }}
-              viewport={VIEWPORT_ONCE}
+              viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH, delay: 0.2 }}
               className="text-body-lg leading-relaxed text-fg-muted mt-8"
             >
@@ -148,7 +148,7 @@ export function Waitlist() {
                   key="form"
                   initial={{ opacity: 0, y: 16 }}
                   whileInView={{ opacity: 1, y: 0 }}
-                  viewport={VIEWPORT_ONCE}
+                  viewport={VIEWPORT_REPEAT}
                   transition={{ duration: 0.8, ease: SMOOTH, delay: 0.4 }}
                   onSubmit={onSubmit}
                   className="mt-12 space-y-8"
@@ -222,7 +222,7 @@ export function Waitlist() {
         <motion.div
           initial={{ opacity: 0, y: 16 }}
           whileInView={{ opacity: 1, y: 0 }}
-          viewport={VIEWPORT_ONCE}
+          viewport={VIEWPORT_REPEAT}
           transition={{ duration: 0.8, ease: SMOOTH, delay: 0.2 }}
           className="mt-32 max-w-2xl"
         >

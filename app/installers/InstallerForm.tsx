@@ -4,7 +4,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { EyebrowLabel } from "@/components/ui/EyebrowLabel";
 import { RevealText } from "@/components/ui/RevealText";
-import { SMOOTH, VIEWPORT_ONCE } from "@/lib/motion";
+import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 type FormState = {
@@ -81,7 +81,7 @@ export function InstallerForm() {
               <motion.form
                 initial={{ opacity: 0, y: 16 }}
                 whileInView={{ opacity: 1, y: 0 }}
-                viewport={VIEWPORT_ONCE}
+                viewport={VIEWPORT_REPEAT}
                 transition={{ duration: 0.8, ease: SMOOTH, delay: 0.3 }}
                 onSubmit={onSubmit}
                 className="mt-12 space-y-8"
