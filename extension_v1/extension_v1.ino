@@ -14,11 +14,11 @@
 #define EEPROM_MAGIC_VAL 0xA5
 
 /* ─── Arduino pins ───────────────────────────────────────────── */
-#define RELAY1_PIN       13      /* PD4 — also LED CH1 in demo */
-#define RELAY2_PIN       5     /* PC3 — also LED CH2 in demo */
-#define TOUCH1_PIN       11      /* PD2 */
-#define TOUCH2_PIN       12      /* PD3 */
-#define BUILTIN_LED      3      /* PB5 — heartbeat */
+#define RELAY1_PIN       13     /* PD4 — also LED CH1 in demo */
+#define RELAY2_PIN       5      /* PC3 — also LED CH2 in demo */
+#define TOUCH1_PIN       11     /* PD2 */
+#define TOUCH2_PIN       12     /* PD3 */
+#define BUILTIN_LED      3      /* PB5 — heartbeat, active low */
 
 /* ─── Frame constants ────────────────────────────────────────── */
 #define SOF              0xAA
@@ -58,8 +58,8 @@ static volatile uint32_t led1_off_ms   = 0;
 static volatile uint32_t led2_off_ms   = 0;
 
 /* ─── Heartbeat ──────────────────────────────────────────────── */
-static uint32_t heartbeat_ms = 0;
-static uint8_t  heartbeat_state = 0;
+static uint32_t heartbeat_ms    = 0;
+static uint8_t  heartbeat_state = 1; /* 1 = off for active-low LED */
 
 /* ─── UART RX ring buffer ────────────────────────────────────── */
 #define RX_BUF_SIZE 40
@@ -141,31 +141,30 @@ static void queue_event(uint8_t ch, uint8_t state) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * Touch ISRs — relay toggles here, no loop() involvement
+ * Port D ISR — handles both touch pins
+ * Relay toggles here, no loop() involvement
  * ═══════════════════════════════════════════════════════════════ */
-static void touch1_isr(void) {
-    uint8_t new_state = !relay1_state;
-    relay_set_direct(1, new_state);
-    led1_off_ms = millis() + 1000;
-    queue_event(1, new_state);
-}
-
-static void touch2_isr(void) {
-    uint8_t new_state = !relay2_state;
-    relay_set_direct(2, new_state);
-    led2_off_ms = millis() + 1000;
-    queue_event(2, new_state);
+static void port_d_isr(void) {
+    if (GPIOD->IDR & (1 << 2)) {  /* PD2 — touch CH1 */
+        uint8_t new_state = !relay1_state;
+        relay_set_direct(1, new_state);
+        led1_off_ms = millis() + 1000;
+        queue_event(1, new_state);
+    }
+    if (GPIOD->IDR & (1 << 3)) {  /* PD3 — touch CH2 */
+        uint8_t new_state = !relay2_state;
+        relay_set_direct(2, new_state);
+        led2_off_ms = millis() + 1000;
+        queue_event(2, new_state);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * LED timer — relay/LED pin turns off after 1s on touch
- * Only turns off if relay was toggled OFF — if relay is ON,
- * pin stays high regardless
+ * LED timer — only pulls low if relay is OFF
  * ═══════════════════════════════════════════════════════════════ */
 static void led_update(void) {
     if (led1_off_ms > 0 && millis() >= led1_off_ms) {
         led1_off_ms = 0;
-        /* Only pull low if relay is currently OFF */
         if (!relay1_state) digitalWrite(RELAY1_PIN, LOW);
     }
     if (led2_off_ms > 0 && millis() >= led2_off_ms) {
@@ -176,11 +175,11 @@ static void led_update(void) {
 
 /* ═══════════════════════════════════════════════════════════════
  * Heartbeat — blinks builtin LED every 500ms
- * Confirms loop() is running
+ * Active low: HIGH = off, LOW = on
  * ═══════════════════════════════════════════════════════════════ */
 static void heartbeat_update(void) {
     if (millis() - heartbeat_ms >= 500) {
-        heartbeat_ms = millis();
+        heartbeat_ms    = millis();
         heartbeat_state = !heartbeat_state;
         digitalWrite(BUILTIN_LED, heartbeat_state);
     }
@@ -372,19 +371,20 @@ void setup() {
     pinMode(RELAY2_PIN,  OUTPUT); digitalWrite(RELAY2_PIN,  LOW);
     pinMode(TOUCH1_PIN,  INPUT);
     pinMode(TOUCH2_PIN,  INPUT);
-    pinMode(BUILTIN_LED, OUTPUT); digitalWrite(BUILTIN_LED, LOW);
+    pinMode(BUILTIN_LED, OUTPUT); digitalWrite(BUILTIN_LED, HIGH); /* HIGH = off */
 
     Serial_begin(UART_BAUD);
 
-    attachInterrupt(TOUCH1_PIN, touch1_isr, RISING);
-    attachInterrupt(TOUCH2_PIN, touch2_isr, RISING);
+    /* Register port D ISR and enable EXTI hardware */
+    attachInterrupt(3, port_d_isr, RISING);
+    EXTI->CR1 = (EXTI->CR1 & ~0x30) | 0x20;
+    GPIOD->CR2 |= (1 << 2) | (1 << 3);
 
     if (eeprom_read(EEPROM_MAGIC) == EEPROM_MAGIC_VAL)
         slot_address = eeprom_read(EEPROM_ADDR_SLOT);
     else
         slot_address = ADDR_UNASSIGNED;
 
-    /* Startup blink on relay/LED pins — 2 = addressed, 5 = unaddressed */
     blinks = (slot_address != ADDR_UNASSIGNED) ? 2 : 5;
     for (i = 0; i < blinks; i++) {
         digitalWrite(RELAY1_PIN, HIGH);
