@@ -1,8 +1,7 @@
 /*
  * Smart Modular Switch System
  * Extension Firmware — STM8S103F3
- * Demo: Relay and LED share same pin (PD4, PC3)
- * Builtin LED on PB5 blinks at 500ms as heartbeat
+ * Touch via polling — interrupts not used (sduino Port A/B ISR broken)
  */
 
 /* ─── Config ─────────────────────────────────────────────────── */
@@ -12,12 +11,13 @@
 #define EEPROM_ADDR_SLOT 0x4000
 #define EEPROM_MAGIC     0x4001
 #define EEPROM_MAGIC_VAL 0xA5
+#define DEBOUNCE_MS      300
 
 /* ─── Arduino pins ───────────────────────────────────────────── */
-#define RELAY1_PIN       13     /* PD4 — also LED CH1 in demo */
-#define RELAY2_PIN       5      /* PC3 — also LED CH2 in demo */
-#define TOUCH1_PIN       11     /* PD2 */
-#define TOUCH2_PIN       12     /* PD3 */
+#define RELAY1_PIN       13     /* PD4 */
+#define RELAY2_PIN       5      /* PC3 */
+#define TOUCH1_PIN       4      /* PB4 */
+#define TOUCH2_PIN       2      /* PA3 */
 #define BUILTIN_LED      3      /* PB5 — heartbeat, active low */
 
 /* ─── Frame constants ────────────────────────────────────────── */
@@ -45,21 +45,25 @@ typedef struct {
     uint16_t timestamp;
 } touch_event_t;
 
-static touch_event_t    event_queue[EVENT_QUEUE_SIZE];
-static volatile uint8_t event_head     = 0;
-static volatile uint8_t event_tail     = 0;
-static volatile uint8_t events_pending = 0;
+static touch_event_t event_queue[EVENT_QUEUE_SIZE];
+static uint8_t       event_head     = 0;
+static uint8_t       event_tail     = 0;
+static uint8_t       events_pending = 0;
 
 /* ─── State ──────────────────────────────────────────────────── */
-static uint8_t           slot_address  = ADDR_UNASSIGNED;
-static volatile uint8_t  relay1_state  = 0;
-static volatile uint8_t  relay2_state  = 0;
-static volatile uint32_t led1_off_ms   = 0;
-static volatile uint32_t led2_off_ms   = 0;
+static uint8_t  slot_address   = ADDR_UNASSIGNED;
+static uint8_t  relay1_state   = 0;
+static uint8_t  relay2_state   = 0;
+static uint8_t  touch1_last    = 0;
+static uint8_t  touch2_last    = 0;
+static uint32_t last_touch1_ms = 0;
+static uint32_t last_touch2_ms = 0;
+static uint32_t led1_off_ms    = 0;
+static uint32_t led2_off_ms    = 0;
 
 /* ─── Heartbeat ──────────────────────────────────────────────── */
 static uint32_t heartbeat_ms    = 0;
-static uint8_t  heartbeat_state = 1; /* 1 = off for active-low LED */
+static uint8_t  heartbeat_state = 1;
 
 /* ─── UART RX ring buffer ────────────────────────────────────── */
 #define RX_BUF_SIZE 40
@@ -111,17 +115,15 @@ static uint8_t crc8(uint8_t *data, uint8_t len) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * Relay — direct register write, safe from ISR
+ * Relay
  * ═══════════════════════════════════════════════════════════════ */
-static void relay_set_direct(uint8_t ch, uint8_t state) {
+static void relay_set(uint8_t ch, uint8_t state) {
     if (ch == 1) {
         relay1_state = state;
-        if (state) GPIOD->ODR |=  (1 << 4);
-        else       GPIOD->ODR &= ~(1 << 4);
+        digitalWrite(RELAY1_PIN, state);
     } else {
         relay2_state = state;
-        if (state) GPIOC->ODR |=  (1 << 3);
-        else       GPIOC->ODR &= ~(1 << 3);
+        digitalWrite(RELAY2_PIN, state);
     }
 }
 
@@ -130,37 +132,48 @@ static void relay_set_direct(uint8_t ch, uint8_t state) {
  * ═══════════════════════════════════════════════════════════════ */
 static void queue_event(uint8_t ch, uint8_t state) {
     uint8_t next = (event_head + 1) % EVENT_QUEUE_SIZE;
-    if (next == event_tail) {
+    if (next == event_tail)
         event_tail = (event_tail + 1) % EVENT_QUEUE_SIZE;
-    }
     event_queue[event_head].channel   = ch;
     event_queue[event_head].new_state = state;
     event_queue[event_head].timestamp = (uint16_t)(millis() & 0xFFFF);
-    event_head = (event_head + 1) % EVENT_QUEUE_SIZE;
+    event_head = next;
     events_pending = 1;
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * Port D ISR — handles both touch pins
- * Relay toggles here, no loop() involvement
+ * Touch poll — called every loop()
+ * Rising edge detection + debounce
  * ═══════════════════════════════════════════════════════════════ */
-static void port_d_isr(void) {
-    if (GPIOD->IDR & (1 << 2)) {  /* PD2 — touch CH1 */
-        uint8_t new_state = !relay1_state;
-        relay_set_direct(1, new_state);
-        led1_off_ms = millis() + 1000;
-        queue_event(1, new_state);
+static void touch_poll(void) {
+    uint32_t now = millis();
+    uint8_t  t1  = digitalRead(TOUCH1_PIN);
+    uint8_t  t2  = digitalRead(TOUCH2_PIN);
+
+    if (t1 && !touch1_last) {
+        if (now - last_touch1_ms >= DEBOUNCE_MS) {
+            last_touch1_ms = now;
+            relay_set(1, !relay1_state);
+            led1_off_ms = now + 1000;
+            queue_event(1, relay1_state);
+        }
     }
-    if (GPIOD->IDR & (1 << 3)) {  /* PD3 — touch CH2 */
-        uint8_t new_state = !relay2_state;
-        relay_set_direct(2, new_state);
-        led2_off_ms = millis() + 1000;
-        queue_event(2, new_state);
+
+    if (t2 && !touch2_last) {
+        if (now - last_touch2_ms >= DEBOUNCE_MS) {
+            last_touch2_ms = now;
+            relay_set(2, !relay2_state);
+            led2_off_ms = now + 1000;
+            queue_event(2, relay2_state);
+        }
     }
+
+    touch1_last = t1;
+    touch2_last = t2;
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * LED timer — only pulls low if relay is OFF
+ * LED timer
  * ═══════════════════════════════════════════════════════════════ */
 static void led_update(void) {
     if (led1_off_ms > 0 && millis() >= led1_off_ms) {
@@ -174,8 +187,7 @@ static void led_update(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * Heartbeat — blinks builtin LED every 500ms
- * Active low: HIGH = off, LOW = on
+ * Heartbeat
  * ═══════════════════════════════════════════════════════════════ */
 static void heartbeat_update(void) {
     if (millis() - heartbeat_ms >= 500) {
@@ -203,7 +215,7 @@ static void uart_send_frame(uint8_t dst, uint8_t cmd,
 }
 
 /* ═══════════════════════════════════════════════════════════════
- * Random delay — collision avoidance
+ * Random delay
  * ═══════════════════════════════════════════════════════════════ */
 static void random_delay_50ms(void) {
     uint8_t uid[4];
@@ -247,7 +259,6 @@ static void send_state_resp(void) {
 
 /* ═══════════════════════════════════════════════════════════════
  * Frame processor
- * All locals at top — SDCC C89 requirement
  * ═══════════════════════════════════════════════════════════════ */
 static void process_frame(uint8_t *f) {
     uint8_t dst         = f[1];
@@ -295,8 +306,8 @@ static void process_frame(uint8_t *f) {
 
         case CMD_SET_RELAY:
             if (len >= 1) {
-                relay_set_direct(1, (f[5] >> 0) & 0x01);
-                relay_set_direct(2, (f[5] >> 1) & 0x01);
+                relay_set(1, (f[5] >> 0) & 0x01);
+                relay_set(2, (f[5] >> 1) & 0x01);
             }
             break;
 
@@ -371,14 +382,9 @@ void setup() {
     pinMode(RELAY2_PIN,  OUTPUT); digitalWrite(RELAY2_PIN,  LOW);
     pinMode(TOUCH1_PIN,  INPUT);
     pinMode(TOUCH2_PIN,  INPUT);
-    pinMode(BUILTIN_LED, OUTPUT); digitalWrite(BUILTIN_LED, HIGH); /* HIGH = off */
+    pinMode(BUILTIN_LED, OUTPUT); digitalWrite(BUILTIN_LED, HIGH);
 
     Serial_begin(UART_BAUD);
-
-    /* Register port D ISR and enable EXTI hardware */
-    attachInterrupt(3, port_d_isr, RISING);
-    EXTI->CR1 = (EXTI->CR1 & ~0x30) | 0x20;
-    GPIOD->CR2 |= (1 << 2) | (1 << 3);
 
     if (eeprom_read(EEPROM_MAGIC) == EEPROM_MAGIC_VAL)
         slot_address = eeprom_read(EEPROM_ADDR_SLOT);
@@ -397,6 +403,7 @@ void setup() {
 }
 
 void loop() {
+    touch_poll();
     uart_parse();
     led_update();
     heartbeat_update();
