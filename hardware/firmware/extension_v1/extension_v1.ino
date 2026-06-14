@@ -137,9 +137,17 @@ static void load_address(void) {
 }
 
 static void save_address(uint8_t addr) {
+    /* Write address first, then magic as commit flag */
     eeprom_write(EEPROM_ADDR_ADDR,  addr);
     eeprom_write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
     slot_address = addr;
+    /* Verify write succeeded - retry once if not */
+    if (eeprom_read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC_VAL ||
+        eeprom_read(EEPROM_ADDR_ADDR)  != addr) {
+        delay(10);
+        eeprom_write(EEPROM_ADDR_ADDR,  addr);
+        eeprom_write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -299,6 +307,12 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     switch (cmd) {
 
     case CMD_PING:
+        /* Broadcast PING: stagger responses by address to avoid collision.
+         * Each extension waits (address * 15ms) before responding.
+         * Unicast PING (dst == our address): respond immediately.         */
+        if (dst == ADDR_BCAST && slot_address != ADDR_UNASSIGNED) {
+            delay((uint16_t)slot_address * 15);
+        }
         uptime_s    = millis() / 1000;
         buf[0]      = 1; buf[1] = 1; /* fw v1.1 */
         buf[2]      = (uptime_s >> 24) & 0xFF;

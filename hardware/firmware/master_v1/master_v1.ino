@@ -277,7 +277,8 @@ static void nvs_restore_all(void) {
         char name[24]; nvs_load_name(uid, name, sizeof(name));
         extension_t *e = &extensions[slot];
         memcpy(e->uid, uid, 4);
-        e->address = ADDR_UNASSIGNED;
+        /* Pre-assign logical address = slot+1 so next_free_addr reserves it */
+        e->address = (uint8_t)(slot + 1);
         e->state   = EXT_OFFLINE;
         e->missed  = 0;
         e->relay1  = false;
@@ -285,7 +286,8 @@ static void nvs_restore_all(void) {
         e->last_seen_ms = 0;
         strncpy(e->name, name, sizeof(e->name)-1);
         e->name[sizeof(e->name)-1] = '\0';
-        Serial.printf("[NVS] Restored: %s -> slot%d\n", name, slot+1);
+        Serial.printf("[NVS] Restored: %s -> slot%d addr=0x%02X\n",
+                      name, slot+1, e->address);
     }
 }
 
@@ -313,8 +315,22 @@ static int find_empty_slot(void) {
 }
 
 static uint8_t next_free_addr(void) {
-    for (uint8_t a = 1; a <= MAX_EXTENSIONS; a++)
-        if (find_slot_by_addr(a) == -1) return a;
+    /* Find lowest address not used by ANY non-empty slot.
+     * Slots restored from NVS start with ADDR_UNASSIGNED but their
+     * logical address is (slot_index + 1). Reserve those too.        */
+    for (uint8_t a = 1; a <= MAX_EXTENSIONS; a++) {
+        bool taken = false;
+        for (int i = 0; i < MAX_EXTENSIONS; i++) {
+            if (extensions[i].state == EXT_EMPTY) continue;
+            /* Check actual address */
+            if (extensions[i].address == a) { taken = true; break; }
+            /* Also reserve slot_index+1 as logical address for this slot */
+            if (extensions[i].address == ADDR_UNASSIGNED && (uint8_t)(i+1) == a) {
+                taken = true; break;
+            }
+        }
+        if (!taken) return a;
+    }
     return ADDR_UNASSIGNED;
 }
 
@@ -330,11 +346,131 @@ static void run_discovery(void) {
     uint8_t resp[40];
     uint8_t resp_len, plen;
 
-    /* Step 1: Broadcast PING - finds already-addressed extensions */
+    /* Step 1: Directly ping each OFFLINE slot by its known address.
+     * This avoids broadcast collision when multiple extensions boot together.
+     * Each extension gets a dedicated unicast PING with no collision risk. */
+    for (int i = 0; i < MAX_EXTENSIONS; i++) {
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool is_offline = (extensions[i].state == EXT_OFFLINE);
+        uint8_t addr    = extensions[i].address;
+        uint8_t uid[4]; memcpy(uid, extensions[i].uid, 4);
+        xSemaphoreGive(state_mutex);
+
+        if (!is_offline || addr == ADDR_UNASSIGNED) continue;
+
+        flush_rx();
+        bus_send(addr, CMD_PING, NULL, 0);
+        resp_len = bus_recv(resp, sizeof(resp), 100);
+
+        if (resp_len > 0 && resp[3] == CMD_PONG && resp[2] == addr) {
+            plen = resp[4];
+            if (resp[5+plen] == crc8(&resp[1], 4+plen)) {
+                /* Extension is alive on its stored address - bring online */
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                extensions[i].state        = EXT_ONLINE;
+                extensions[i].missed       = 0;
+                extensions[i].last_seen_ms = millis();
+                xSemaphoreGive(state_mutex);
+                Serial.printf("[DISC] Slot%d %s back online addr=0x%02X\n",
+                              i+1, extensions[i].name, addr);
+                notify_ui();
+            }
+        }
+    }
+
+    /* Step 2: Handle unaddressed extensions (5 blinks = fresh/wiped EEPROM)
+     * Check if any NVS slot is OFFLINE+UNADDRESSED - means the extension
+     * lost its EEPROM address. Use ENUM_REQ (not PING) because:
+     * - Addressed extensions ignore ENUM_REQ broadcasts
+     * - Only unaddressed extensions respond to ENUM_REQ
+     * - No collision with already-addressed extensions on the bus        */
+    /* has_unaddressed_slot check removed - slots now always have logical address */
+    bool has_unaddressed_slot = true; /* always try ENUM_REQ */
+
+    /* Step 3: ENUM_REQ - handles both unaddressed NVS slots and brand new extensions */
+    if (has_unaddressed_slot || true) {
+        /* Always try ENUM_REQ - costs only 150ms if no unaddressed ext present */
+        flush_rx();
+        bus_send(ADDR_BCAST, CMD_ENUM_REQ, NULL, 0);
+        resp_len = bus_recv(resp, sizeof(resp), 150);
+        if (resp_len > 0 && resp[3] == CMD_ENUM_RESP && resp[4] >= 4) {
+            plen = resp[4];
+            if (resp[5+plen] == crc8(&resp[1], 4+plen)) {
+                uint8_t *uid = &resp[5];
+
+                /* Already tracked in RAM? */
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                int existing = find_slot_by_uid(uid);
+                xSemaphoreGive(state_mutex);
+
+                /* Check NVS for saved slot */
+                int saved_slot = nvs_load_slot(uid);
+
+                /* Determine target slot */
+                int target_slot = -1;
+                if (existing >= 0) target_slot = existing;
+                else if (saved_slot >= 0 && saved_slot < MAX_EXTENSIONS) target_slot = saved_slot;
+
+                /* Assign next free address */
+                uint8_t new_addr = next_free_addr();
+                if (new_addr == ADDR_UNASSIGNED) {
+                    Serial.println("[DISC] All slots full");
+                    return;
+                }
+
+                /* Send SET_ADDR */
+                uint8_t payload[5] = {uid[0],uid[1],uid[2],uid[3],new_addr};
+                flush_rx();
+                bus_send(ADDR_UNASSIGNED, CMD_SET_ADDR, payload, 5);
+                resp_len = bus_recv(resp, sizeof(resp), 200);
+                if (resp_len == 0 || resp[3] != CMD_PONG || resp[2] != new_addr) {
+                    Serial.println("[DISC] SET_ADDR failed");
+                    return;
+                }
+
+                if (target_slot >= 0) {
+                    /* Known extension - restore to its slot */
+                    char saved_name[24];
+                    if (saved_slot >= 0) nvs_load_name(uid, saved_name, sizeof(saved_name));
+                    else strncpy(saved_name, extensions[target_slot].name, sizeof(saved_name));
+                    xSemaphoreTake(state_mutex, portMAX_DELAY);
+                    extension_t *e  = &extensions[target_slot];
+                    memcpy(e->uid, uid, 4);
+                    e->address      = new_addr;
+                    e->state        = EXT_ONLINE;
+                    e->missed       = 0;
+                    e->relay1       = false;
+                    e->relay2       = false;
+                    e->last_seen_ms = millis();
+                    strncpy(e->name, saved_name, sizeof(e->name)-1);
+                    xSemaphoreGive(state_mutex);
+                    /* Save updated address mapping */
+                    nvs_save(uid, target_slot, saved_name);
+                    Serial.printf("[DISC] ENUM restored: %s slot=%d addr=0x%02X\n",
+                                  saved_name, target_slot+1, new_addr);
+                    notify_ui();
+                    return;
+                }
+
+                /* Brand new extension - mark pending for user */
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                pending_ext  = true;
+                memcpy(pending_uid, uid, 4);
+                pending_addr = new_addr;
+                xSemaphoreGive(state_mutex);
+                Serial.printf("[DISC] New ext UID=%02X%02X%02X%02X addr=0x%02X\n",
+                              uid[0],uid[1],uid[2],uid[3], new_addr);
+                notify_ui();
+                return;
+            }
+        }
+    }
+
+    /* Step 4: Broadcast PING - finds extensions with unknown addresses
+     * (extensions that have an address but are not in our RAM or NVS) */
     flush_rx();
     bus_send(ADDR_BCAST, CMD_PING, NULL, 0);
     resp_len = bus_recv(resp, sizeof(resp), 100);
-
     if (resp_len > 0 && resp[3] == CMD_PONG) {
         plen = resp[4];
         if (resp[5+plen] == crc8(&resp[1], 4+plen)) {
@@ -343,8 +479,6 @@ static void run_discovery(void) {
             bool known = (find_slot_by_addr(src) >= 0);
             xSemaphoreGive(state_mutex);
             if (known) return;
-
-            /* Unknown address - query its UID */
             Serial.printf("[DISC] Untracked ext at addr=0x%02X\n", src);
             flush_rx();
             bus_send(src, CMD_ENUM_REQ, NULL, 0);
@@ -353,32 +487,24 @@ static void run_discovery(void) {
                 plen = resp[4];
                 if (resp[5+plen] == crc8(&resp[1], 4+plen)) {
                     uint8_t *uid = &resp[5];
-                    int saved_slot = nvs_load_slot(uid);
-                    if (saved_slot >= 0 && saved_slot < MAX_EXTENSIONS) {
-                        char saved_name[24];
-                        nvs_load_name(uid, saved_name, sizeof(saved_name));
+                    int sv = nvs_load_slot(uid);
+                    if (sv >= 0 && sv < MAX_EXTENSIONS) {
+                        char sname[24]; nvs_load_name(uid, sname, sizeof(sname));
                         xSemaphoreTake(state_mutex, portMAX_DELAY);
-                        extension_t *e = &extensions[saved_slot];
+                        extension_t *e = &extensions[sv];
                         memcpy(e->uid, uid, 4);
-                        e->address      = src;
-                        e->state        = EXT_ONLINE;
-                        e->missed       = 0;
-                        e->last_seen_ms = millis();
-                        strncpy(e->name, saved_name, sizeof(e->name)-1);
+                        e->address = src; e->state = EXT_ONLINE;
+                        e->missed = 0; e->last_seen_ms = millis();
+                        strncpy(e->name, sname, sizeof(e->name)-1);
                         xSemaphoreGive(state_mutex);
-                        Serial.printf("[DISC] Restored: %s slot=%d addr=0x%02X\n",
-                                      saved_name, saved_slot+1, src);
-                        notify_ui();
-                        return;
+                        notify_ui(); return;
                     }
-                    /* Not in NVS - new extension with existing address */
                     xSemaphoreTake(state_mutex, portMAX_DELAY);
-                    pending_ext  = true;
+                    pending_ext = true;
                     memcpy(pending_uid, uid, 4);
                     pending_addr = src;
                     xSemaphoreGive(state_mutex);
                     notify_ui();
-                    return;
                 }
             }
         }
@@ -664,6 +790,15 @@ static String build_state_json(void) {
                  pending_uid[2],pending_uid[3]);
         JsonObject p = doc.createNestedObject("pending");
         p["uid"] = uid_str;
+        /* Include list of offline slots so UI can offer replace option */
+        JsonArray offline_slots = p.createNestedArray("offline_slots");
+        for (int i = 0; i < MAX_EXTENSIONS; i++) {
+            if (extensions[i].state == EXT_OFFLINE) {
+                JsonObject os = offline_slots.createNestedObject();
+                os["slot"] = i;
+                os["name"] = extensions[i].name;
+            }
+        }
     } else {
         doc["pending"] = nullptr;
     }
@@ -772,12 +907,17 @@ h1{color:#00d4ff;font-size:22px;margin-bottom:4px}
 <div class="overlay" id="overlay">
   <div class="modal">
     <h2>New Extension Found</h2>
-    <p>Give it a name to add it to your system.</p>
+    <p>Give it a name to add it, or replace an offline extension.</p>
     <div class="modal-uid" id="modal-uid"></div>
+    <div id="replace-section" style="display:none;margin-bottom:12px">
+      <p style="color:#ffd700;font-size:12px;margin-bottom:8px">Replace an offline extension:</p>
+      <div id="replace-btns"></div>
+    </div>
+    <p style="color:#888;font-size:11px;margin-bottom:8px">Or add as new:</p>
     <input id="ext-name" type="text" placeholder="e.g. Living Room" maxlength="23"/>
     <div class="btn-row">
       <button class="btn ghost" onclick="rejectExt()">Ignore</button>
-      <button class="btn primary" onclick="assignExt()">Add</button>
+      <button class="btn primary" onclick="assignExt()">Add as New</button>
     </div>
   </div>
 </div>
@@ -821,8 +961,24 @@ function render(d){
   document.getElementById('root').innerHTML=html;
   if(d.pending&&!pendingUid){
     pendingUid=d.pending.uid;
-    document.getElementById('modal-uid').textContent='ID: '+d.pending.uid;
+    document.getElementById('modal-uid').textContent='Device ID: '+d.pending.uid;
     document.getElementById('ext-name').value='';
+    /* Show replace options if any offline slots exist */
+    const offlineSlots = d.pending.offline_slots||[];
+    const replSec = document.getElementById('replace-section');
+    const replBtns = document.getElementById('replace-btns');
+    if(offlineSlots.length>0){
+      replSec.style.display='block';
+      replBtns.innerHTML=offlineSlots.map(s=>
+        `<button class="btn" style="background:#2a1a00;color:#ffd700;
+          border:1px solid #ffd700;margin-bottom:6px;width:100%"
+          onclick="replaceExt(${s.slot},'${s.name}')">
+          Replace "${s.name}"</button>`
+      ).join('');
+    } else {
+      replSec.style.display='none';
+      replBtns.innerHTML='';
+    }
     document.getElementById('overlay').classList.add('show');
     setTimeout(()=>document.getElementById('ext-name').focus(),100);
   } else if(!d.pending){
@@ -833,6 +989,13 @@ function render(d){
 
 function toggle(id,ch){
   fetch('/api/relay?id='+id+'&ch='+ch,{method:'POST'});
+}
+
+async function replaceExt(slot, name){
+  if(!confirm('Replace "'+name+'" with this new extension? The old extension will be retired.')) return;
+  await fetch('/api/replace?slot='+slot,{method:'POST'});
+  document.getElementById('overlay').classList.remove('show');
+  pendingUid=null;
 }
 
 async function assignExt(){
@@ -956,6 +1119,58 @@ static void setup_web(void) {
         server.send(200, "application/json", "{\"ok\":true}");
     });
 
+    /* Replace offline slot with pending new extension */
+    server.on("/api/replace", HTTP_POST, [](){
+        int slot = server.arg("slot").toInt();
+        if (slot < 0 || slot >= MAX_EXTENSIONS) {
+            server.send(400, "application/json", "{\"error\":\"bad slot\"}");
+            return;
+        }
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (!pending_ext || extensions[slot].state != EXT_OFFLINE) {
+            xSemaphoreGive(state_mutex);
+            server.send(400, "application/json", "{\"ok\":false}");
+            return;
+        }
+        uint8_t old_uid[4]; memcpy(old_uid, extensions[slot].uid, 4);
+        uint8_t new_uid[4]; memcpy(new_uid, pending_uid, 4);
+        char    slot_name[24]; strncpy(slot_name, extensions[slot].name, sizeof(slot_name));
+        uint8_t new_addr = pending_addr;
+        extensions[slot].address      = new_addr;
+        memcpy(extensions[slot].uid, new_uid, 4);
+        extensions[slot].state        = EXT_ONLINE;
+        extensions[slot].missed       = 0;
+        extensions[slot].relay1       = false;
+        extensions[slot].relay2       = false;
+        extensions[slot].last_seen_ms = millis();
+        pending_ext = false;
+        memset(pending_uid, 0, 4);
+        pending_addr = 0;
+        xSemaphoreGive(state_mutex);
+        char old_key[12];
+        snprintf(old_key, sizeof(old_key), "%02X%02X%02X%02X",
+                 old_uid[0],old_uid[1],old_uid[2],old_uid[3]);
+        prefs.begin("ext_map", false);
+        prefs.remove(old_key);
+        String index   = prefs.getString("uid_index", "");
+        String old_str = String(old_key);
+        int idx2 = index.indexOf(old_str);
+        if (idx2 >= 0) {
+            if (idx2 > 0 && index[idx2-1] == ',')
+                index.remove(idx2-1, old_str.length()+1);
+            else if (idx2+(int)old_str.length() < (int)index.length())
+                index.remove(idx2, old_str.length()+1);
+            else
+                index.remove(idx2, old_str.length());
+            prefs.putString("uid_index", index);
+        }
+        prefs.end();
+        nvs_save(new_uid, slot, slot_name);
+        Serial.printf("[REPLACE] slot%d: %s\n", slot+1, slot_name);
+        notify_ui();
+        server.send(200, "application/json", "{\"ok\":true}");
+    });
+
     /* WebSocket event handler */
     wss.onEvent([](uint8_t num, WStype_t type,
                    uint8_t *payload, size_t length){
@@ -979,7 +1194,7 @@ static void setup_web(void) {
  * ================================================================ */
 void setup() {
     Serial.begin(115200);
-    while (!Serial) delay(10);
+    // while (!Serial) delay(10);
     delay(500);
     Serial.println("\n[MASTER] Smart Switch v4.0 - booting");
 
