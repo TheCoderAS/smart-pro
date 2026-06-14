@@ -46,6 +46,7 @@
  * ═══════════════════════════════════════════════════════════════ */
 #define EEPROM_MAGIC_ADDR  0x4000
 #define EEPROM_ADDR_ADDR   0x4001
+#define EEPROM_RELAY_ADDR  0x4002  /* bits: bit0=relay1, bit1=relay2 */
 #define EEPROM_MAGIC_VAL   0xA5
 
 /* ═══════════════════════════════════════════════════════════════
@@ -111,6 +112,21 @@ static void eeprom_write(uint16_t addr, uint8_t val) {
     *((volatile uint8_t *)addr) = val;
     while (!(FLASH->IAPSR & 0x04));
     eeprom_lock();
+}
+
+static void relay_state_save_eeprom(void) {
+    uint8_t val = 0;
+    if (relay1_state) val |= 0x01;
+    if (relay2_state) val |= 0x02;
+    eeprom_write(EEPROM_RELAY_ADDR, val);
+}
+
+static void relay_state_load_eeprom(void) {
+    /* Only load if magic is valid - means we have real saved state */
+    if (eeprom_read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC_VAL) return;
+    uint8_t val = eeprom_read(EEPROM_RELAY_ADDR);
+    relay1_state = (val & 0x01) != 0;
+    relay2_state = (val & 0x02) != 0;
 }
 
 static void load_address(void) {
@@ -196,11 +212,13 @@ static void drain_events(uint8_t count) {
 static void set_relay1(bool state) {
     relay1_state = state;
     digitalWrite(RELAY1, state ? HIGH : LOW);
+    relay_state_save_eeprom();
 }
 
 static void set_relay2(bool state) {
     relay2_state = state;
     digitalWrite(RELAY2, state ? HIGH : LOW);
+    relay_state_save_eeprom();
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -347,13 +365,10 @@ static void process_frame(uint8_t *frame, uint8_t len) {
             uint8_t secs   = (plen > 0) ? payload[0] : 3;
             uint8_t blinks = secs * 4;
             for (uint8_t b = 0; b < blinks; b++) {
-                digitalWrite(LED,    HIGH);
-                digitalWrite(RELAY1, HIGH);
-                digitalWrite(RELAY2, HIGH);
+                /* Only blink LED during identify - do not toggle relays */
+                digitalWrite(LED, HIGH);
                 delay(125);
-                digitalWrite(LED,    LOW);
-                digitalWrite(RELAY1, LOW);
-                digitalWrite(RELAY2, LOW);
+                digitalWrite(LED, LOW);
                 delay(125);
             }
         }
@@ -394,15 +409,12 @@ static void bus_rx_tick(void) {
  * 2 blinks = has stored address
  * ═══════════════════════════════════════════════════════════════ */
 static void startup_blink(void) {
+    /* Only blink LED — relays already set to restored state, do not touch them */
     uint8_t blinks = (slot_address == ADDR_UNASSIGNED) ? 5 : 2;
     for (uint8_t i = 0; i < blinks; i++) {
-        digitalWrite(LED,    HIGH);
-        digitalWrite(RELAY1, HIGH);
-        digitalWrite(RELAY2, HIGH);
+        digitalWrite(LED, HIGH);
         delay(200);
-        digitalWrite(LED,    LOW);
-        digitalWrite(RELAY1, LOW);
-        digitalWrite(RELAY2, LOW);
+        digitalWrite(LED, LOW);
         delay(200);
     }
 }
@@ -421,6 +433,12 @@ void setup() {
     Serial_begin(UART_BAUD);
 
     load_address();
+
+    /* Restore relay states from EEPROM and apply to GPIO */
+    relay_state_load_eeprom();
+    digitalWrite(RELAY1, relay1_state ? HIGH : LOW);
+    digitalWrite(RELAY2, relay2_state ? HIGH : LOW);
+
     startup_blink();
 }
 

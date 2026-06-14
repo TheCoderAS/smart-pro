@@ -238,6 +238,23 @@ static void nvs_save(const uint8_t *uid, int slot, const char *name) {
     prefs.end();
 }
 
+/* ================================================================
+ * RELAY STATE PERSISTENCE
+ * ================================================================ */
+static void relay_state_save(void) {
+    prefs.begin("relay_state", false);
+    prefs.putBool("m_r1", master_relay1);
+    prefs.putBool("m_r2", master_relay2);
+    prefs.end();
+}
+
+static void relay_state_load(void) {
+    prefs.begin("relay_state", true);
+    master_relay1 = prefs.getBool("m_r1", false);
+    master_relay2 = prefs.getBool("m_r2", false);
+    prefs.end();
+}
+
 static void nvs_restore_all(void) {
     prefs.begin("ext_map", true);
     String index = prefs.getString("uid_index", "");
@@ -529,6 +546,7 @@ static void task_touch(void *arg) {
             bool s = master_relay1;
             xSemaphoreGive(state_mutex);
             digitalWrite(RELAY1_PIN, s ? HIGH : LOW);
+            relay_state_save();
             Serial.printf("[TOUCH] CH1 -> %s\n", s?"ON":"OFF");
             notify_ui();
         }
@@ -538,6 +556,7 @@ static void task_touch(void *arg) {
             bool s = master_relay2;
             xSemaphoreGive(state_mutex);
             digitalWrite(RELAY2_PIN, s ? HIGH : LOW);
+            relay_state_save();
             Serial.printf("[TOUCH] CH2 -> %s\n", s?"ON":"OFF");
             notify_ui();
         }
@@ -553,6 +572,7 @@ static void task_touch(void *arg) {
             xSemaphoreGive(state_mutex);
             digitalWrite(cmd.channel==1 ? RELAY1_PIN : RELAY2_PIN,
                          cmd.state ? HIGH : LOW);
+            relay_state_save();
             notify_ui();
         }
 
@@ -959,7 +979,7 @@ static void setup_web(void) {
  * ================================================================ */
 void setup() {
     Serial.begin(115200);
-    // while (!Serial) delay(10);
+    while (!Serial) delay(10);
     delay(500);
     Serial.println("\n[MASTER] Smart Switch v4.0 - booting");
 
@@ -968,6 +988,13 @@ void setup() {
     pinMode(RS485_DE_PIN, OUTPUT); digitalWrite(RS485_DE_PIN, LOW);
     pinMode(TOUCH1_PIN,   INPUT);
     pinMode(TOUCH2_PIN,   INPUT);
+
+    /* Restore relay states from NVS before anything else */
+    relay_state_load();
+    digitalWrite(RELAY1_PIN, master_relay1 ? HIGH : LOW);
+    digitalWrite(RELAY2_PIN, master_relay2 ? HIGH : LOW);
+    Serial.printf("[RELAY] Restored: CH1=%s CH2=%s\n",
+                  master_relay1?"ON":"OFF", master_relay2?"ON":"OFF");
 
     BusSerial.begin(UART_BAUD, SERIAL_8N1, BUS_RX_PIN, BUS_TX_PIN);
 
