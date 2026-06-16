@@ -82,12 +82,26 @@
 #define CMD_ANNOUNCE      0x50
 #define CMD_WELCOME       0x51
 #define CMD_REJECT        0x52
+#define CMD_FACTORY_RESET 0x60  /* M->E: wipe EEPROM, reboot unregistered */
 #define CMD_ERROR         0xF0
 
 /* ================================================================
  * RELAY RATE LIMITING
  * ================================================================ */
 #define RELAY_RATE_LIMIT_MS  500  /* min ms between UI relay commands per channel */
+
+/* ================================================================
+ * DEVICE COLOR PALETTE
+ * slot 0=master, 1-5=ext slots
+ * ================================================================ */
+static const char *SLOT_COLORS[] = {
+    "#00d4ff",  /* 0 master  - cyan   */
+    "#ffd700",  /* 1 ext 0   - yellow */
+    "#ff6b6b",  /* 2 ext 1   - coral  */
+    "#6bff6b",  /* 3 ext 2   - green  */
+    "#ff9f43",  /* 4 ext 3   - orange */
+    "#a29bfe"   /* 5 ext 4   - purple */
+};
 
 /* ================================================================
  * DATA TYPES
@@ -134,6 +148,8 @@ static uint32_t     last_relay2_cmd_ms = 0;
 static bool         boot_complete  = false;  /* boot overlay flag */
 static bool         scan_active    = false;  /* manual scan in progress */
 static uint32_t     scan_end_ms    = 0;
+static char         master_name[24] = "Master 1";
+static String       switch_order   = "";  /* comma-separated switch IDs */
 
 /* Master UID (from ESP32 MAC) */
 static uint8_t master_uid[4] = {0};
@@ -300,6 +316,58 @@ static void nvs_restore_all(void) {
 }
 
 /* ================================================================
+ * SWITCH NAMES + ORDER + MASTER NAME NVS
+ * ================================================================ */
+
+/* Switch ID format: "master_1", "master_2", "ext0_1", "ext0_2" etc */
+static void switch_id(char *buf, int buflen, int slot, int ch) {
+    if (slot < 0) snprintf(buf, buflen, "master_%d", ch);
+    else          snprintf(buf, buflen, "ext%d_%d", slot, ch);
+}
+
+static void nvs_save_switch_name(const char *id, const char *name) {
+    char key[20]; snprintf(key, sizeof(key), "sw:%s", id);
+    prefs.begin("sw_names", false);
+    prefs.putString(key, name);
+    prefs.end();
+}
+
+static void nvs_load_switch_name(const char *id, char *name, int nlen) {
+    char key[20]; snprintf(key, sizeof(key), "sw:%s", id);
+    prefs.begin("sw_names", true);
+    String s = prefs.getString(key, "");
+    prefs.end();
+    if (s.length() > 0) { strncpy(name, s.c_str(), nlen-1); name[nlen-1]=' '; }
+    else snprintf(name, nlen, "Switch");
+}
+
+static void nvs_save_master_name(const char *name) {
+    prefs.begin("sw_names", false);
+    prefs.putString("master_name", name);
+    prefs.end();
+}
+
+static void nvs_load_master_name(char *name, int nlen) {
+    prefs.begin("sw_names", true);
+    String s = prefs.getString("master_name", "Master 1");
+    prefs.end();
+    strncpy(name, s.c_str(), nlen-1); name[nlen-1]=' ';
+}
+
+static void nvs_save_switch_order(const String &order) {
+    prefs.begin("sw_names", false);
+    prefs.putString("sw_order", order);
+    prefs.end();
+}
+
+static String nvs_load_switch_order(void) {
+    prefs.begin("sw_names", true);
+    String s = prefs.getString("sw_order", "");
+    prefs.end();
+    return s;
+}
+
+/* ================================================================
  * RELAY STATE NVS
  * ================================================================ */
 static void relay_state_save(void) {
@@ -436,14 +504,31 @@ static void handle_announce(const uint8_t *frame) {
     /* Check if already registered in RAM */
     int existing=find_slot_by_uid(uid);
     if (existing>=0) {
-        /* Known extension - re-welcome if OFFLINE */
-        if (extensions[existing].state==EXT_OFFLINE) {
+        if (extensions[existing].state==EXT_ONLINE) {
+            /* Already online - extension should be in poll-response mode
+             * If it keeps announcing, it may have rebooted and lost state
+             * Re-welcome it to put it back in registered mode            */
             uint8_t addr=extensions[existing].address;
             send_welcome(uid,addr,
                         extensions[existing].relay1,
                         extensions[existing].relay2);
-            Serial.printf("[ANNOUNCE] Re-welcoming %s addr=0x%02X\n",
+            Serial.printf("[ANNOUNCE] Re-welcoming online ext %s addr=0x%02X\n",
                           extensions[existing].name,addr);
+        } else if (extensions[existing].state==EXT_OFFLINE) {
+            uint8_t addr=extensions[existing].address;
+            send_welcome(uid,addr,
+                        extensions[existing].relay1,
+                        extensions[existing].relay2);
+            /* Mark polled_once so boot overlay doesn't wait forever */
+            xSemaphoreTake(state_mutex,portMAX_DELAY);
+            extensions[existing].polled_once=true;
+            extensions[existing].state=EXT_ONLINE;
+            extensions[existing].last_seen_ms=millis();
+            extensions[existing].missed=0;
+            xSemaphoreGive(state_mutex);
+            Serial.printf("[ANNOUNCE] Re-welcoming offline ext %s addr=0x%02X\n",
+                          extensions[existing].name,addr);
+            notify_ui();
         }
         return;
     }
@@ -570,6 +655,8 @@ static void poll_extension(int i) {
 /* ================================================================
  * CHECK BOOT COMPLETE
  * ================================================================ */
+static uint32_t boot_start_ms = 0;
+
 static void check_boot_complete(void) {
     if (boot_complete) return;
     bool all_polled=true;
@@ -579,9 +666,10 @@ static void check_boot_complete(void) {
         if (!extensions[i].polled_once) { all_polled=false; break; }
     }
     xSemaphoreGive(state_mutex);
-    if (all_polled) {
+    /* Complete if all polled OR 5 second timeout reached */
+    if (all_polled || (millis()-boot_start_ms)>5000) {
         boot_complete=true;
-        Serial.println("[BOOT] All extensions polled - overlay dismissed");
+        Serial.println("[BOOT] Boot complete - overlay dismissed");
         notify_ui();
     }
 }
@@ -703,37 +791,112 @@ static void task_bus(void *arg) {
 /* ================================================================
  * STATE JSON
  * ================================================================ */
-static String build_state_json(void) {
-    xSemaphoreTake(state_mutex,portMAX_DELAY);
-    StaticJsonDocument<3072> doc;
-    doc["uptime"]=millis()/1000;
-    doc["boot_complete"]=boot_complete;
-
-    JsonObject master=doc.createNestedObject("master");
-    master["relay1"]=master_relay1;
-    master["relay2"]=master_relay2;
-
-    JsonArray exts=doc.createNestedArray("extensions");
+/* Build ordered list of switch IDs */
+static String build_default_order(void) {
+    String order = "";
+    /* master first */
+    order += "master_1,master_2";
     for (int i=0;i<MAX_EXTENSIONS;i++) {
         if (extensions[i].state==EXT_EMPTY) continue;
-        JsonObject e=exts.createNestedObject();
-        char uid_str[12];
-        snprintf(uid_str,sizeof(uid_str),"%02X%02X%02X%02X",
-                 extensions[i].uid[0],extensions[i].uid[1],
-                 extensions[i].uid[2],extensions[i].uid[3]);
-        e["id"]="ext"+String(i);
-        e["slot"]=i;
-        e["name"]=extensions[i].name;
-        e["state"]=(extensions[i].state==EXT_ONLINE)?"online":"offline";
-        e["relay1"]=extensions[i].relay1;
-        e["relay2"]=extensions[i].relay2;
-        e["uid"]=uid_str;
+        char id1[16],id2[16];
+        snprintf(id1,sizeof(id1),"ext%d_1",i);
+        snprintf(id2,sizeof(id2),"ext%d_2",i);
+        order += ","; order += id1;
+        order += ","; order += id2;
+    }
+    return order;
+}
+
+static String build_state_json(void) {
+    xSemaphoreTake(state_mutex,portMAX_DELAY);
+    StaticJsonDocument<4096> doc;
+    doc["uptime"]=millis()/1000;
+    doc["boot_complete"]=boot_complete;
+    doc["master_name"]=master_name;
+    doc["scan_active"]=scan_active;
+
+    /* Build effective order */
+    String effective_order = switch_order.length()>0
+        ? switch_order : build_default_order();
+
+    /* Build switch lookup map */
+    /* Master switches */
+    char sw_name[24];
+    char sw_id[16];
+
+    JsonArray switches=doc.createNestedArray("switches");
+
+    /* Parse order and emit switches in order */
+    String ord = effective_order;
+    int start=0;
+    while(start<(int)ord.length()) {
+        int comma=ord.indexOf(',',start);
+        String id=(comma<0)?ord.substring(start):ord.substring(start,comma);
+        start=(comma<0)?ord.length():comma+1;
+        if(id.length()==0) continue;
+
+        JsonObject sw=switches.createNestedObject();
+        sw["id"]=id;
+
+        if(id.startsWith("master_")) {
+            int ch=id.substring(7).toInt();
+            nvs_load_switch_name(id.c_str(),sw_name,sizeof(sw_name));
+            if(String(sw_name)=="Switch") {
+                snprintf(sw_name,sizeof(sw_name),"Switch %d",ch);
+            }
+            sw["name"]=sw_name;
+            sw["device_name"]=master_name;
+            sw["device_color"]=SLOT_COLORS[0];
+            sw["channel"]=ch;
+            sw["state"]=(ch==1)?master_relay1:master_relay2;
+            sw["online"]=true;
+        } else if(id.startsWith("ext")) {
+            /* parse extN_ch */
+            int us=id.indexOf('_');
+            if(us<0) continue;
+            int slot=id.substring(3,us).toInt();
+            int ch=id.substring(us+1).toInt();
+            if(slot<0||slot>=MAX_EXTENSIONS) continue;
+            if(extensions[slot].state==EXT_EMPTY) continue;
+            nvs_load_switch_name(id.c_str(),sw_name,sizeof(sw_name));
+            if(String(sw_name)=="Switch") {
+                snprintf(sw_name,sizeof(sw_name),"Switch %d",ch+(slot*2)+2);
+            }
+            sw["name"]=sw_name;
+            sw["device_name"]=master_name;
+            sw["device_color"]=SLOT_COLORS[slot+1<6?slot+1:5];
+            sw["channel"]=ch;
+            sw["state"]=(ch==1)?extensions[slot].relay1:extensions[slot].relay2;
+            sw["online"]=(extensions[slot].state==EXT_ONLINE);
+        }
+    }
+
+    /* Add any switches not yet in order (new extensions) */
+    for(int i=0;i<MAX_EXTENSIONS;i++) {
+        if(extensions[i].state==EXT_EMPTY) continue;
+        for(int ch=1;ch<=2;ch++) {
+            snprintf(sw_id,sizeof(sw_id),"ext%d_%d",i,ch);
+            if(effective_order.indexOf(sw_id)<0) {
+                JsonObject sw=switches.createNestedObject();
+                sw["id"]=sw_id;
+                nvs_load_switch_name(sw_id,sw_name,sizeof(sw_name));
+                if(String(sw_name)=="Switch") {
+                    snprintf(sw_name,sizeof(sw_name),"Switch %d",ch+(i*2)+2);
+                }
+                sw["name"]=sw_name;
+                sw["device_name"]=master_name;
+                sw["device_color"]=SLOT_COLORS[i+1<6?i+1:5];
+                sw["channel"]=ch;
+                sw["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
+                sw["online"]=(extensions[i].state==EXT_ONLINE);
+            }
+        }
     }
 
     /* Pending queue */
     JsonArray pending=doc.createNestedArray("pending");
-    for (int i=0;i<MAX_PENDING;i++) {
-        if (!pending_queue[i].active) continue;
+    for(int i=0;i<MAX_PENDING;i++) {
+        if(!pending_queue[i].active) continue;
         JsonObject p=pending.createNestedObject();
         char uid_str[12];
         snprintf(uid_str,sizeof(uid_str),"%02X%02X%02X%02X",
@@ -742,16 +905,14 @@ static String build_state_json(void) {
         p["uid"]=uid_str;
     }
 
-    /* Offline slots (for replace option) */
+    /* Offline slots for replace option */
     JsonArray offline_slots=doc.createNestedArray("offline_slots");
-    for (int i=0;i<MAX_EXTENSIONS;i++) {
-        if (extensions[i].state!=EXT_OFFLINE) continue;
+    for(int i=0;i<MAX_EXTENSIONS;i++) {
+        if(extensions[i].state!=EXT_OFFLINE) continue;
         JsonObject os=offline_slots.createNestedObject();
         os["slot"]=i;
-        os["name"]=extensions[i].name;
+        os["name"]=("Slot "+String(i+1));
     }
-
-    doc["scan_active"]=scan_active;
 
     xSemaphoreGive(state_mutex);
     String out; serializeJson(doc,out); return out;
@@ -788,103 +949,100 @@ static const char HTML[] PROGMEM = R"rawhtml(
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
      background:#0f0f1a;color:#eee;min-height:100vh;padding:16px}
-h1{color:#00d4ff;font-size:22px;margin-bottom:4px}
-.sub{color:#666;font-size:12px;margin-bottom:16px;
-     display:flex;align-items:center;gap:8px}
-.dot{width:8px;height:8px;border-radius:50%;background:#444;transition:background 0.3s}
-.dot.on{background:#4eff4e}
 .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
-.scan-btn{background:#1a1a2e;border:1px solid #2a2a4a;color:#00d4ff;
-          padding:8px 14px;border-radius:8px;font-size:12px;cursor:pointer;
-          display:flex;align-items:center;gap:6px}
-.scan-btn:active{transform:scale(0.96)}
-.scan-btn.scanning{border-color:#ffd700;color:#ffd700;animation:pulse 1s infinite}
+.title-row{display:flex;align-items:center;gap:10px}
+h1{color:#eee;font-size:20px;font-weight:600;cursor:pointer}
+h1:hover{color:#00d4ff}
+.sub{color:#555;font-size:11px;display:flex;align-items:center;gap:6px;margin-top:2px}
+.dot{width:7px;height:7px;border-radius:50%;background:#333;transition:background 0.3s}
+.dot.on{background:#4eff4e}
+.topbar-btns{display:flex;gap:8px}
+.top-btn{background:#1a1a2e;border:1px solid #2a2a4a;color:#aaa;
+         padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer}
+.top-btn.active{border-color:#00d4ff;color:#00d4ff}
+.top-btn.scan.scanning{border-color:#ffd700;color:#ffd700;animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-.card{background:#1a1a2e;border-radius:14px;padding:18px;
-      margin-bottom:16px;border:1px solid #2a2a4a;transition:opacity 0.3s;
-      position:relative}
-.card.offline{opacity:0.4}
-.card-header{display:flex;align-items:center;
-             justify-content:space-between;margin-bottom:16px}
-.card-title{font-size:16px;font-weight:600}
-.card-menu{display:flex;align-items:center;gap:8px}
-.badge{font-size:10px;padding:3px 10px;border-radius:20px;font-weight:700}
-.badge.online{background:#0a2a0a;color:#4eff4e;border:1px solid #4eff4e}
-.badge.offline{background:#2a0a0a;color:#ff4e4e;border:1px solid #ff4e4e}
-.badge.master{background:#0a2a3a;color:#00d4ff;border:1px solid #00d4ff}
-.menu-btn{background:none;border:none;color:#666;font-size:18px;
-          cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1}
-.menu-btn:hover{background:#2a2a4a;color:#eee}
-.dropdown{position:absolute;right:16px;top:52px;background:#1e1e38;
-          border:1px solid #2a2a4a;border-radius:10px;min-width:160px;
-          z-index:10;overflow:hidden;display:none}
-.dropdown.show{display:block}
-.dropdown-item{padding:10px 16px;font-size:13px;cursor:pointer;color:#eee}
-.dropdown-item:hover{background:#2a2a4a}
-.dropdown-item.danger{color:#ff4e4e}
-.channels{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.ch{background:#111128;border-radius:10px;padding:14px;text-align:center}
-.ch-label{font-size:11px;color:#666;margin-bottom:10px}
-.toggle{width:100%;padding:12px;border:none;border-radius:8px;
+/* Switch grid */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.sw-card{background:#1a1a2e;border-radius:14px;padding:16px;
+         border:1px solid #2a2a4a;border-left:4px solid #444;
+         transition:opacity 0.3s;position:relative}
+.sw-card.offline{opacity:0.4}
+.sw-card.reorder-mode{border-style:dashed}
+.sw-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+.sw-names{flex:1}
+.sw-name{font-size:14px;font-weight:600;line-height:1.2}
+.sw-device{font-size:10px;color:#555;margin-top:2px}
+.sw-menu-btn{background:none;border:none;color:#555;font-size:16px;
+             cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1}
+.sw-menu-btn:hover{background:#2a2a4a;color:#eee}
+.sw-dropdown{position:absolute;right:12px;top:36px;background:#1e1e38;
+             border:1px solid #2a2a4a;border-radius:10px;min-width:140px;
+             z-index:10;overflow:hidden;display:none}
+.sw-dropdown.show{display:block}
+.sw-dropdown-item{padding:9px 14px;font-size:12px;cursor:pointer;color:#eee}
+.sw-dropdown-item:hover{background:#2a2a4a}
+.toggle{width:100%;padding:11px;border:none;border-radius:8px;
         font-size:14px;font-weight:700;cursor:pointer;transition:all 0.15s;
         position:relative}
-.toggle.on{background:#00d4ff;color:#000;box-shadow:0 0 12px rgba(0,212,255,0.3)}
-.toggle.off{background:#1e1e38;color:#666;border:1px solid #2a2a4a}
-.toggle:active{transform:scale(0.95)}
-.toggle:disabled{cursor:not-allowed;opacity:0.7}
+.toggle.on{background:#00d4ff;color:#000;box-shadow:0 0 10px rgba(0,212,255,0.25)}
+.toggle.off{background:#111128;color:#555;border:1px solid #2a2a4a}
+.toggle:active{transform:scale(0.96)}
+.toggle:disabled{cursor:not-allowed}
 .toggle .spinner{display:none;width:14px;height:14px;border:2px solid rgba(0,0,0,0.3);
-                 border-top-color:#000;border-radius:50%;animation:spin 0.6s linear infinite;
-                 margin:0 auto}
+                 border-top-color:#000;border-radius:50%;
+                 animation:spin 0.6s linear infinite;margin:0 auto}
 .toggle.loading .spinner{display:block}
-.toggle.loading .label{display:none}
+.toggle.loading .lbl{display:none}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* Move buttons */
+.move-btns{display:grid;grid-template-columns:1fr 1fr 1fr;
+           grid-template-rows:1fr 1fr 1fr;gap:4px;margin-top:10px}
+.move-btn{background:#1e1e38;border:1px solid #2a2a4a;color:#888;
+          padding:6px;border-radius:6px;font-size:12px;cursor:pointer;
+          text-align:center}
+.move-btn:hover{background:#2a2a4a;color:#eee}
+.move-btn.blank{background:none;border:none;pointer-events:none}
+/* Empty state */
 .empty{color:#444;font-size:13px;text-align:center;padding:30px;
-       border:1px dashed #2a2a4a;border-radius:14px;margin-bottom:16px}
+       border:1px dashed #2a2a4a;border-radius:14px;grid-column:1/-1}
 /* Boot overlay */
 .boot-overlay{display:none;position:fixed;inset:0;
               background:rgba(10,10,26,0.85);backdrop-filter:blur(8px);
-              z-index:200;align-items:center;justify-content:center;
-              flex-direction:column;gap:16px}
+              z-index:200;align-items:center;justify-content:center;flex-direction:column;gap:16px}
 .boot-overlay.show{display:flex}
 .boot-spinner{width:40px;height:40px;border:3px solid #2a2a4a;
-              border-top-color:#00d4ff;border-radius:50%;
-              animation:spin 0.8s linear infinite}
+              border-top-color:#00d4ff;border-radius:50%;animation:spin 0.8s linear infinite}
 .boot-text{color:#888;font-size:14px;text-align:center}
-/* Batch modal */
+/* Modals */
 .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.8);
          z-index:100;align-items:center;justify-content:center;padding:16px}
 .overlay.show{display:flex}
 .modal{background:#1a1a2e;border-radius:18px;padding:24px;width:100%;
        max-width:420px;border:1px solid #2a2a4a;max-height:80vh;overflow-y:auto}
-.modal h2{color:#00d4ff;font-size:18px;margin-bottom:6px}
-.modal .subtitle{color:#888;font-size:12px;margin-bottom:20px}
-.ext-item{background:#111128;border-radius:12px;padding:14px;margin-bottom:12px;
-          border:1px solid #2a2a4a}
-.ext-item-header{display:flex;align-items:center;
-                 justify-content:space-between;margin-bottom:12px}
-.ext-uid{font-family:monospace;font-size:11px;color:#555}
-.ext-item input{width:100%;padding:10px;background:#1a1a2e;
-                border:1px solid #2a2a4a;border-radius:8px;
-                color:#eee;font-size:14px;margin-bottom:10px;outline:none}
-.ext-item input:focus{border-color:#00d4ff}
-.ext-item select{width:100%;padding:10px;background:#1a1a2e;
-                 border:1px solid #2a2a4a;border-radius:8px;
-                 color:#eee;font-size:13px;margin-bottom:10px;outline:none}
-.ext-actions{display:flex;gap:8px}
-.btn{padding:9px 16px;border:none;border-radius:8px;
-     font-size:13px;font-weight:700;cursor:pointer}
+.modal h2{color:#00d4ff;font-size:17px;margin-bottom:6px}
+.modal .subtitle{color:#666;font-size:12px;margin-bottom:18px}
+.ext-item{background:#111128;border-radius:12px;padding:14px;margin-bottom:10px;border:1px solid #2a2a4a}
+.ext-uid{font-family:monospace;font-size:10px;color:#444;margin-bottom:10px}
+.sw-inputs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.sw-inputs label{font-size:11px;color:#666;margin-bottom:4px;display:block}
+.ext-item input,.ext-item select{width:100%;padding:9px;background:#1a1a2e;
+  border:1px solid #2a2a4a;border-radius:8px;color:#eee;font-size:13px;outline:none}
+.ext-item input:focus,.ext-item select:focus{border-color:#00d4ff}
+.ext-actions{display:flex;gap:8px;margin-top:10px}
+.btn{padding:9px 14px;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer}
 .btn.primary{background:#00d4ff;color:#000}
 .btn.ghost{background:#2a2a4a;color:#aaa}
 .btn.danger{background:#2a0a0a;color:#ff4e4e;border:1px solid #ff4e4e}
-.modal-close{display:flex;justify-content:flex-end;margin-top:16px}
-/* Rename modal */
-.rename-modal{background:#1a1a2e;border-radius:18px;padding:24px;
-              width:100%;max-width:360px;border:1px solid #2a2a4a}
-.rename-modal h2{color:#00d4ff;font-size:16px;margin-bottom:16px}
-.rename-modal input{width:100%;padding:12px;background:#111128;
-                    border:1px solid #2a2a4a;border-radius:10px;
-                    color:#eee;font-size:15px;margin-bottom:16px;outline:none}
-.rename-modal input:focus{border-color:#00d4ff}
+.modal-close{display:flex;justify-content:flex-end;margin-top:14px}
+.input-modal{background:#1a1a2e;border-radius:18px;padding:24px;
+             width:100%;max-width:340px;border:1px solid #2a2a4a}
+.input-modal h2{color:#00d4ff;font-size:16px;margin-bottom:14px}
+.input-modal input{width:100%;padding:11px;background:#111128;
+  border:1px solid #2a2a4a;border-radius:10px;color:#eee;font-size:15px;
+  margin-bottom:14px;outline:none}
+.input-modal input:focus{border-color:#00d4ff}
+.btn-row{display:flex;gap:10px}
 </style>
 </head>
 <body>
@@ -893,9 +1051,7 @@ h1{color:#00d4ff;font-size:22px;margin-bottom:4px}
 <div class="boot-overlay" id="boot-overlay">
   <div class="boot-spinner"></div>
   <div class="boot-text">Connecting to switches...<br>
-    <span style="font-size:11px;color:#555;margin-top:4px;display:block">
-      Please wait while extensions come online
-    </span>
+    <span style="font-size:11px;color:#444;margin-top:4px;display:block">Please wait</span>
   </div>
 </div>
 
@@ -911,12 +1067,12 @@ h1{color:#00d4ff;font-size:22px;margin-bottom:4px}
   </div>
 </div>
 
-<!-- Rename modal -->
+<!-- Rename modal (switch or master) -->
 <div class="overlay" id="rename-overlay">
-  <div class="rename-modal">
-    <h2>Rename Extension</h2>
-    <input id="rename-input" type="text" maxlength="23" placeholder="New name"/>
-    <div class="btn-row" style="display:flex;gap:10px">
+  <div class="input-modal">
+    <h2 id="rename-title">Rename</h2>
+    <input id="rename-input" type="text" maxlength="23"/>
+    <div class="btn-row">
       <button class="btn ghost" onclick="closeRenameModal()">Cancel</button>
       <button class="btn primary" onclick="submitRename()">Save</button>
     </div>
@@ -925,25 +1081,42 @@ h1{color:#00d4ff;font-size:22px;margin-bottom:4px}
 
 <div class="topbar">
   <div>
-    <h1>Unisync</h1>
+    <div class="title-row">
+      <h1 id="master-title" onclick="renameMaster()">Master 1</h1>
+    </div>
     <div class="sub">
       <div class="dot" id="dot"></div>
       <span id="sub">Connecting...</span>
     </div>
   </div>
-  <button class="scan-btn" id="scan-btn" onclick="startScan()">
-    <span>&#9685;</span> Scan
-  </button>
+  <div class="topbar-btns">
+    <button class="top-btn scan" id="scan-btn" onclick="startScan()">Scan</button>
+    <button class="top-btn" id="reorder-btn" onclick="toggleReorder()">Reorder</button>
+    <button class="top-btn" id="save-btn" style="display:none;border-color:#4eff4e;color:#4eff4e"
+            onclick="saveOrder()">Save</button>
+    <button class="top-btn" id="cancel-btn" style="display:none"
+            onclick="cancelReorder()">Cancel</button>
+  </div>
 </div>
 
-<div id="root"></div>
+<div class="grid" id="grid"></div>
 
 <script>
-let ws, pendingData=[], offlineSlots=[];
-let reconnTimer=null;
-let activeMenuSlot=-1;
-let renameSlot=-1;
-let pendingToggles={};  /* slot_ch -> timeout */
+let ws, reconnTimer=null;
+let switchData=[], pendingData=[], offlineSlots=[];
+let reorderMode=false, reorderList=[], originalOrder=[];
+let renameTarget=null, renameType=null;
+let pendingToggles={};
+let activeMenuId=null;
+
+/* close menus on outside click */
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.sw-card')){
+    document.querySelectorAll('.sw-dropdown.show')
+      .forEach(d=>d.classList.remove('show'));
+    activeMenuId=null;
+  }
+});
 
 function uptime(s){
   if(s<60)return s+'s';
@@ -951,152 +1124,181 @@ function uptime(s){
   return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
 }
 
-/* Close any open dropdown when clicking outside */
-document.addEventListener('click', function(e){
-  if(!e.target.closest('.card')){
-    document.querySelectorAll('.dropdown.show')
-      .forEach(d=>d.classList.remove('show'));
-    activeMenuSlot=-1;
+function renderGrid(){
+  const list=reorderMode?reorderList:switchData;
+  let html='';
+  if(!list.length){
+    html='<div class="empty">No switches yet.<br>'+
+         '<span style="font-size:11px;color:#333;margin-top:4px;display:block">'+
+         'Tap Scan to find extensions.</span></div>';
   }
-});
-
-function toggleMenu(slot, e){
-  e.stopPropagation();
-  const d=document.getElementById('menu-'+slot);
-  const wasOpen=d.classList.contains('show');
-  document.querySelectorAll('.dropdown.show')
-    .forEach(dd=>dd.classList.remove('show'));
-  if(!wasOpen){ d.classList.add('show'); activeMenuSlot=slot; }
-  else activeMenuSlot=-1;
-}
-
-function card(id, slot, name, badgeCls, badgeLabel, r1, r2, offline, isMaster){
-  const menuHtml = isMaster ? '' : `
-    <button class="menu-btn" onclick="toggleMenu(${slot},event)">&#8942;</button>
-    <div class="dropdown" id="menu-${slot}">
-      <div class="dropdown-item" onclick="openRename(${slot},'${name.replace(/'/g,"\\'")}')">Rename</div>
-      <div class="dropdown-item danger" onclick="removeExt(${slot})">Remove</div>
-    </div>`;
-
-  const ch=(label,state,action,key)=>`
-    <div class="ch">
-      <div class="ch-label">${label}</div>
-      <button class="toggle ${state?'on':'off'}" id="btn-${key}"
-        onclick="${action}">
-        <span class="label">${state?'ON':'OFF'}</span>
+  list.forEach((sw,idx)=>{
+    const off=!sw.online;
+    const menuId='menu-'+sw.id;
+    const btnId='btn-'+sw.id;
+    const moveHtml=reorderMode?`
+      <div class="move-btns">
+        <div class="move-btn blank"></div>
+        <div class="move-btn" onclick="moveUp(${idx})">&#8593;</div>
+        <div class="move-btn blank"></div>
+        <div class="move-btn" onclick="moveLeft(${idx})">&#8592;</div>
+        <div class="move-btn blank"></div>
+        <div class="move-btn" onclick="moveRight(${idx})">&#8594;</div>
+        <div class="move-btn blank"></div>
+        <div class="move-btn" onclick="moveDown(${idx})">&#8595;</div>
+        <div class="move-btn blank"></div>
+      </div>`:'';
+    html+=`<div class="sw-card${off?' offline':''}${reorderMode?' reorder-mode':''}"
+               style="border-left-color:${sw.device_color}">
+      <div class="sw-top">
+        <div class="sw-names">
+          <div class="sw-name">${sw.name}</div>
+          <div class="sw-device">${sw.device_name}</div>
+        </div>
+        ${reorderMode?'':`
+        <button class="sw-menu-btn" onclick="toggleSwMenu('${sw.id}',event)">&#8942;</button>
+        <div class="sw-dropdown" id="${menuId}">
+          <div class="sw-dropdown-item" onclick="renameSwitch('${sw.id}','${sw.name.replace(/'/g,"\'")}')">Rename</div>
+        </div>`}
+      </div>
+      <button class="toggle ${sw.state?'on':'off'}" id="${btnId}"
+              ${off||reorderMode?'disabled':''} onclick="toggle('${sw.id}')">
+        <span class="lbl">${sw.state?'ON':'OFF'}</span>
         <div class="spinner"></div>
       </button>
+      ${moveHtml}
     </div>`;
-
-  return `<div class="card${offline?' offline':''}">
-    <div class="card-header">
-      <span class="card-title">${name}</span>
-      <div class="card-menu">
-        <span class="badge ${badgeCls}">${badgeLabel}</span>
-        ${menuHtml}
-      </div>
-    </div>
-    <div class="channels">
-      ${ch('Channel 1',r1,`toggle('${id}',1,'${id}_1')`,`${id}_1`)}
-      ${ch('Channel 2',r2,`toggle('${id}',2,'${id}_2')`,`${id}_2`)}
-    </div>
-  </div>`;
+  });
+  document.getElementById('grid').innerHTML=html;
 }
 
-function toggle(id, ch, key){
-  const btn=document.getElementById('btn-'+key);
+function toggle(id){
+  const btn=document.getElementById('btn-'+id);
   if(!btn||btn.disabled) return;
-
-  /* Optimistic update */
   const isOn=btn.classList.contains('on');
-  btn.classList.remove('on','off');
-  btn.classList.add(isOn?'off':'on','loading');
-  btn.querySelector('.label').textContent=isOn?'OFF':'ON';
+  btn.classList.remove('on','off'); btn.classList.add(isOn?'off':'on','loading');
+  btn.querySelector('.lbl').textContent=isOn?'OFF':'ON';
   btn.disabled=true;
-
-  /* Revert timeout if no WS confirmation in 1s */
   const timer=setTimeout(()=>{
     btn.classList.remove('loading');
     btn.classList.remove(isOn?'off':'on');
     btn.classList.add(isOn?'on':'off');
-    btn.querySelector('.label').textContent=isOn?'ON':'OFF';
+    btn.querySelector('.lbl').textContent=isOn?'ON':'OFF';
     btn.disabled=false;
-    delete pendingToggles[key];
+    delete pendingToggles[id];
   },1000);
-  pendingToggles[key]={timer,expectedState:!isOn};
-
-  fetch('/api/relay?id='+id+'&ch='+ch,{method:'POST'})
-    .catch(()=>{
-      clearTimeout(timer);
-      btn.classList.remove('loading');
-      btn.classList.remove(isOn?'off':'on');
-      btn.classList.add(isOn?'on':'off');
-      btn.querySelector('.label').textContent=isOn?'ON':'OFF';
-      btn.disabled=false;
-      delete pendingToggles[key];
-    });
+  pendingToggles[id]={timer,expected:!isOn};
+  fetch('/api/relay?id='+id+'&ch='+id.split('_')[1],{method:'POST'}).catch(()=>{
+    clearTimeout(timer);
+    btn.classList.remove('loading');
+    btn.classList.remove(isOn?'off':'on');
+    btn.classList.add(isOn?'on':'off');
+    btn.querySelector('.lbl').textContent=isOn?'ON':'OFF';
+    btn.disabled=false;
+    delete pendingToggles[id];
+  });
 }
 
-function confirmToggle(key, actualState){
-  if(!pendingToggles[key]) return;
-  clearTimeout(pendingToggles[key].timer);
-  const btn=document.getElementById('btn-'+key);
+function confirmToggle(id,actual){
+  if(!pendingToggles[id]) return;
+  clearTimeout(pendingToggles[id].timer);
+  const btn=document.getElementById('btn-'+id);
   if(btn){
     btn.classList.remove('loading','on','off');
-    btn.classList.add(actualState?'on':'off');
-    btn.querySelector('.label').textContent=actualState?'ON':'OFF';
+    btn.classList.add(actual?'on':'off');
+    btn.querySelector('.lbl').textContent=actual?'ON':'OFF';
     btn.disabled=false;
   }
-  delete pendingToggles[key];
+  delete pendingToggles[id];
 }
 
-function render(d){
-  /* Boot overlay */
-  const bo=document.getElementById('boot-overlay');
-  if(d.boot_complete) bo.classList.remove('show');
-  else bo.classList.add('show');
+/* -- Reorder -- */
+function toggleReorder(){
+  reorderMode=true;
+  reorderList=[...switchData];
+  originalOrder=[...switchData];
+  document.getElementById('reorder-btn').style.display='none';
+  document.getElementById('save-btn').style.display='';
+  document.getElementById('cancel-btn').style.display='';
+  renderGrid();
+}
 
-  document.getElementById('sub').textContent=
-    '192.168.4.1 | Uptime: '+uptime(d.uptime);
+function cancelReorder(){
+  reorderMode=false;
+  reorderList=[];
+  document.getElementById('reorder-btn').style.display='';
+  document.getElementById('save-btn').style.display='none';
+  document.getElementById('cancel-btn').style.display='none';
+  renderGrid();
+}
 
-  let html=card('master',-1,'Master','master','MASTER',
-    d.master.relay1,d.master.relay2,false,true);
+function swap(arr,a,b){
+  if(a<0||b<0||a>=arr.length||b>=arr.length) return false;
+  [arr[a],arr[b]]=[arr[b],arr[a]]; return true;
+}
 
-  for(const e of d.extensions){
-    const off=e.state==='offline';
-    html+=card(e.id,e.slot,e.name,
-      off?'offline':'online',off?'OFFLINE':'ONLINE',
-      e.relay1,e.relay2,off,false);
+function moveUp(idx){ if(swap(reorderList,idx,idx-2)) renderGrid(); }
+function moveDown(idx){ if(swap(reorderList,idx,idx+2)) renderGrid(); }
+function moveLeft(idx){ if(swap(reorderList,idx,idx-1)) renderGrid(); }
+function moveRight(idx){ if(swap(reorderList,idx,idx+1)) renderGrid(); }
 
-    /* Confirm pending toggles */
-    confirmToggle(e.id+'_1', e.relay1);
-    confirmToggle(e.id+'_2', e.relay2);
+async function saveOrder(){
+  const order=reorderList.map(s=>s.id).join(',');
+  await fetch('/api/switch/reorder',{
+    method:'POST',
+    headers:{'Content-Type':'text/plain'},
+    body:order
+  });
+  reorderMode=false;
+  document.getElementById('reorder-btn').style.display='';
+  document.getElementById('save-btn').style.display='none';
+  document.getElementById('cancel-btn').style.display='none';
+}
+
+/* -- Menu -- */
+function toggleSwMenu(id,e){
+  e.stopPropagation();
+  const d=document.getElementById('menu-'+id);
+  const was=d.classList.contains('show');
+  document.querySelectorAll('.sw-dropdown.show').forEach(x=>x.classList.remove('show'));
+  if(!was){d.classList.add('show');activeMenuId=id;}
+  else activeMenuId=null;
+}
+
+/* -- Rename -- */
+function renameMaster(){
+  renameTarget=null; renameType='master';
+  document.getElementById('rename-title').textContent='Rename Master';
+  document.getElementById('rename-input').value=
+    document.getElementById('master-title').textContent;
+  document.getElementById('rename-overlay').classList.add('show');
+  setTimeout(()=>document.getElementById('rename-input').focus(),100);
+}
+
+function renameSwitch(id,current){
+  document.querySelectorAll('.sw-dropdown.show').forEach(d=>d.classList.remove('show'));
+  renameTarget=id; renameType='switch';
+  document.getElementById('rename-title').textContent='Rename Switch';
+  document.getElementById('rename-input').value=current;
+  document.getElementById('rename-overlay').classList.add('show');
+  setTimeout(()=>document.getElementById('rename-input').focus(),100);
+}
+
+function closeRenameModal(){
+  document.getElementById('rename-overlay').classList.remove('show');
+  renameTarget=null; renameType=null;
+}
+
+async function submitRename(){
+  const name=document.getElementById('rename-input').value.trim();
+  if(!name) return;
+  if(renameType==='master'){
+    await fetch('/api/master/rename?name='+encodeURIComponent(name),{method:'POST'});
+    document.getElementById('master-title').textContent=name;
+  } else {
+    await fetch('/api/switch/rename?id='+renameTarget+'&name='+encodeURIComponent(name),{method:'POST'});
   }
-  /* Confirm master toggles */
-  confirmToggle('master_1', d.master.relay1);
-  confirmToggle('master_2', d.master.relay2);
-
-  if(!d.extensions.length&&!d.pending.length)
-    html+='<div class="empty">No extensions connected yet.<br>'+
-          '<span style="font-size:11px;color:#333;margin-top:4px;display:block">'+
-          'Tap Scan to find new extensions.</span></div>';
-
-  document.getElementById('root').innerHTML=html;
-
-  /* Store for batch modal */
-  pendingData=d.pending||[];
-  offlineSlots=d.offline_slots||[];
-
-  /* Scan button state */
-  const sb=document.getElementById('scan-btn');
-  if(d.scan_active) sb.classList.add('scanning');
-  else sb.classList.remove('scanning');
-
-  /* Auto-open batch modal if pending and not already open */
-  const batchOverlay=document.getElementById('batch-overlay');
-  if(pendingData.length>0&&!batchOverlay.classList.contains('show')){
-    openBatchModal();
-  }
+  closeRenameModal();
 }
 
 /* -- Scan -- */
@@ -1107,21 +1309,26 @@ async function startScan(){
 /* -- Batch modal -- */
 function openBatchModal(){
   const list=document.getElementById('batch-list');
-  const subtitle=document.getElementById('batch-subtitle');
-  subtitle.textContent=pendingData.length+' new extension'+(pendingData.length>1?'s':'')+' found';
-
-  list.innerHTML=pendingData.map((p,idx)=>{
+  document.getElementById('batch-subtitle').textContent=
+    pendingData.length+' new extension'+(pendingData.length>1?'s':'')+' found';
+  list.innerHTML=pendingData.map((p,i)=>{
     const opts=offlineSlots.map(s=>
-      `<option value="replace:${s.slot}">Replace "${s.name}"</option>`
+      `<option value="replace:${s.slot}">Replace Slot ${s.slot+1}</option>`
     ).join('');
     return `<div class="ext-item">
-      <div class="ext-item-header">
-        <span style="color:#888;font-size:12px">Extension ${idx+1}</span>
-        <span class="ext-uid">${p.uid}</span>
+      <div class="ext-uid">ID: ${p.uid}</div>
+      <div class="sw-inputs">
+        <div>
+          <label>Switch 1 name</label>
+          <input id="sw1-${p.uid}" type="text" placeholder="e.g. Bed Light" maxlength="23"/>
+        </div>
+        <div>
+          <label>Switch 2 name</label>
+          <input id="sw2-${p.uid}" type="text" placeholder="e.g. Bed Fan" maxlength="23"/>
+        </div>
       </div>
-      <input id="name-${p.uid}" type="text" placeholder="e.g. Living Room" maxlength="23"/>
       <select id="action-${p.uid}">
-        <option value="new">Add as new extension</option>
+        <option value="new">Add as new</option>
         ${opts}
       </select>
       <div class="ext-actions">
@@ -1130,7 +1337,6 @@ function openBatchModal(){
       </div>
     </div>`;
   }).join('');
-
   document.getElementById('batch-overlay').classList.add('show');
 }
 
@@ -1139,19 +1345,24 @@ function closeBatchModal(){
 }
 
 async function assignExt(uid){
-  const name=document.getElementById('name-'+uid).value.trim();
-  if(!name){document.getElementById('name-'+uid).focus();return;}
+  const sw1=document.getElementById('sw1-'+uid).value.trim()||'Switch';
+  const sw2=document.getElementById('sw2-'+uid).value.trim()||'Switch';
   const action=document.getElementById('action-'+uid).value;
-
+  let slot=-1;
   if(action.startsWith('replace:')){
-    const slot=parseInt(action.split(':')[1]);
-    if(!confirm('Replace the offline extension in slot '+(slot+1)+'?')) return;
-    await fetch('/api/replace?uid='+uid+'&slot='+slot+'&name='+encodeURIComponent(name),{method:'POST'});
+    slot=parseInt(action.split(':')[1]);
+    if(!confirm('Replace offline slot '+(slot+1)+'?')) return;
+    await fetch('/api/replace?uid='+uid+'&slot='+slot,{method:'POST'});
   } else {
-    await fetch('/api/assign?uid='+uid+'&name='+encodeURIComponent(name),{method:'POST'});
+    const r=await fetch('/api/assign?uid='+uid,{method:'POST'});
+    const d=await r.json();
+    slot=d.slot!==undefined?d.slot:-1;
   }
-
-  /* Remove from local list */
+  /* Save switch names */
+  if(slot>=0){
+    await fetch('/api/switch/rename?id=ext'+slot+'_1&name='+encodeURIComponent(sw1),{method:'POST'});
+    await fetch('/api/switch/rename?id=ext'+slot+'_2&name='+encodeURIComponent(sw2),{method:'POST'});
+  }
   pendingData=pendingData.filter(p=>p.uid!==uid);
   if(pendingData.length===0) closeBatchModal();
   else openBatchModal();
@@ -1164,34 +1375,35 @@ async function ignoreExt(uid){
   else openBatchModal();
 }
 
-/* -- Rename -- */
-function openRename(slot,currentName){
-  document.querySelectorAll('.dropdown.show')
-    .forEach(d=>d.classList.remove('show'));
-  renameSlot=slot;
-  document.getElementById('rename-input').value=currentName;
-  document.getElementById('rename-overlay').classList.add('show');
-  setTimeout(()=>document.getElementById('rename-input').focus(),100);
-}
+/* -- Render -- */
+function render(d){
+  /* Boot overlay */
+  document.getElementById('boot-overlay')
+    .classList.toggle('show',!d.boot_complete);
 
-function closeRenameModal(){
-  document.getElementById('rename-overlay').classList.remove('show');
-  renameSlot=-1;
-}
+  document.getElementById('sub').textContent=
+    '192.168.4.1 | '+uptime(d.uptime);
+  document.getElementById('master-title').textContent=d.master_name||'Master 1';
 
-async function submitRename(){
-  const name=document.getElementById('rename-input').value.trim();
-  if(!name||renameSlot<0) return;
-  await fetch('/api/rename?slot='+renameSlot+'&name='+encodeURIComponent(name),{method:'POST'});
-  closeRenameModal();
-}
+  /* Scan button */
+  document.getElementById('scan-btn')
+    .classList.toggle('scanning',!!d.scan_active);
 
-/* -- Remove -- */
-async function removeExt(slot){
-  document.querySelectorAll('.dropdown.show')
-    .forEach(d=>d.classList.remove('show'));
-  if(!confirm('Remove this extension? It will need to be re-assigned if reconnected.')) return;
-  await fetch('/api/remove?slot='+slot,{method:'POST'});
+  switchData=d.switches||[];
+  pendingData=d.pending||[];
+  offlineSlots=d.offline_slots||[];
+
+  /* Confirm pending toggles */
+  switchData.forEach(sw=>{
+    confirmToggle(sw.id, sw.state);
+  });
+
+  if(!reorderMode) renderGrid();
+
+  /* Batch modal */
+  const bo=document.getElementById('batch-overlay');
+  if(pendingData.length>0&&!bo.classList.contains('show')) openBatchModal();
+  else if(pendingData.length===0) bo.classList.remove('show');
 }
 
 /* -- WebSocket -- */
@@ -1200,13 +1412,11 @@ function connect(){
   ws=new WebSocket('ws://192.168.4.1:81');
   ws.onopen=()=>{
     document.getElementById('dot').classList.add('on');
-    document.getElementById('sub').textContent='Connected';
     document.getElementById('boot-overlay').classList.add('show');
   };
-  ws.onmessage=(e)=>{try{render(JSON.parse(e.data));}catch(err){}};
+  ws.onmessage=e=>{try{render(JSON.parse(e.data));}catch(err){}};
   ws.onclose=()=>{
     document.getElementById('dot').classList.remove('on');
-    document.getElementById('sub').textContent='Reconnecting...';
     reconnTimer=setTimeout(connect,2000);
   };
   ws.onerror=()=>ws.close();
@@ -1231,7 +1441,8 @@ static void setup_web(void) {
         int ch=server.arg("ch").toInt();
         uint32_t now=millis();
 
-        if (id=="master"&&(ch==1||ch==2)) {
+        /* id format: "master_1" or "master_2" */
+        if (id.startsWith("master")&&(ch==1||ch==2)) {
             /* Rate limiting */
             uint32_t *last=(ch==1)?&last_relay1_cmd_ms:&last_relay2_cmd_ms;
             if ((now-*last)<RELAY_RATE_LIMIT_MS) {
@@ -1247,7 +1458,9 @@ static void setup_web(void) {
             server.send(200,"application/json","{\"ok\":true}"); return;
         }
         if (id.startsWith("ext")) {
-            int slot=id.substring(3).toInt();
+            /* id: "ext0_1" -> slot=0, ch parsed from arg */
+            int us=id.indexOf('_'); 
+            int slot=(us>0)?id.substring(3,us).toInt():id.substring(3).toInt();
             if (slot>=0&&slot<MAX_EXTENSIONS) {
                 /* Rate limiting per channel */
                 uint32_t *last=(ch==1)?&extensions[slot].last_relay1_cmd_ms
@@ -1294,12 +1507,12 @@ static void setup_web(void) {
         pending_remove(uid);
         xSemaphoreGive(state_mutex);
 
-        nvs_save(uid,slot,name.c_str());
+        nvs_save(uid,slot,"Switch");
         send_welcome(uid,new_addr,false,false);
-        Serial.printf("[ASSIGN] %s -> slot%d addr=0x%02X\n",
-                      name.c_str(),slot+1,new_addr);
+        Serial.printf("[ASSIGN] slot%d addr=0x%02X\n", slot+1, new_addr);
         notify_ui();
-        server.send(200,"application/json","{\"ok\":true}");
+        String resp="{\"ok\":true,\"slot\":"+String(slot)+"}";
+        server.send(200,"application/json",resp);
     });
 
     /* Replace offline slot */
@@ -1396,6 +1609,45 @@ static void setup_web(void) {
         server.send(200,"application/json","{\"ok\":true}");
     });
 
+    /* Rename individual switch */
+    server.on("/api/switch/rename", HTTP_POST, [](){
+        String id   = server.arg("id");
+        String name = server.arg("name");
+        if (id.length()==0||name.length()==0) {
+            server.send(400,"application/json","{\"ok\":false}"); return; }
+        nvs_save_switch_name(id.c_str(), name.c_str());
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
+    /* Rename master */
+    server.on("/api/master/rename", HTTP_POST, [](){
+        String name = server.arg("name");
+        if (name.length()==0) {
+            server.send(400,"application/json","{\"ok\":false}"); return; }
+        xSemaphoreTake(state_mutex,portMAX_DELAY);
+        strncpy(master_name,name.c_str(),sizeof(master_name)-1);
+        master_name[sizeof(master_name)-1]=' ';
+        xSemaphoreGive(state_mutex);
+        nvs_save_master_name(name.c_str());
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
+    /* Save switch order - single call after all moves done */
+    server.on("/api/switch/reorder", HTTP_POST, [](){
+        String body = server.arg("plain");
+        if (body.length()==0) {
+            server.send(400,"application/json","{\"ok\":false}"); return; }
+        /* Body is plain comma-separated switch IDs */
+        xSemaphoreTake(state_mutex,portMAX_DELAY);
+        switch_order = body;
+        xSemaphoreGive(state_mutex);
+        nvs_save_switch_order(body);
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
     /* Manual scan trigger */
     server.on("/api/scan", HTTP_POST, [](){
         xSemaphoreTake(state_mutex,portMAX_DELAY);
@@ -1432,13 +1684,6 @@ void setup() {
     delay(500);
     Serial.println("\n[MASTER] Unisync v5.0 - booting");
 
-    /* Get master UID from ESP32 MAC */
-    uint8_t mac[6]; WiFi.macAddress(mac);
-    master_uid[0]=mac[2]; master_uid[1]=mac[3];
-    master_uid[2]=mac[4]; master_uid[3]=mac[5];
-    Serial.printf("[MASTER] UID=%02X%02X%02X%02X\n",
-                  master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-
     pinMode(RELAY1_PIN,   OUTPUT); digitalWrite(RELAY1_PIN,   LOW);
     pinMode(RELAY2_PIN,   OUTPUT); digitalWrite(RELAY2_PIN,   LOW);
     pinMode(RS485_DE_PIN, OUTPUT); digitalWrite(RS485_DE_PIN, LOW);
@@ -1469,6 +1714,13 @@ void setup() {
     prefs.begin("ext_map",false); prefs.end();
     nvs_restore_all();
 
+    /* Load master name and switch order */
+    nvs_load_master_name(master_name, sizeof(master_name));
+    switch_order = nvs_load_switch_order();
+    Serial.printf("[MASTER] Name: %s\n", master_name);
+
+    boot_start_ms = millis();
+
     /* If no extensions in NVS, boot is immediately complete */
     bool has_extensions=false;
     for (int i=0;i<MAX_EXTENSIONS;i++)
@@ -1484,6 +1736,13 @@ void setup() {
     WiFi.softAPConfig(AP_IP,AP_GW,AP_SUBNET);
     WiFi.softAP(AP_SSID,AP_PASS);
     Serial.printf("[WIFI] AP: %s  IP: %s\n",AP_SSID,AP_IP.toString().c_str());
+
+    /* Get master UID from MAC - must be after WiFi init */
+    uint8_t mac[6]; WiFi.macAddress(mac);
+    master_uid[0]=mac[2]; master_uid[1]=mac[3];
+    master_uid[2]=mac[4]; master_uid[3]=mac[5];
+    Serial.printf("[MASTER] UID=%02X%02X%02X%02X\n",
+                  master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
 
     setup_web();
 

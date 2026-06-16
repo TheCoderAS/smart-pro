@@ -68,6 +68,8 @@
 /* ================================================================
  * STATE
  * ================================================================ */
+#define ORPHAN_TIMEOUT_MS  30000  /* 30s no poll -> self unregister */
+
 typedef enum {
     MODE_UNREGISTERED = 0,  /* announce every 2s */
     MODE_REGISTERED,        /* respond to master polls */
@@ -96,6 +98,8 @@ static uint8_t       event_count = 0;
 
 static bool last_t1 = false;
 static bool last_t2 = false;
+static uint32_t last_poll_ms  = 0;
+static bool     poll_received = false;
 
 /* RX accumulator */
 static uint8_t rx_buf[40];
@@ -171,6 +175,26 @@ static void load_state(void) {
     relay1_state  = (relay & 0x01) != 0;
     relay2_state  = (relay & 0x02) != 0;
     mode          = MODE_REGISTERED;
+}
+
+static void self_unregister(void) {
+    /* Wipe EEPROM - extension becomes unregistered */
+    eeprom_write(EEPROM_MAGIC_ADDR,     0x00);
+    eeprom_write(EEPROM_ADDR_ADDR,      0x00);
+    eeprom_write(EEPROM_MASTER_UID + 0, 0x00);
+    eeprom_write(EEPROM_MASTER_UID + 1, 0x00);
+    eeprom_write(EEPROM_MASTER_UID + 2, 0x00);
+    eeprom_write(EEPROM_MASTER_UID + 3, 0x00);
+    slot_address    = ADDR_UNASSIGNED;
+    mode            = MODE_UNREGISTERED;
+    poll_received   = false;
+    announce_interval = 10000; /* orphaned - announce every 10s */
+    last_announce_ms  = 0;     /* announce immediately */
+    /* Visual indicator - 5 rapid blinks */
+    for (uint8_t i = 0; i < 5; i++) {
+        digitalWrite(LED, HIGH); delay(100);
+        digitalWrite(LED, LOW);  delay(100);
+    }
 }
 
 static void save_registration(uint8_t addr, uint8_t *m_uid) {
@@ -339,14 +363,21 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         if (plen < 10) return;
         /* Verify UID matches us */
         if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
-        /* H5: check if already registered to a different master */
+        /* H5: check if already registered to a different master
+         * Only enforce if stored master_uid is non-zero (valid)
+         * A5A5A5A5 is uninitialized EEPROM pattern - ignore it  */
         if (mode == MODE_REGISTERED) {
-            bool same_master = (p[6]==master_uid[0] && p[7]==master_uid[1] &&
-                                p[8]==master_uid[2] && p[9]==master_uid[3]);
-            if (!same_master) {
-                /* Different master trying to claim us - reject */
-                send_frame(ADDR_MASTER, CMD_ERROR, uid, 4);
-                return;
+            bool stored_valid = (master_uid[0]!=0xA5 || master_uid[1]!=0xA5 ||
+                                 master_uid[2]!=0xA5 || master_uid[3]!=0xA5) &&
+                                (master_uid[0]!=0x00 || master_uid[1]!=0x00 ||
+                                 master_uid[2]!=0x00 || master_uid[3]!=0x00);
+            if (stored_valid) {
+                bool same_master = (p[6]==master_uid[0] && p[7]==master_uid[1] &&
+                                    p[8]==master_uid[2] && p[9]==master_uid[3]);
+                if (!same_master) {
+                    send_frame(ADDR_MASTER, CMD_ERROR, uid, 4);
+                    return;
+                }
             }
         }
         uint8_t new_addr  = p[4];
@@ -402,6 +433,8 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         break;
 
     case CMD_GET_STATE:
+        last_poll_ms  = millis();
+        poll_received = true;
         send_state_resp();
         break;
 
@@ -515,6 +548,7 @@ void setup() {
     digitalWrite(RELAY1, relay1_state ? HIGH : LOW);
     digitalWrite(RELAY2, relay2_state ? HIGH : LOW);
 
+    last_poll_ms = millis(); /* start orphan timer from boot */
     startup_blink();
 }
 
@@ -546,7 +580,14 @@ void loop() {
         break;
 
     case MODE_REGISTERED:
-        /* Normal poll-response - nothing to initiate */
+        /* Check for orphan condition:
+         * If no poll received within ORPHAN_TIMEOUT_MS after boot
+         * then master doesn't know us anymore - self unregister     */
+        if (!poll_received &&
+            (millis() - last_poll_ms) > ORPHAN_TIMEOUT_MS &&
+            millis() > ORPHAN_TIMEOUT_MS) {
+            self_unregister();
+        }
         break;
 
     case MODE_OTA:
