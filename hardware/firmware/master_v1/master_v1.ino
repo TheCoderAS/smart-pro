@@ -60,8 +60,8 @@
 #define POLL_MS           200
 #define MISSED_MAX        5
 #define BUS_RESP_MS       20
-#define LISTEN_WINDOW_MS  50
-#define LISTEN_INTERVAL_MS 1000
+#define LISTEN_WINDOW_MS  30
+#define LISTEN_INTERVAL_MS 200
 #define OFFLINE_TIMEOUT_MS 5000  /* boot grace period */
 
 #define SOF               0xAA
@@ -718,7 +718,8 @@ static void run_listen_window(void) {
                     if (elen>0&&pos>=elen) {
                         if (buf[3]==CMD_ANNOUNCE)  handle_announce(buf);
                         if (buf[3]==CMD_RESPONSE)  handle_response(buf);
-                        pos=0; elen=0; break;
+                        pos=0; elen=0;
+                        /* continue reading - may be more frames */
                     }
                 }
             }
@@ -848,7 +849,7 @@ static void task_touch(void *arg) {
             if (cmd.channel==1) master_relay1=cmd.state;
             else                master_relay2=cmd.state;
             xSemaphoreGive(state_mutex);
-            digitalWrite(cmd.channel==1?RELAY1_PIN:RELAY2_PIN,cmd.state?HIGH:LOW);
+            digitalWrite(cmd.channel==1?RELAY1_PIN:RELAY2_PIN,cmd.state?LOW:HIGH);
             relay_state_save(); notify_ui();
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -900,9 +901,34 @@ static void task_bus(void *arg) {
             check_boot_complete();
         }
 
-        /* Listen window for ANNOUNCE frames */
+        /* Listen window for ANNOUNCE frames
+         * Drain relay commands first so UI stays responsive */
         if ((now-last_listen)>=LISTEN_INTERVAL_MS) {
             last_listen=now;
+            /* Process any pending relay commands before blocking on listen */
+            relay_cmd_t pre_cmd;
+            while (xQueueReceive(ext_relay_queue,&pre_cmd,0)==pdTRUE) {
+                if (pre_cmd.target>=0&&pre_cmd.target<MAX_EXTENSIONS) {
+                    xSemaphoreTake(state_mutex,portMAX_DELAY);
+                    if (extensions[pre_cmd.target].state==EXT_ONLINE) {
+                        uint8_t addr=extensions[pre_cmd.target].address;
+                        bool r1=extensions[pre_cmd.target].relay1;
+                        bool r2=extensions[pre_cmd.target].relay2;
+                        if (pre_cmd.channel==1) r1=pre_cmd.state;
+                        else                    r2=pre_cmd.state;
+                        extensions[pre_cmd.target].relay1=r1;
+                        extensions[pre_cmd.target].relay2=r2;
+                        uint8_t mask=(r1?0x01:0)|(r2?0x02:0);
+                        xSemaphoreGive(state_mutex);
+                        uint8_t payload[1]={mask};
+                        flush_rx();
+                        bus_send(addr,CMD_SET_RELAY,payload,1);
+                        uint8_t resp[40];
+                        bus_recv(resp,sizeof(resp),BUS_RESP_MS);
+                        notify_ui();
+                    } else { xSemaphoreGive(state_mutex); }
+                }
+            }
             run_listen_window();
 
             /* Also run during active scan */
@@ -2072,8 +2098,8 @@ void setup() {
     delay(500);
     Serial.println("\n[MASTER] Unisync v5.0 - booting");
 
-    pinMode(RELAY1_PIN,   OUTPUT); digitalWrite(RELAY1_PIN,   LOW);
-    pinMode(RELAY2_PIN,   OUTPUT); digitalWrite(RELAY2_PIN,   LOW);
+    pinMode(RELAY1_PIN,   OUTPUT); digitalWrite(RELAY1_PIN,   HIGH); /* active LOW */
+    pinMode(RELAY2_PIN,   OUTPUT); digitalWrite(RELAY2_PIN,   HIGH); /* active LOW */
     pinMode(RS485_DE_PIN, OUTPUT); digitalWrite(RS485_DE_PIN, LOW);
     pinMode(TOUCH1_PIN,   INPUT);
     pinMode(TOUCH2_PIN,   INPUT);
@@ -2081,8 +2107,8 @@ void setup() {
     BusSerial.begin(UART_BAUD, SERIAL_8N1, BUS_RX_PIN, BUS_TX_PIN);
 
     relay_state_load();
-    digitalWrite(RELAY1_PIN, master_relay1?HIGH:LOW);
-    digitalWrite(RELAY2_PIN, master_relay2?HIGH:LOW);
+    digitalWrite(RELAY1_PIN, master_relay1?LOW:HIGH);
+    digitalWrite(RELAY2_PIN, master_relay2?LOW:HIGH);
     Serial.printf("[RELAY] Restored: CH1=%s CH2=%s\n",
                   master_relay1?"ON":"OFF", master_relay2?"ON":"OFF");
 

@@ -207,8 +207,8 @@ static void self_unregister(void) {
     /* Turn relays OFF and clear saved state */
     relay1_state = false;
     relay2_state = false;
-    digitalWrite(RELAY1, LOW);
-    digitalWrite(RELAY2, LOW);
+    digitalWrite(RELAY1, HIGH);  /* active LOW - HIGH = OFF */
+    digitalWrite(RELAY2, HIGH);
     eeprom_write(EEPROM_RELAY_ADDR, 0x00);
     /* Wipe EEPROM - extension becomes unregistered */
     eeprom_write(EEPROM_MAGIC_ADDR,     0x00);
@@ -220,7 +220,7 @@ static void self_unregister(void) {
     slot_address    = ADDR_UNASSIGNED;
     mode            = MODE_UNREGISTERED;
     poll_received   = false;
-    announce_interval = 10000; /* orphaned - announce every 10s */
+    announce_interval = 2000;  /* self-unregistered - announce every 2s */
     last_announce_ms  = 0;     /* announce immediately */
     /* Visual indicator - 5 rapid blinks */
     for (uint8_t i = 0; i < 5; i++) {
@@ -285,13 +285,13 @@ static void send_frame(uint8_t dst, uint8_t cmd,
  * ================================================================ */
 static void set_relay1(bool s) {
     relay1_state = s;
-    digitalWrite(RELAY1, s ? HIGH : LOW);
+    digitalWrite(RELAY1, s ? LOW : HIGH);  /* active LOW relay */
     save_relay_state();
 }
 
 static void set_relay2(bool s) {
     relay2_state = s;
-    digitalWrite(RELAY2, s ? HIGH : LOW);
+    digitalWrite(RELAY2, s ? LOW : HIGH);  /* active LOW relay */
     save_relay_state();
 }
 
@@ -434,7 +434,7 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         buf[4]=(uptime_s>>8)&0xFF;  buf[5]=(uptime_s)&0xFF;
         send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
         /* Reset orphan timer - we just got welcomed, start fresh */
-        last_poll_ms  = millis();
+        last_poll_ms  = millis(); /* reset orphan timer on welcome */
         poll_received = false;
         /* Stop announcing immediately - master will poll us now */
         last_announce_ms = millis() + 30000;
@@ -594,8 +594,8 @@ static void startup_blink(void) {
  * SETUP
  * ================================================================ */
 void setup() {
-    pinMode(RELAY1, OUTPUT); digitalWrite(RELAY1, LOW);
-    pinMode(RELAY2, OUTPUT); digitalWrite(RELAY2, LOW);
+    pinMode(RELAY1, OUTPUT); digitalWrite(RELAY1, HIGH);  /* HIGH = relay OFF */
+    pinMode(RELAY2, OUTPUT); digitalWrite(RELAY2, HIGH);  /* HIGH = relay OFF */
     pinMode(LED,    OUTPUT); digitalWrite(LED,    LOW);
     pinMode(DE_RE,  OUTPUT); digitalWrite(DE_RE,  LOW);
     pinMode(TOUCH1, INPUT);
@@ -610,9 +610,9 @@ void setup() {
 
     load_state();
 
-    /* Apply restored relay states to GPIO */
-    digitalWrite(RELAY1, relay1_state ? HIGH : LOW);
-    digitalWrite(RELAY2, relay2_state ? HIGH : LOW);
+    /* Apply restored relay states to GPIO (active LOW) */
+    digitalWrite(RELAY1, relay1_state ? LOW : HIGH);
+    digitalWrite(RELAY2, relay2_state ? LOW : HIGH);
 
     last_poll_ms = millis(); /* start orphan timer from boot */
     startup_blink();
@@ -647,10 +647,10 @@ void loop() {
 
     case MODE_REGISTERED:
         /* Check for orphan condition:
-         * If no poll received within ORPHAN_TIMEOUT_MS after boot
-         * then master doesn't know us anymore - self unregister     */
-        if (!poll_received &&
-            (millis() - last_poll_ms) > ORPHAN_TIMEOUT_MS &&
+         * Case 1: Never received a poll since boot (master doesn't know us)
+         * Case 2: Was receiving polls but stopped (master removed/replaced)
+         * Both cases: self unregister after ORPHAN_TIMEOUT_MS             */
+        if ((millis() - last_poll_ms) > ORPHAN_TIMEOUT_MS &&
             millis() > ORPHAN_TIMEOUT_MS) {
             self_unregister();
         }
