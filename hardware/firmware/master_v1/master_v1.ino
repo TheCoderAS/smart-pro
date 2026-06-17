@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v5.0
+ * Unisync - Master Firmware v5.1
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -23,6 +23,8 @@
 #include "WiFi.h"
 #include "WebServer.h"
 #include "Preferences.h"
+#include "Update.h"
+#define WEBSOCKETS_MAX_DATA_SIZE 4096
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
 #include "freertos/FreeRTOS.h"
@@ -56,7 +58,7 @@
 #define UART_BAUD         250000
 #define MAX_EXTENSIONS    5
 #define POLL_MS           200
-#define MISSED_MAX        3
+#define MISSED_MAX        5
 #define BUS_RESP_MS       20
 #define LISTEN_WINDOW_MS  50
 #define LISTEN_INTERVAL_MS 1000
@@ -82,13 +84,18 @@
 #define CMD_ANNOUNCE      0x50
 #define CMD_WELCOME       0x51
 #define CMD_REJECT        0x52
-#define CMD_FACTORY_RESET 0x60  /* M->E: wipe EEPROM, reboot unregistered */
+#define CMD_CHALLENGE     0x54  /* M->E: uid[4] + challenge[4] */
+#define CMD_RESPONSE      0x55  /* E->M: uid[4] + crc32[4] */
+#define CMD_FACTORY_RESET 0x60
 #define CMD_ERROR         0xF0
+
+/* Secret key - must match extension firmware exactly */
+static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63, 0x53, 0x77, 0x69, 0x74, 0x63, 0x68, 0x4B, 0x65, 0x79};
 
 /* ================================================================
  * RELAY RATE LIMITING
  * ================================================================ */
-#define RELAY_RATE_LIMIT_MS  500  /* min ms between UI relay commands per channel */
+#define RELAY_RATE_LIMIT_MS  200  /* min ms between UI relay commands per channel */
 
 /* ================================================================
  * DEVICE COLOR PALETTE
@@ -122,6 +129,15 @@ typedef struct {
     bool        polled_once;         /* for boot overlay */
 } extension_t;
 
+/* Pending challenge tracking */
+#define MAX_CHALLENGES 5
+typedef struct {
+    uint8_t  uid[4];
+    uint8_t  challenge[4];
+    uint32_t sent_ms;
+    bool     active;
+} pending_challenge_t;
+
 /* Pending (unregistered) extensions queue */
 #define MAX_PENDING 5
 typedef struct {
@@ -136,6 +152,13 @@ typedef struct {
     bool    state;
 } relay_cmd_t;
 
+typedef struct {
+    uint8_t uid[4];
+    uint8_t addr;
+    bool    relay1;
+    bool    relay2;
+} welcome_cmd_t;
+
 /* ================================================================
  * SHARED STATE
  * ================================================================ */
@@ -146,10 +169,14 @@ static bool         master_relay2 = false;
 static uint32_t     last_relay1_cmd_ms = 0;
 static uint32_t     last_relay2_cmd_ms = 0;
 static bool         boot_complete  = false;  /* boot overlay flag */
-static bool         scan_active    = false;  /* manual scan in progress */
-static uint32_t     scan_end_ms    = 0;
+static bool              scan_active    = false;
+static uint32_t          scan_end_ms    = 0;
+static pending_challenge_t challenges[MAX_CHALLENGES];
 static char         master_name[24] = "Master 1";
 static String       switch_order   = "";  /* comma-separated switch IDs */
+static bool         ota_in_progress = false;
+static int          ota_progress    = 0;   /* 0-100 percent */
+static String       ota_status      = "";
 
 /* Master UID (from ESP32 MAC) */
 static uint8_t master_uid[4] = {0};
@@ -158,6 +185,7 @@ static SemaphoreHandle_t state_mutex;
 static QueueHandle_t     master_relay_queue;
 static QueueHandle_t     ext_relay_queue;
 static QueueHandle_t     ws_notify_queue;
+static QueueHandle_t     welcome_queue;
 
 /* ================================================================
  * OBJECTS
@@ -178,6 +206,25 @@ static uint8_t crc8(const uint8_t *d, uint8_t len) {
             crc = (crc & 0x80) ? (crc<<1)^0x07 : crc<<1;
     }
     return crc;
+}
+
+static uint32_t crc32_compute(const uint8_t *data, uint8_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    while (len--) {
+        crc ^= *data++;
+        for (int i=0; i<8; i++)
+            crc = (crc & 1) ? (crc>>1)^0xEDB88320 : crc>>1;
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+static uint32_t compute_expected_response(const uint8_t *challenge,
+                                          const uint8_t *uid) {
+    uint8_t buf[24];
+    for (int i=0; i<16; i++) buf[i]    = SECRET_KEY[i];
+    for (int i=0; i<4;  i++) buf[16+i] = challenge[i];
+    for (int i=0; i<4;  i++) buf[20+i] = uid[i];
+    return crc32_compute(buf, 24);
 }
 
 /* ================================================================
@@ -458,6 +505,72 @@ static int pending_count(void) {
 /* ================================================================
  * SEND WELCOME
  * ================================================================ */
+/* Send challenge to extension before welcoming */
+static void send_challenge(const uint8_t *uid) {
+    /* Generate pseudo-random challenge using uid + millis */
+    uint32_t now = millis();
+    uint8_t  challenge[4];
+    challenge[0] = (now >> 24) ^ uid[0] ^ uid[3];
+    challenge[1] = (now >> 16) ^ uid[1] ^ uid[2];
+    challenge[2] = (now >>  8) ^ uid[2] ^ uid[1];
+    challenge[3] = (now)       ^ uid[3] ^ uid[0];
+
+    /* Store challenge for verification */
+    for (int i=0; i<MAX_CHALLENGES; i++) {
+        if (!challenges[i].active) {
+            memcpy(challenges[i].uid,       uid,       4);
+            memcpy(challenges[i].challenge, challenge, 4);
+            challenges[i].sent_ms = millis();
+            challenges[i].active  = true;
+            break;
+        }
+    }
+
+    uint8_t frame[40];
+    frame[0]=SOF; frame[1]=ADDR_UNASSIGNED; frame[2]=ADDR_MASTER;
+    frame[3]=CMD_CHALLENGE; frame[4]=8;
+    frame[5]=uid[0]; frame[6]=uid[1]; frame[7]=uid[2]; frame[8]=uid[3];
+    frame[9]=challenge[0]; frame[10]=challenge[1];
+    frame[11]=challenge[2]; frame[12]=challenge[3];
+    frame[13]=crc8(&frame[1], 12);
+    digitalWrite(RS485_DE_PIN, HIGH);
+    BusSerial.write(frame, 14);
+    BusSerial.flush();
+    digitalWrite(RS485_DE_PIN, LOW);
+    Serial.printf("[SEC] Challenge sent to %02X%02X%02X%02X\n",
+                  uid[0],uid[1],uid[2],uid[3]);
+}
+
+/* Verify challenge response and return true if valid */
+static bool verify_response(const uint8_t *uid, const uint8_t *resp_crc32) {
+    uint32_t received = ((uint32_t)resp_crc32[0]<<24)|
+                        ((uint32_t)resp_crc32[1]<<16)|
+                        ((uint32_t)resp_crc32[2]<<8) |
+                        ((uint32_t)resp_crc32[3]);
+    for (int i=0; i<MAX_CHALLENGES; i++) {
+        if (!challenges[i].active) continue;
+        if (memcmp(challenges[i].uid, uid, 4) != 0) continue;
+        /* Challenge expires after 5 seconds */
+        if ((millis()-challenges[i].sent_ms) > 5000) {
+            challenges[i].active = false; continue;
+        }
+        uint32_t expected = compute_expected_response(challenges[i].challenge, uid);
+        challenges[i].active = false; /* consume challenge */
+        if (received == expected) {
+            Serial.printf("[SEC] Auth OK %02X%02X%02X%02X\n",
+                          uid[0],uid[1],uid[2],uid[3]);
+            return true;
+        } else {
+            Serial.printf("[SEC] Auth FAIL %02X%02X%02X%02X\n",
+                          uid[0],uid[1],uid[2],uid[3]);
+            return false;
+        }
+    }
+    Serial.printf("[SEC] No challenge found for %02X%02X%02X%02X\n",
+                  uid[0],uid[1],uid[2],uid[3]);
+    return false;
+}
+
 static void send_welcome(const uint8_t *uid, uint8_t addr,
                          bool r1, bool r2) {
     uint8_t payload[10];
@@ -501,42 +614,59 @@ static void handle_announce(const uint8_t *frame) {
 
     const uint8_t *uid=&frame[5];
 
+    /* Always challenge first - no WELCOME without auth */
+    /* Check if we already have an active challenge for this UID */
+    bool has_challenge=false;
+    for (int i=0;i<MAX_CHALLENGES;i++) {
+        if (challenges[i].active&&memcmp(challenges[i].uid,uid,4)==0) {
+            has_challenge=true; break;
+        }
+    }
+    /* Send new challenge if none pending */
+    if (!has_challenge) send_challenge(uid);
+}
+
+/* Called when CMD_RESPONSE received - verify and complete registration */
+static void handle_response(const uint8_t *frame) {
+    uint8_t plen=frame[4];
+    if (plen<8) return;
+    if (frame[5+plen]!=crc8(&frame[1],4+plen)) return;
+
+    const uint8_t *uid      = &frame[5];
+    const uint8_t *resp_crc = &frame[9];
+
+    if (!verify_response(uid, resp_crc)) {
+        /* Auth failed - send reject */
+        send_reject(uid);
+        Serial.printf("[SEC] REJECT invalid response from %02X%02X%02X%02X\n",
+                      uid[0],uid[1],uid[2],uid[3]);
+        return;
+    }
+
+    /* Auth passed - now process registration */
     /* Check if already registered in RAM */
     int existing=find_slot_by_uid(uid);
     if (existing>=0) {
-        if (extensions[existing].state==EXT_ONLINE) {
-            /* Already online - extension should be in poll-response mode
-             * If it keeps announcing, it may have rebooted and lost state
-             * Re-welcome it to put it back in registered mode            */
-            uint8_t addr=extensions[existing].address;
-            send_welcome(uid,addr,
-                        extensions[existing].relay1,
-                        extensions[existing].relay2);
-            Serial.printf("[ANNOUNCE] Re-welcoming online ext %s addr=0x%02X\n",
-                          extensions[existing].name,addr);
-        } else if (extensions[existing].state==EXT_OFFLINE) {
-            uint8_t addr=extensions[existing].address;
-            send_welcome(uid,addr,
-                        extensions[existing].relay1,
-                        extensions[existing].relay2);
-            /* Mark polled_once so boot overlay doesn't wait forever */
-            xSemaphoreTake(state_mutex,portMAX_DELAY);
-            extensions[existing].polled_once=true;
-            extensions[existing].state=EXT_ONLINE;
-            extensions[existing].last_seen_ms=millis();
-            extensions[existing].missed=0;
-            xSemaphoreGive(state_mutex);
-            Serial.printf("[ANNOUNCE] Re-welcoming offline ext %s addr=0x%02X\n",
-                          extensions[existing].name,addr);
-            notify_ui();
-        }
+        uint8_t addr=extensions[existing].address;
+        send_welcome(uid,addr,
+                    extensions[existing].relay1,
+                    extensions[existing].relay2);
+        xSemaphoreTake(state_mutex,portMAX_DELAY);
+        extensions[existing].polled_once=true;
+        extensions[existing].state=EXT_ONLINE;
+        extensions[existing].missed=0;
+        /* Grace period: wait 1s before polling to let extension save state */
+        extensions[existing].last_seen_ms=millis()+1000;
+        xSemaphoreGive(state_mutex);
+        Serial.printf("[SEC] Auth OK - re-welcoming %s\n",
+                      extensions[existing].name);
+        notify_ui();
         return;
     }
 
     /* Check NVS */
     int saved_slot=nvs_load_slot(uid);
     if (saved_slot>=0&&saved_slot<MAX_EXTENSIONS) {
-        /* Known UID - restore to saved slot */
         uint8_t new_addr=(uint8_t)(saved_slot+1);
         char saved_name[24]; nvs_load_name(uid,saved_name,sizeof(saved_name));
         xSemaphoreTake(state_mutex,portMAX_DELAY);
@@ -552,16 +682,18 @@ static void handle_announce(const uint8_t *frame) {
         send_welcome(uid,new_addr,
                     extensions[saved_slot].relay1,
                     extensions[saved_slot].relay2);
-        Serial.printf("[ANNOUNCE] Welcomed back: %s slot=%d addr=0x%02X\n",
-                      saved_name,saved_slot+1,new_addr);
+        Serial.printf("[SEC] Auth OK - restored %s slot=%d\n",
+                      saved_name,saved_slot+1);
         notify_ui();
         return;
     }
 
-    /* Brand new - add to pending queue */
+    /* Brand new verified extension - add to pending queue */
     xSemaphoreTake(state_mutex,portMAX_DELAY);
     pending_add(uid);
     xSemaphoreGive(state_mutex);
+    Serial.printf("[SEC] Auth OK - new ext %02X%02X%02X%02X awaiting assign\n",
+                  uid[0],uid[1],uid[2],uid[3]);
     notify_ui();
 }
 
@@ -584,7 +716,8 @@ static void run_listen_window(void) {
                     buf[pos++]=b;
                     if (pos==5) elen=6+buf[4];
                     if (elen>0&&pos>=elen) {
-                        if (buf[3]==CMD_ANNOUNCE) handle_announce(buf);
+                        if (buf[3]==CMD_ANNOUNCE)  handle_announce(buf);
+                        if (buf[3]==CMD_RESPONSE)  handle_response(buf);
                         pos=0; elen=0; break;
                     }
                 }
@@ -604,6 +737,13 @@ static void poll_extension(int i) {
     xSemaphoreGive(state_mutex);
 
     uint8_t resp[40]; uint8_t resp_len,plen;
+    /* Check grace period - skip poll if extension was just welcomed */
+    xSemaphoreTake(state_mutex,portMAX_DELAY);
+    if (extensions[i].last_seen_ms > millis()) {
+        xSemaphoreGive(state_mutex); return;
+    }
+    xSemaphoreGive(state_mutex);
+
     flush_rx();
     bus_send(addr,CMD_GET_STATE,NULL,0);
     resp_len=bus_recv(resp,sizeof(resp),BUS_RESP_MS);
@@ -774,13 +914,17 @@ static void task_bus(void *arg) {
             }
         }
 
-        /* Expire pending entries older than 5 minutes */
+        /* Expire old pending and stale challenges */
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         for (int i=0;i<MAX_PENDING;i++) {
             if (pending_queue[i].active&&
-                (millis()-pending_queue[i].first_seen_ms)>300000) {
+                (millis()-pending_queue[i].first_seen_ms)>300000)
                 pending_queue[i].active=false;
-            }
+        }
+        for (int i=0;i<MAX_CHALLENGES;i++) {
+            if (challenges[i].active&&
+                (millis()-challenges[i].sent_ms)>5000)
+                challenges[i].active=false;
         }
         xSemaphoreGive(state_mutex);
 
@@ -808,16 +952,42 @@ static String build_default_order(void) {
 }
 
 static String build_state_json(void) {
+    /* Snapshot all state under mutex first */
     xSemaphoreTake(state_mutex,portMAX_DELAY);
-    StaticJsonDocument<4096> doc;
-    doc["uptime"]=millis()/1000;
-    doc["boot_complete"]=boot_complete;
-    doc["master_name"]=master_name;
-    doc["scan_active"]=scan_active;
+    bool       snap_boot     = boot_complete;
+    bool       snap_scan     = scan_active;
+    bool       snap_r1       = master_relay1;
+    bool       snap_r2       = master_relay2;
+    char       snap_mname[24]; strncpy(snap_mname, master_name, sizeof(snap_mname));
+    String     snap_order    = switch_order;
+    extension_t snap_ext[MAX_EXTENSIONS];
+    memcpy(snap_ext, extensions, sizeof(extensions));
+    pending_ext_t snap_pend[MAX_PENDING];
+    memcpy(snap_pend, pending_queue, sizeof(pending_queue));
+    xSemaphoreGive(state_mutex);
 
-    /* Build effective order */
-    String effective_order = switch_order.length()>0
-        ? switch_order : build_default_order();
+    /* Now build JSON without holding mutex */
+    StaticJsonDocument<6144> doc;
+    doc["uptime"]=millis()/1000;
+    doc["boot_complete"]=snap_boot;
+    doc["master_name"]=snap_mname;
+    doc["scan_active"]=snap_scan;
+
+    /* Build effective order using snapshot */
+    String effective_order;
+    if (snap_order.length()>0) {
+        effective_order = snap_order;
+    } else {
+        effective_order = "master_1,master_2";
+        for(int i=0;i<MAX_EXTENSIONS;i++) {
+            if(snap_ext[i].state==EXT_EMPTY) continue;
+            char id1[16],id2[16];
+            snprintf(id1,sizeof(id1),"ext%d_1",i);
+            snprintf(id2,sizeof(id2),"ext%d_2",i);
+            effective_order+=","; effective_order+=id1;
+            effective_order+=","; effective_order+=id2;
+        }
+    }
 
     /* Build switch lookup map */
     /* Master switches */
@@ -845,10 +1015,9 @@ static String build_state_json(void) {
                 snprintf(sw_name,sizeof(sw_name),"Switch %d",ch);
             }
             sw["name"]=sw_name;
-            sw["device_name"]=master_name;
-            sw["device_color"]=SLOT_COLORS[0];
+            sw["color"]=SLOT_COLORS[0];
             sw["channel"]=ch;
-            sw["state"]=(ch==1)?master_relay1:master_relay2;
+            sw["state"]=(ch==1)?snap_r1:snap_r2;
             sw["online"]=true;
         } else if(id.startsWith("ext")) {
             /* parse extN_ch */
@@ -863,11 +1032,10 @@ static String build_state_json(void) {
                 snprintf(sw_name,sizeof(sw_name),"Switch %d",ch+(slot*2)+2);
             }
             sw["name"]=sw_name;
-            sw["device_name"]=master_name;
-            sw["device_color"]=SLOT_COLORS[slot+1<6?slot+1:5];
+            sw["color"]=SLOT_COLORS[slot+1<6?slot+1:5];
             sw["channel"]=ch;
-            sw["state"]=(ch==1)?extensions[slot].relay1:extensions[slot].relay2;
-            sw["online"]=(extensions[slot].state==EXT_ONLINE);
+            sw["state"]=(ch==1)?snap_ext[slot].relay1:snap_ext[slot].relay2;
+            sw["online"]=(snap_ext[slot].state==EXT_ONLINE);
         }
     }
 
@@ -879,13 +1047,15 @@ static String build_state_json(void) {
             if(effective_order.indexOf(sw_id)<0) {
                 JsonObject sw=switches.createNestedObject();
                 sw["id"]=sw_id;
+                xSemaphoreGive(state_mutex);
                 nvs_load_switch_name(sw_id,sw_name,sizeof(sw_name));
+                xSemaphoreTake(state_mutex,portMAX_DELAY);
                 if(String(sw_name)=="Switch") {
                     snprintf(sw_name,sizeof(sw_name),"Switch %d",ch+(i*2)+2);
                 }
                 sw["name"]=sw_name;
                 sw["device_name"]=master_name;
-                sw["device_color"]=SLOT_COLORS[i+1<6?i+1:5];
+                sw["color"]=SLOT_COLORS[i+1<6?i+1:5];
                 sw["channel"]=ch;
                 sw["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
                 sw["online"]=(extensions[i].state==EXT_ONLINE);
@@ -896,25 +1066,24 @@ static String build_state_json(void) {
     /* Pending queue */
     JsonArray pending=doc.createNestedArray("pending");
     for(int i=0;i<MAX_PENDING;i++) {
-        if(!pending_queue[i].active) continue;
+        if(!snap_pend[i].active) continue;
         JsonObject p=pending.createNestedObject();
         char uid_str[12];
         snprintf(uid_str,sizeof(uid_str),"%02X%02X%02X%02X",
-                 pending_queue[i].uid[0],pending_queue[i].uid[1],
-                 pending_queue[i].uid[2],pending_queue[i].uid[3]);
+                 snap_pend[i].uid[0],snap_pend[i].uid[1],
+                 snap_pend[i].uid[2],snap_pend[i].uid[3]);
         p["uid"]=uid_str;
     }
 
     /* Offline slots for replace option */
     JsonArray offline_slots=doc.createNestedArray("offline_slots");
     for(int i=0;i<MAX_EXTENSIONS;i++) {
-        if(extensions[i].state!=EXT_OFFLINE) continue;
+        if(snap_ext[i].state!=EXT_OFFLINE) continue;
         JsonObject os=offline_slots.createNestedObject();
         os["slot"]=i;
         os["name"]=("Slot "+String(i+1));
     }
 
-    xSemaphoreGive(state_mutex);
     String out; serializeJson(doc,out); return out;
 }
 
@@ -938,6 +1107,166 @@ static void task_web(void *arg) {
 /* ================================================================
  * HTML UI
  * ================================================================ */
+static const char SETTINGS_HTML[] PROGMEM = R"SHTML(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Unisync Settings</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#0f0f1a;color:#eee;min-height:100vh;padding:16px}
+.back{color:#00d4ff;font-size:13px;text-decoration:none;display:inline-block;margin-bottom:20px}
+h1{color:#eee;font-size:20px;margin-bottom:4px}
+.sub{color:#555;font-size:12px;margin-bottom:24px}
+.card{background:#1a1a2e;border-radius:14px;padding:20px;
+      margin-bottom:16px;border:1px solid #2a2a4a}
+.card h2{font-size:14px;color:#00d4ff;margin-bottom:4px}
+.card p{font-size:12px;color:#666;margin-bottom:16px;line-height:1.5}
+.file-zone{border:2px dashed #2a2a4a;border-radius:10px;padding:20px;
+           text-align:center;cursor:pointer;margin-bottom:12px}
+.file-zone.has-file{border-color:#4eff4e}
+.file-name{font-size:12px;color:#888;margin-top:6px}
+.btn{width:100%;padding:12px;border:none;border-radius:10px;
+     font-size:14px;font-weight:700;cursor:pointer;background:#00d4ff;color:#000}
+.btn:disabled{background:#2a2a4a;color:#555;cursor:not-allowed}
+.progress-wrap{display:none;margin-top:12px}
+.progress-bar{height:6px;background:#2a2a4a;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:#00d4ff;width:0%;
+               transition:width 0.3s;border-radius:3px}
+.status{font-size:12px;color:#888;margin-top:8px;text-align:center}
+.ok{color:#4eff4e}
+.err{color:#ff4e4e}
+.info-row{display:flex;justify-content:space-between;
+          padding:8px 0;border-bottom:1px solid #2a2a4a;font-size:13px}
+.info-row:last-child{border:none}
+.info-lbl{color:#666}
+.info-val{color:#eee;font-family:monospace;font-size:12px}
+</style>
+</head>
+<body>
+<a class="back" href="/">&#8592; Back</a>
+<h1>Settings</h1>
+<div class="sub" id="sub">Loading...</div>
+
+<div class="card">
+  <h2>Device Info</h2>
+  <div id="info">Loading...</div>
+</div>
+
+<div class="card">
+  <h2>Master Firmware Update</h2>
+  <p>Upload a compiled .bin firmware file to update over the air.
+     Device restarts automatically after a successful update.</p>
+  <div class="file-zone" id="drop-zone"
+       onclick="document.getElementById('fw').click()">
+    Tap to select firmware .bin
+    <div class="file-name" id="fname">No file selected</div>
+  </div>
+  <input type="file" id="fw" accept=".bin" style="display:none"
+         onchange="fileSelected(this)"/>
+  <button class="btn" id="ubtn" disabled onclick="startOTA()">
+    Upload Firmware
+  </button>
+  <div class="progress-wrap" id="pwrap">
+    <div class="progress-bar">
+      <div class="progress-fill" id="pfill"></div>
+    </div>
+    <div class="status" id="ostatus">Preparing...</div>
+  </div>
+</div>
+
+<script>
+var selFile=null;
+
+function uptime(s){
+  if(s<60)return s+'s';
+  if(s<3600)return Math.floor(s/60)+'m '+s%60+'s';
+  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+}
+
+function row(lbl,val){
+  return '<div class="info-row"><span class="info-lbl">'+lbl+
+         '</span><span class="info-val">'+val+'</span></div>';
+}
+
+function loadInfo(){
+  var xhr=new XMLHttpRequest();
+  xhr.open('GET','/api/info',true);
+  xhr.onload=function(){
+    var d=JSON.parse(xhr.responseText);
+    document.getElementById('sub').textContent=
+      '192.168.4.1 | Uptime: '+uptime(d.uptime);
+    document.getElementById('info').innerHTML=
+      row('Firmware','v5.1')+
+      row('Free Heap',d.free_heap+' bytes')+
+      row('Master UID',d.uid)+
+      row('IP Address','192.168.4.1');
+  };
+  xhr.send();
+}
+
+function fileSelected(input){
+  if(!input.files.length) return;
+  selFile=input.files[0];
+  document.getElementById('fname').textContent=
+    selFile.name+' ('+Math.round(selFile.size/1024)+' KB)';
+  document.getElementById('drop-zone').classList.add('has-file');
+  document.getElementById('ubtn').disabled=false;
+}
+
+function startOTA(){
+  if(!selFile) return;
+  var btn=document.getElementById('ubtn');
+  btn.disabled=true;
+  btn.textContent='Uploading...';
+  document.getElementById('pwrap').style.display='block';
+
+  var xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/ota/master',true);
+
+  xhr.upload.onprogress=function(e){
+    if(e.lengthComputable){
+      var pct=Math.round(e.loaded/e.total*100);
+      document.getElementById('pfill').style.width=pct+'%';
+      document.getElementById('ostatus').textContent='Uploading: '+pct+'%';
+    }
+  };
+
+  xhr.onload=function(){
+    if(xhr.status===200){
+      document.getElementById('pfill').style.width='100%';
+      document.getElementById('ostatus').innerHTML=
+        '<span class="ok">Done! Restarting...</span>';
+      setTimeout(function(){
+        document.getElementById('ostatus').innerHTML=
+          '<span class="ok">Restarted. <a href="/" style="color:#00d4ff">Go back</a></span>';
+      },8000);
+    } else {
+      document.getElementById('ostatus').innerHTML=
+        '<span class="err">Failed: '+xhr.responseText+'</span>';
+      btn.disabled=false; btn.textContent='Upload Firmware';
+    }
+  };
+
+  xhr.onerror=function(){
+    document.getElementById('ostatus').innerHTML=
+      '<span class="ok">Restarting... <a href="/" style="color:#00d4ff">Go back in 10s</a></span>';
+  };
+
+  var fd=new FormData();
+  fd.append('firmware',selFile);
+  xhr.send(fd);
+}
+
+loadInfo();
+</script>
+</body>
+</html>
+)SHTML";
+
 static const char HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html lang="en">
@@ -1091,6 +1420,7 @@ h1:hover{color:#00d4ff}
   </div>
   <div class="topbar-btns">
     <button class="top-btn scan" id="scan-btn" onclick="startScan()">Scan</button>
+    <a href="/settings" class="top-btn" style="text-decoration:none">Settings</a>
     <button class="top-btn" id="reorder-btn" onclick="toggleReorder()">Reorder</button>
     <button class="top-btn" id="save-btn" style="display:none;border-color:#4eff4e;color:#4eff4e"
             onclick="saveOrder()">Save</button>
@@ -1133,6 +1463,7 @@ function renderGrid(){
          'Tap Scan to find extensions.</span></div>';
   }
   list.forEach((sw,idx)=>{
+    if(!sw||!sw.id||!sw.name) return;  /* guard against truncated frames */
     const off=!sw.online;
     const menuId='menu-'+sw.id;
     const btnId='btn-'+sw.id;
@@ -1149,11 +1480,11 @@ function renderGrid(){
         <div class="move-btn blank"></div>
       </div>`:'';
     html+=`<div class="sw-card${off?' offline':''}${reorderMode?' reorder-mode':''}"
-               style="border-left-color:${sw.device_color}">
+               style="border-left-color:${sw.color||'#444'}">
       <div class="sw-top">
         <div class="sw-names">
           <div class="sw-name">${sw.name}</div>
-          <div class="sw-device">${sw.device_name}</div>
+          <div class="sw-device">${sw.device_name||''}</div>
         </div>
         ${reorderMode?'':`
         <button class="sw-menu-btn" onclick="toggleSwMenu('${sw.id}',event)">&#8942;</button>
@@ -1414,7 +1745,15 @@ function connect(){
     document.getElementById('dot').classList.add('on');
     document.getElementById('boot-overlay').classList.add('show');
   };
-  ws.onmessage=e=>{try{render(JSON.parse(e.data));}catch(err){}};
+  ws.onmessage=e=>{
+    try{
+      const d=JSON.parse(e.data);
+      render(d);
+    }catch(err){
+      console.error('Render error:',err);
+      console.log('Raw data:',e.data.substring(0,200));
+    }
+  };
   ws.onclose=()=>{
     document.getElementById('dot').classList.remove('on');
     reconnTimer=setTimeout(connect,2000);
@@ -1443,13 +1782,6 @@ static void setup_web(void) {
 
         /* id format: "master_1" or "master_2" */
         if (id.startsWith("master")&&(ch==1||ch==2)) {
-            /* Rate limiting */
-            uint32_t *last=(ch==1)?&last_relay1_cmd_ms:&last_relay2_cmd_ms;
-            if ((now-*last)<RELAY_RATE_LIMIT_MS) {
-                server.send(429,"application/json","{\"error\":\"rate_limited\"}");
-                return;
-            }
-            *last=now;
             relay_cmd_t cmd; cmd.target=-1; cmd.channel=ch;
             xSemaphoreTake(state_mutex,portMAX_DELAY);
             cmd.state=(ch==1)?!master_relay1:!master_relay2;
@@ -1462,14 +1794,6 @@ static void setup_web(void) {
             int us=id.indexOf('_'); 
             int slot=(us>0)?id.substring(3,us).toInt():id.substring(3).toInt();
             if (slot>=0&&slot<MAX_EXTENSIONS) {
-                /* Rate limiting per channel */
-                uint32_t *last=(ch==1)?&extensions[slot].last_relay1_cmd_ms
-                                      :&extensions[slot].last_relay2_cmd_ms;
-                if ((now-*last)<RELAY_RATE_LIMIT_MS) {
-                    server.send(429,"application/json","{\"error\":\"rate_limited\"}");
-                    return;
-                }
-                *last=now;
                 relay_cmd_t cmd; cmd.target=slot; cmd.channel=ch;
                 xSemaphoreTake(state_mutex,portMAX_DELAY);
                 cmd.state=(ch==1)?!extensions[slot].relay1:!extensions[slot].relay2;
@@ -1509,6 +1833,11 @@ static void setup_web(void) {
 
         nvs_save(uid,slot,"Switch");
         send_welcome(uid,new_addr,false,false);
+        /* Grace period: 1s before polling so extension can save EEPROM */
+        xSemaphoreTake(state_mutex,portMAX_DELAY);
+        extensions[slot].last_seen_ms = millis() + 1000;
+        extensions[slot].missed = 0;
+        xSemaphoreGive(state_mutex);
         Serial.printf("[ASSIGN] slot%d addr=0x%02X\n", slot+1, new_addr);
         notify_ui();
         String resp="{\"ok\":true,\"slot\":"+String(slot)+"}";
@@ -1550,7 +1879,10 @@ static void setup_web(void) {
 
         nvs_remove(old_uid);
         nvs_save(new_uid,slot,slot_name);
-        send_welcome(new_uid,new_addr,false,false);
+        welcome_cmd_t wcmd2;
+        memcpy(wcmd2.uid,new_uid,4);
+        wcmd2.addr=new_addr; wcmd2.relay1=false; wcmd2.relay2=false;
+        xQueueSend(welcome_queue,&wcmd2,0);
         Serial.printf("[REPLACE] slot%d: %s\n",slot+1,slot_name);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
@@ -1648,7 +1980,63 @@ static void setup_web(void) {
         server.send(200,"application/json","{\"ok\":true}");
     });
 
-    /* Manual scan trigger */
+    /* -- OTA Upload -- */
+    /* Settings page */
+    /* Settings page */
+    server.on("/settings", HTTP_GET, [](){
+        server.send_P(200, "text/html", SETTINGS_HTML);
+    });
+
+    /* Device info API */
+    server.on("/api/info", HTTP_GET, [](){
+        char uid_str[20];
+        snprintf(uid_str, sizeof(uid_str), "%02X%02X%02X%02X",
+                 master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+        StaticJsonDocument<256> doc;
+        doc["uptime"]    = millis()/1000;
+        doc["free_heap"] = ESP.getFreeHeap();
+        doc["uid"]       = uid_str;
+        String out; serializeJson(doc, out);
+        server.send(200, "application/json", out);
+    });
+
+    /* OTA firmware upload */
+    server.on("/api/ota/master", HTTP_POST,
+        [](){
+            if (Update.hasError()) {
+                server.send(500, "text/plain", Update.errorString());
+                Serial.printf("[OTA] Failed: %s\n", Update.errorString());
+            } else {
+                server.send(200, "text/plain", "OK");
+                Serial.println("[OTA] Success - restarting");
+                delay(500);
+                ESP.restart();
+            }
+            ota_in_progress = false;
+        },
+        [](){
+            HTTPUpload &upload = server.upload();
+            if (upload.status == UPLOAD_FILE_START) {
+                Serial.printf("[OTA] Start: %s\n", upload.filename.c_str());
+                ota_in_progress = true;
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Serial.printf("[OTA] Begin failed: %s\n", Update.errorString());
+                }
+            } else if (upload.status == UPLOAD_FILE_WRITE) {
+                if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+                    Serial.printf("[OTA] Write failed: %s\n", Update.errorString());
+                }
+            } else if (upload.status == UPLOAD_FILE_END) {
+                if (Update.end(true)) {
+                    Serial.printf("[OTA] Complete: %u bytes\n", upload.totalSize);
+                } else {
+                    Serial.printf("[OTA] End failed: %s\n", Update.errorString());
+                }
+            }
+        }
+    );
+
+        /* Manual scan trigger */
     server.on("/api/scan", HTTP_POST, [](){
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         scan_active=true;
@@ -1682,7 +2070,7 @@ void setup() {
     Serial.begin(115200);
     while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v5.0 - booting");
+    Serial.println("\n[MASTER] Unisync v5.1 - booting");
 
     pinMode(RELAY1_PIN,   OUTPUT); digitalWrite(RELAY1_PIN,   LOW);
     pinMode(RELAY2_PIN,   OUTPUT); digitalWrite(RELAY2_PIN,   LOW);
@@ -1709,7 +2097,8 @@ void setup() {
         memset(extensions[i].uid,0,4);
         snprintf(extensions[i].name,sizeof(extensions[i].name),"Slot-%d",i+1);
     }
-    for (int i=0;i<MAX_PENDING;i++) pending_queue[i].active=false;
+    for (int i=0;i<MAX_PENDING;i++)    pending_queue[i].active=false;
+    for (int i=0;i<MAX_CHALLENGES;i++) challenges[i].active=false;
 
     prefs.begin("ext_map",false); prefs.end();
     nvs_restore_all();
@@ -1731,6 +2120,7 @@ void setup() {
     master_relay_queue=xQueueCreate(16,sizeof(relay_cmd_t));
     ext_relay_queue=xQueueCreate(16,sizeof(relay_cmd_t));
     ws_notify_queue=xQueueCreate(8,sizeof(uint8_t));
+    welcome_queue=xQueueCreate(8,sizeof(welcome_cmd_t));
 
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(AP_IP,AP_GW,AP_SUBNET);

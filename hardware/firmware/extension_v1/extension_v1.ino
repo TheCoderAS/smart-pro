@@ -55,6 +55,11 @@
 #define CMD_ANNOUNCE      0x50  /* E->M: uid[4] + flags */
 #define CMD_WELCOME       0x51  /* M->E: uid[4] + address + relay1 + relay2 + master_uid[4] */
 #define CMD_REJECT        0x52  /* M->E: uid[4] */
+#define CMD_CHALLENGE     0x54  /* M->E: uid[4] + challenge[4] */
+#define CMD_RESPONSE      0x55  /* E->M: uid[4] + crc32[4] */
+
+/* Secret key - must match master firmware exactly */
+static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63, 0x53, 0x77, 0x69, 0x74, 0x63, 0x68, 0x4B, 0x65, 0x79};
 
 /* ================================================================
  * EEPROM ADDRESSES (STM8 data EEPROM at 0x4000)
@@ -123,6 +128,27 @@ static uint8_t crc8(uint8_t *data, uint8_t len) {
     return crc;
 }
 
+/* CRC32 for challenge-response security */
+static uint32_t crc32_compute(const uint8_t *data, uint8_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    while (len--) {
+        crc ^= *data++;
+        for (uint8_t i = 0; i < 8; i++)
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+/* Compute challenge response: CRC32(secret_key + challenge[4] + uid[4]) */
+static uint32_t compute_response(const uint8_t *challenge, const uint8_t *uid) {
+    uint8_t buf[24];
+    uint8_t i;
+    for (i=0; i<16; i++) buf[i]    = SECRET_KEY[i];
+    for (i=0; i<4;  i++) buf[16+i] = challenge[i];
+    for (i=0; i<4;  i++) buf[20+i] = uid[i];
+    return crc32_compute(buf, 24);
+}
+
 /* ================================================================
  * EEPROM
  * ================================================================ */
@@ -178,6 +204,12 @@ static void load_state(void) {
 }
 
 static void self_unregister(void) {
+    /* Turn relays OFF and clear saved state */
+    relay1_state = false;
+    relay2_state = false;
+    digitalWrite(RELAY1, LOW);
+    digitalWrite(RELAY2, LOW);
+    eeprom_write(EEPROM_RELAY_ADDR, 0x00);
     /* Wipe EEPROM - extension becomes unregistered */
     eeprom_write(EEPROM_MAGIC_ADDR,     0x00);
     eeprom_write(EEPROM_ADDR_ADDR,      0x00);
@@ -243,7 +275,7 @@ static void send_frame(uint8_t dst, uint8_t cmd,
     frame[2] = slot_address;
     frame[3] = cmd;
     frame[4] = plen;
-    for (uint8_t i = 0; i < plen; i++) frame[5+i] = payload[i];
+    memcpy(&frame[5], payload, plen);
     frame[5+plen] = crc8(&frame[1], 4+plen);
     rs485_send(frame, 6+plen);
 }
@@ -330,9 +362,10 @@ static void send_state_resp(void) {
     payload[plen++] = flags;
     payload[plen++] = 25;  /* temp placeholder */
     payload[plen++] = event_count;
-    uint8_t tail = event_tail;
-    uint8_t cnt  = event_count < 5 ? event_count : 5;
-    for (uint8_t i = 0; i < cnt; i++) {
+    { uint8_t tail = event_tail;
+      uint8_t cnt  = event_count < 5 ? event_count : 5;
+      uint8_t ei;
+      for (ei = 0; ei < cnt; ei++) {
         uint32_t ts = event_buf[tail].ts_ms;
         payload[plen++] = event_buf[tail].channel;
         payload[plen++] = event_buf[tail].state;
@@ -340,6 +373,7 @@ static void send_state_resp(void) {
         payload[plen++] = (ts >>  8) & 0xFF;
         payload[plen++] = (ts)       & 0xFF;
         tail = (tail + 1) % EVENT_BUF_SIZE;
+      }
     }
     send_frame(ADDR_MASTER, CMD_STATE_RESP, payload, plen);
 }
@@ -399,19 +433,48 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         buf[2]=(uptime_s>>24)&0xFF; buf[3]=(uptime_s>>16)&0xFF;
         buf[4]=(uptime_s>>8)&0xFF;  buf[5]=(uptime_s)&0xFF;
         send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
+        /* Reset orphan timer - we just got welcomed, start fresh */
+        last_poll_ms  = millis();
+        poll_received = false;
+        /* Stop announcing immediately - master will poll us now */
+        last_announce_ms = millis() + 30000;
+        announce_interval = 2000;
+
         /* Visual confirmation - 2 quick blinks */
-        for (uint8_t i=0; i<2; i++) {
-            digitalWrite(LED, HIGH); delay(100);
-            digitalWrite(LED, LOW);  delay(100);
-        }
+        digitalWrite(LED, LOW); delay(100); digitalWrite(LED, HIGH); delay(100);
+        digitalWrite(LED, LOW); delay(100); digitalWrite(LED, HIGH); delay(100);
         return;
     }
 
     if (cmd == CMD_REJECT) {
         if (plen < 4) return;
         if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
-        /* Back off to 30s announce interval */
-        announce_interval = 30000;
+        /* Back off to 10s announce interval */
+        announce_interval = 10000;
+        return;
+    }
+
+    if (cmd == CMD_CHALLENGE) {
+        /* Master is challenging us before WELCOME
+         * payload: uid[4] + challenge[4]                          */
+        if (plen < 8) return;
+        if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
+        uint8_t *challenge = &p[4];
+        uint32_t resp = compute_response(challenge, uid);
+        uint8_t payload[8];
+        payload[0]=uid[0]; payload[1]=uid[1];
+        payload[2]=uid[2]; payload[3]=uid[3];
+        payload[4]=(resp>>24)&0xFF;
+        payload[5]=(resp>>16)&0xFF;
+        payload[6]=(resp>>8) &0xFF;
+        payload[7]=(resp)    &0xFF;
+        /* Send RESPONSE from unregistered address */
+        uint8_t frame[40];
+        frame[0]=SOF; frame[1]=ADDR_MASTER; frame[2]=ADDR_UNASSIGNED;
+        frame[3]=CMD_RESPONSE; frame[4]=8;
+        memcpy(&frame[5], payload, 8);
+        frame[13]=crc8(&frame[1],12);
+        rs485_send(frame,14);
         return;
     }
 
@@ -451,9 +514,11 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         break;
 
     case CMD_IDENTIFY:
-        for (uint8_t i=0; i<(plen>0?p[0]:3)*4; i++) {
+        { uint8_t b2, bmax=(plen>0?p[0]:3)*4;
+          for (b2=0; b2<bmax; b2++) {
             digitalWrite(LED, HIGH); delay(125);
             digitalWrite(LED, LOW);  delay(125);
+          }
         }
         break;
 
@@ -518,7 +583,8 @@ static uint16_t pseudo_rand(uint16_t max) {
  * ================================================================ */
 static void startup_blink(void) {
     uint8_t blinks = (mode == MODE_UNREGISTERED) ? 5 : 2;
-    for (uint8_t i=0; i<blinks; i++) {
+    uint8_t b;
+    for (b=0; b<blinks; b++) {
         digitalWrite(LED, HIGH); delay(200);
         digitalWrite(LED, LOW);  delay(200);
     }
@@ -601,10 +667,22 @@ void loop() {
         break;
     }
 
-    /* Heartbeat LED every 500ms */
-    if ((millis() - last_hb) >= 500) {
-        last_hb = millis();
-        hb = !hb;
-        digitalWrite(LED, hb ? HIGH : LOW);
+    /* Heartbeat LED:
+     * Registered   -> 250ms ON, 4750ms OFF (5s period, brief pulse)
+     * Unregistered -> 200ms ON, 200ms OFF (rapid blink)               */
+    if (mode == MODE_REGISTERED) {
+        /* OFF for 4750ms, then ON for 250ms */
+        if (hb && (millis() - last_hb) >= 250) {
+            last_hb = millis(); hb = false;
+            digitalWrite(LED, HIGH);    /* OFF for 4750ms */
+        } else if (!hb && (millis() - last_hb) >= 4750) {
+            last_hb = millis(); hb = true;
+            digitalWrite(LED, LOW);   /* ON for 250ms */
+        }
+    } else {
+        if ((millis() - last_hb) >= 200) {
+            last_hb = millis(); hb = !hb;
+            digitalWrite(LED, hb ? LOW : HIGH);
+        }
     }
 }
