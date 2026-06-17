@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v5.1
+ * Unisync - Master Firmware v5.0
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -37,8 +37,8 @@
  * ================================================================ */
 #define TOUCH1_PIN    19
 #define TOUCH2_PIN    20
-#define RELAY1_PIN    16
-#define RELAY2_PIN    17
+#define RELAY1_PIN    17
+#define RELAY2_PIN    21
 #define RS485_DE_PIN  23
 #define BUS_RX_PIN    4
 #define BUS_TX_PIN    5
@@ -1200,7 +1200,7 @@ function loadInfo(){
     document.getElementById('sub').textContent=
       '192.168.4.1 | Uptime: '+uptime(d.uptime);
     document.getElementById('info').innerHTML=
-      row('Firmware','v5.1')+
+      row('Firmware','v5.0')+
       row('Free Heap',d.free_heap+' bytes')+
       row('Master UID',d.uid)+
       row('IP Address','192.168.4.1');
@@ -2068,9 +2068,9 @@ static void setup_web(void) {
  * ================================================================ */
 void setup() {
     Serial.begin(115200);
-    while (!Serial) delay(10);
+    // while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v5.1 - booting");
+    Serial.println("\n[MASTER] Unisync v5.0 - booting");
 
     pinMode(RELAY1_PIN,   OUTPUT); digitalWrite(RELAY1_PIN,   LOW);
     pinMode(RELAY2_PIN,   OUTPUT); digitalWrite(RELAY2_PIN,   LOW);
