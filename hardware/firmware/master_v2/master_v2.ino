@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v6.2
+ * Unisync - Master Firmware v8.5
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -32,6 +32,7 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "esp_now.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "driver/gpio.h"
 #include "html_content.h"
@@ -50,7 +51,8 @@
 /* ================================================================
  * WIFI AP
  * ================================================================ */
-#define AP_SSID   "Unisync"
+#define AP_SSID    "Unisync"
+#define AP_CHANNEL 1   /* Fixed channel -- ALL masters must use same channel for ESP-NOW */
 #define AP_PASS   "12345678"
 #define AP_IP     IPAddress(192,168,4,1)
 #define AP_GW     IPAddress(192,168,4,1)
@@ -101,8 +103,8 @@ static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63,
  * ================================================================ */
 #define MAX_MESH_MASTERS   8     /* OTA-updatable */
 #define MESH_GOSSIP_MS     500   /* state broadcast interval */
-#define MESH_PEER_TIMEOUT  3000  /* ms before peer marked offline */
-#define MESH_PIN_VALID_MS  60000 /* PIN expires after 60s */
+#define MESH_PEER_TIMEOUT  10000 /* ms before peer marked offline */
+#define MESH_PIN_VALID_MS  300000 /* PIN expires after 5 minutes */
 
 /* Mesh packet types */
 #define MESH_PKT_STATE     0x01  /* broadcast local switch states */
@@ -144,6 +146,7 @@ typedef struct {
     char     color[8];
     bool     state;
     bool     online;
+    uint8_t  ch;      /* relay channel (1 or 2) */
 } mesh_switch_t;
 
 /* Mesh peer (remote master) */
@@ -538,6 +541,19 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         int idx = mesh_alloc_peer(src_uid, info->src_addr);
         if (idx < 0) return; /* mesh full */
 
+        /* Ensure this peer is registered as ESP-NOW peer with AP MAC.
+         * Re-register on every gossip in case peer rebooted or was lost. */
+        if (!esp_now_is_peer_exist(info->src_addr)) {
+            esp_now_peer_info_t gpi={};
+            memcpy(gpi.peer_addr, info->src_addr, 6);
+            gpi.channel=AP_CHANNEL; gpi.encrypt=false;
+            gpi.ifidx=WIFI_IF_AP;
+            esp_err_t padd = esp_now_add_peer(&gpi);
+            Serial.printf("[MESH] Re-registered peer %02X%02X%02X%02X%02X%02X err=%d\n",
+                info->src_addr[0],info->src_addr[1],info->src_addr[2],
+                info->src_addr[3],info->src_addr[4],info->src_addr[5],padd);
+        }
+
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         mesh_peers[idx].online       = true;
         mesh_peers[idx].last_seen_ms = millis();
@@ -558,6 +574,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                     s["color"]|"#444", sizeof(mesh_peers[idx].switches[i].color)-1);
             mesh_peers[idx].switches[i].state  = s["state"]|false;
             mesh_peers[idx].switches[i].online = s["online"]|false;
+            mesh_peers[idx].switches[i].ch     = s["ch"]|1;
             mesh_peers[idx].switch_count++;
         }
         xSemaphoreGive(state_mutex);
@@ -614,14 +631,35 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
 
     } else if (type == MESH_PKT_JOIN_REQ) {
         /* New master wants to join our mesh */
-        if (!mesh_active) return;
+        Serial.println("[MESH] JOIN_REQ received");
+        if (!mesh_active) {
+            Serial.println("[MESH] JOIN_REQ rejected: not in mesh. Create mesh first.");
+            /* Send reject so Master 2 knows why */
+            StaticJsonDocument<64> rej;
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            rej["type"]   = MESH_PKT_JOIN_REJ;
+            rej["uid"]    = self_uid;
+            rej["reason"] = "not_in_mesh";
+            String rej_str; serializeJson(rej,rej_str);
+            /* Register sender so we can reply */
+            esp_now_peer_info_t pi={};
+            memcpy(pi.peer_addr,info->src_addr,6);
+            pi.channel=AP_CHANNEL; pi.encrypt=false;
+    pi.ifidx=WIFI_IF_AP;
+            if(!esp_now_is_peer_exist(pi.peer_addr)) esp_now_add_peer(&pi);
+            esp_now_send(info->src_addr,(const uint8_t*)rej_str.c_str(),rej_str.length()+1);
+            return;
+        }
         const char *pin = doc["pin"] | "";
+        Serial.printf("[MESH] Verifying PIN: '%s' against '%s'\n", pin, mesh_pin);
         if (mesh_verify_pin(pin)) {
             /* Send mesh credentials */
             StaticJsonDocument<128> ack;
             char mid_hex[33];
             for (int i=0;i<16;i++) sprintf(mid_hex+i*2,"%02X",mesh_id[i]);
-            mid_hex[32]=' ';
+            mid_hex[32]='\0';
             ack["type"]    = MESH_PKT_JOIN_ACK;
             char self_uid[12];
             snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
@@ -632,9 +670,14 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             /* Register sender as ESP-NOW peer first */
             esp_now_peer_info_t pi={};
             memcpy(pi.peer_addr, info->src_addr, 6);
-            pi.channel=0; pi.encrypt=false;
-            esp_now_add_peer(&pi);
-            mesh_send(info->src_addr, ack_str.c_str(), ack_str.length()+1);
+            pi.channel=AP_CHANNEL; pi.encrypt=false;
+    pi.ifidx=WIFI_IF_AP;
+            if(!esp_now_is_peer_exist(pi.peer_addr)) esp_now_add_peer(&pi);
+            /* Small delay to let peer registration complete */
+            vTaskDelay(pdMS_TO_TICKS(10));
+            esp_err_t send_err = esp_now_send(info->src_addr,
+                (const uint8_t*)ack_str.c_str(), ack_str.length()+1);
+            Serial.printf("[MESH] JOIN_ACK send result: %d\n", send_err);
             Serial.printf("[MESH] JOIN_ACK sent to %02X:%02X:%02X:%02X:%02X:%02X\n",
                 info->src_addr[0],info->src_addr[1],info->src_addr[2],
                 info->src_addr[3],info->src_addr[4],info->src_addr[5]);
@@ -648,7 +691,8 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             String rej_str; serializeJson(rej, rej_str);
             esp_now_peer_info_t pi={};
             memcpy(pi.peer_addr, info->src_addr, 6);
-            pi.channel=0; pi.encrypt=false;
+            pi.channel=AP_CHANNEL; pi.encrypt=false;
+    pi.ifidx=WIFI_IF_AP;
             esp_now_add_peer(&pi);
             mesh_send(info->src_addr, rej_str.c_str(), rej_str.length()+1);
             Serial.println("[MESH] JOIN rejected - wrong PIN");
@@ -656,6 +700,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
 
     } else if (type == MESH_PKT_JOIN_ACK) {
         /* We received mesh credentials - we are the joining master */
+        Serial.println("[MESH] JOIN_ACK received - joining mesh");
         const char *mid_hex = doc["mesh_id"] | "";
         if (strlen(mid_hex)==32) {
             for (int i=0;i<16;i++) {
@@ -666,13 +711,25 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             /* Register sender as peer */
             esp_now_peer_info_t pi={};
             memcpy(pi.peer_addr, info->src_addr, 6);
-            pi.channel=0; pi.encrypt=false;
+            pi.channel=AP_CHANNEL; pi.encrypt=false;
+    pi.ifidx=WIFI_IF_AP;
             if (!esp_now_is_peer_exist(pi.peer_addr))
                 esp_now_add_peer(&pi);
             mesh_nvs_save();
             Serial.println("[MESH] Joined mesh successfully");
+            /* Switch from unique SSID to shared "Unisync" SSID */
+            WiFi.softAPdisconnect(false);
+            delay(100);
+            WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
+            Serial.println("[WIFI] Switched to shared SSID: Unisync");
             notify_ui();
         }
+
+    } else if (type == MESH_PKT_JOIN_REJ) {
+        /* Our join request was rejected */
+        const char *reason = doc["reason"] | "wrong_pin";
+        Serial.printf("[MESH] JOIN_REJ: %s\n", reason);
+        /* UI will show timeout error - nothing more to do */
 
     } else if (type == MESH_PKT_LEAVE) {
         /* Peer leaving - mark offline */
@@ -698,30 +755,43 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
 
 /* Initialize ESP-NOW mesh */
 static void mesh_init(void) {
+    delay(200); /* Wait for AP to fully start before ESP-NOW init */
     if (esp_now_init() != ESP_OK) {
         Serial.println("[MESH] ESP-NOW init failed");
         return;
     }
     esp_now_register_recv_cb(mesh_recv_cb);
 
+    Serial.printf("[MESH] ESP-NOW init OK. WiFi channel: %d\n",
+                  WiFi.channel());
+    uint8_t ap_mac[6]; esp_read_mac(ap_mac, ESP_MAC_WIFI_SOFTAP);
+    Serial.printf("[MESH] My AP MAC (use for peer reg): %02X:%02X:%02X:%02X:%02X:%02X\n",
+        ap_mac[0],ap_mac[1],ap_mac[2],ap_mac[3],ap_mac[4],ap_mac[5]);
+
     /* Add broadcast peer */
     esp_now_peer_info_t pi={};
     uint8_t bcast[6]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
     memcpy(pi.peer_addr, bcast, 6);
-    pi.channel=0; pi.encrypt=false;
+    pi.channel=AP_CHANNEL; pi.encrypt=false;
+    pi.ifidx=WIFI_IF_AP;
     esp_now_add_peer(&pi);
 
-    /* Re-add saved peers */
+    /* Re-add saved peers from NVS */
     for (int i=0;i<MAX_MESH_MASTERS;i++) {
         bool has_mac = false;
         for (int j=0;j<6;j++) if (mesh_peers[i].mac[j]) { has_mac=true; break; }
         if (!has_mac) continue;
-        if (!esp_now_is_peer_exist(mesh_peers[i].mac)) {
-            esp_now_peer_info_t p={};
-            memcpy(p.peer_addr, mesh_peers[i].mac, 6);
-            p.channel=0; p.encrypt=false;
-            esp_now_add_peer(&p);
-        }
+        Serial.printf("[MESH] NVS peer[%d] MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", i,
+            mesh_peers[i].mac[0],mesh_peers[i].mac[1],mesh_peers[i].mac[2],
+            mesh_peers[i].mac[3],mesh_peers[i].mac[4],mesh_peers[i].mac[5]);
+        if (esp_now_is_peer_exist(mesh_peers[i].mac))
+            esp_now_del_peer(mesh_peers[i].mac);
+        esp_now_peer_info_t p={};
+        memcpy(p.peer_addr, mesh_peers[i].mac, 6);
+        p.channel=AP_CHANNEL; p.encrypt=false;
+        p.ifidx=WIFI_IF_AP;
+        esp_err_t padd = esp_now_add_peer(&p);
+        Serial.printf("[MESH] NVS peer add: %d\n", padd);
     }
     Serial.println("[MESH] ESP-NOW initialized");
 }
@@ -729,9 +799,6 @@ static void mesh_init(void) {
 /* Send relay command to a remote master via mesh */
 static bool mesh_relay_remote(const uint8_t *dst_uid, const uint8_t *dst_mac,
                                const char *sw_id, int ch, bool state) {
-    pending_relay_req_id = (++mesh_seq);
-    pending_relay_ack    = false;
-
     StaticJsonDocument<256> doc;
     char self_uid[12];
     snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
@@ -745,13 +812,16 @@ static bool mesh_relay_remote(const uint8_t *dst_uid, const uint8_t *dst_mac,
     doc["sw_id"]   = sw_id;
     doc["ch"]      = ch;
     doc["state"]   = state;
-    doc["req_id"]  = pending_relay_req_id;
     String payload; serializeJson(doc, payload);
 
-    if (!mesh_send(dst_mac, payload.c_str(), payload.length()+1)) return false;
-
-    /* Wait for ACK up to 500ms */
-    return (xSemaphoreTake(relay_ack_sem, pdMS_TO_TICKS(500))==pdTRUE);
+    /* Fire and forget -- no ACK wait.
+     * State confirmed via next gossip broadcast (500ms).
+     * Blocking the web task for ACK causes 500 errors. */
+    esp_err_t err = esp_now_send(dst_mac,
+                    (const uint8_t*)payload.c_str(), payload.length()+1);
+    Serial.printf("[MESH] relay_remote to %s sw=%s ch=%d state=%d err=%d\n",
+                  dst_uid_str, sw_id, ch, state, err);
+    return (err == ESP_OK);
 }
 
 /* Check peer timeouts */
@@ -951,6 +1021,11 @@ static void mesh_nvs_load(void) {
             prefs.getBytes(key,mesh_peers[i].mac,6);
             snprintf(key,sizeof(key),"pu%d",i);
             prefs.getBytes(key,mesh_peers[i].uid,4);
+            /* Set last_seen to now so peer doesn't immediately timeout.
+             * Will be corrected by first gossip or marked offline after
+             * MESH_PEER_TIMEOUT if peer never responds. */
+            mesh_peers[i].last_seen_ms = millis();
+            mesh_peers[i].online = false; /* not confirmed online yet */
         }
     }
     prefs.end();
@@ -1696,6 +1771,7 @@ static String build_state_json(void) {
             s["color"]  = mesh_peers[i].switches[j].color;
             s["state"]  = mesh_peers[i].switches[j].state;
             s["online"] = mesh_peers[i].switches[j].online;
+            s["ch"]     = mesh_peers[i].switches[j].ch;
         }
     }
     xSemaphoreGive(state_mutex);
@@ -2002,40 +2078,88 @@ static void setup_web(void) {
     /* Generate PIN to invite new master */
     server.on("/api/mesh/invite", HTTP_POST, [](){
         mesh_generate_pin();
-        StaticJsonDocument<64> doc;
+        /* Use AP MAC -- in WIFI_AP_STA mode AP MAC = STA MAC + 1.
+         * Peers must target AP MAC when sending via WIFI_IF_AP interface. */
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+        char mac_str[18];
+        snprintf(mac_str,sizeof(mac_str),"%02X%02X%02X%02X%02X%02X",
+                 mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+        StaticJsonDocument<128> doc;
         doc["pin"]        = mesh_pin;
         doc["expires_ms"] = MESH_PIN_VALID_MS;
+        doc["mac"]        = mac_str;
+        char uid_str[12];
+        snprintf(uid_str,sizeof(uid_str),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        doc["uid"] = uid_str;
         String out; serializeJson(doc,out);
         server.send(200,"application/json",out);
     });
 
-    /* New master: submit PIN to join a mesh */
+    /* Join mesh: Master 2 receives PIN + Master 1 MAC from user.
+     * Registers Master 1 as ESP-NOW peer using the known MAC,
+     * then sends JOIN_REQ directly via ESP-NOW. Master 1 verifies
+     * PIN and sends mesh credentials back via ESP-NOW. */
     server.on("/api/mesh/join", HTTP_POST, [](){
-        String pin = server.arg("pin");
-        if (pin.length()!=6) {
-            server.send(400,"application/json","{\"error\":\"invalid pin\"}");
-            return;
-        }
         if (mesh_active) {
             server.send(400,"application/json","{\"error\":\"already in mesh\"}");
             return;
         }
-        /* Generate a unique mesh_id for first-time if not set */
-        if (!mesh_active) {
-            /* Broadcast join request to all ESP-NOW peers */
-            StaticJsonDocument<128> doc;
-            char self_uid[12];
-            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
-                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-            doc["type"] = MESH_PKT_JOIN_REQ;
-            doc["uid"]  = self_uid;
-            doc["pin"]  = pin.c_str();
-            String payload; serializeJson(doc,payload);
-            mesh_broadcast(payload.c_str(),payload.length()+1);
-            /* Response comes async via mesh_recv_cb */
-            server.send(200,"application/json","{\"ok\":true,\"status\":\"pending\"}");
+        String pin     = server.arg("pin");
+        String mac_str = server.arg("mac");
+        if (pin.length()!=6 || mac_str.length()!=12) {
+            server.send(400,"application/json",
+                "{\"error\":\"pin must be 6 digits, mac must be 12 hex chars\"}");
+            return;
         }
+        /* Parse Master 1 MAC */
+        uint8_t peer_mac[6];
+        for (int i=0;i<6;i++) {
+            char b[3]={mac_str[i*2],mac_str[i*2+1],0};
+            peer_mac[i]=(uint8_t)strtoul(b,NULL,16);
+        }
+        /* Register Master 1 as ESP-NOW peer */
+        if (esp_now_is_peer_exist(peer_mac)) {
+            /* Remove and re-add to ensure channel is correct */
+            esp_now_del_peer(peer_mac);
+        }
+        esp_now_peer_info_t pi={};
+        memcpy(pi.peer_addr, peer_mac, 6);
+        pi.channel  = AP_CHANNEL;
+        pi.encrypt  = false;
+        pi.ifidx    = WIFI_IF_AP; /* Use AP interface in AP_STA mode */
+        esp_err_t peer_err = esp_now_add_peer(&pi);
+        Serial.printf("[MESH] Peer add result: %d (%s)\n",
+                      peer_err, peer_err==ESP_OK?"OK":"FAIL");
+        if (peer_err != ESP_OK) {
+            server.send(500,"application/json","{\"error\":\"peer registration failed\"}");
+            return;
+        }
+        /* Send JOIN_REQ directly to Master 1 via ESP-NOW (not broadcast) */
+        StaticJsonDocument<128> doc;
+        char self_uid[12];
+        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        doc["type"] = MESH_PKT_JOIN_REQ;
+        doc["uid"]  = self_uid;
+        doc["pin"]  = pin.c_str();
+        String payload; serializeJson(doc,payload);
+        uint8_t my_ap_mac[6]; esp_read_mac(my_ap_mac, ESP_MAC_WIFI_SOFTAP);
+        Serial.printf("[MESH] JOIN_REQ: my AP MAC=%02X%02X%02X%02X%02X%02X\n",
+                      my_ap_mac[0],my_ap_mac[1],my_ap_mac[2],
+                      my_ap_mac[3],my_ap_mac[4],my_ap_mac[5]);
+        Serial.printf("[MESH] JOIN_REQ: sending to %s on channel %d\n",
+                      mac_str.c_str(), AP_CHANNEL);
+        esp_err_t send_r = esp_now_send(peer_mac,
+                           (const uint8_t*)payload.c_str(),payload.length()+1);
+        Serial.printf("[MESH] JOIN_REQ: esp_now_send=%d (%s)\n",
+                      send_r, send_r==ESP_OK?"OK":"FAIL");
+        /* Response arrives async via mesh_recv_cb JOIN_ACK handler */
+        server.send(200,"application/json","{\"ok\":true,\"status\":\"pending\"}");
     });
+
+    
 
     /* Create a new mesh (first master) */
     server.on("/api/mesh/create", HTTP_POST, [](){
@@ -2048,6 +2172,11 @@ static void setup_web(void) {
         mesh_active = true;
         mesh_nvs_save();
         Serial.println("[MESH] New mesh created");
+        /* Switch to shared SSID now that mesh is active */
+        WiFi.softAPdisconnect(false);
+        delay(100);
+        WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
+        Serial.println("[WIFI] Switched to shared SSID: Unisync");
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -2069,6 +2198,18 @@ static void setup_web(void) {
         mesh_broadcast(payload.c_str(),payload.length()+1);
         delay(100);
         mesh_nvs_clear();
+        /* Switch back to unique SSID   master is now standalone again */
+        {
+            uint8_t tmac[6];
+            esp_read_mac(tmac, ESP_MAC_WIFI_STA);
+            char unique_ssid[32];
+            snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
+                     tmac[4], tmac[5]);
+            WiFi.softAPdisconnect(false);
+            delay(100);
+            WiFi.softAP(unique_ssid, AP_PASS, AP_CHANNEL);
+            Serial.printf("[WIFI] Reverted to unique SSID: %s\n", unique_ssid);
+        }
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -2078,6 +2219,20 @@ static void setup_web(void) {
         String peer_uid_str = server.arg("peer_uid");
         String sw_id        = server.arg("sw_id");
         int    ch           = server.arg("ch").toInt();
+
+        /* Validate ch - if 0 or undefined, derive from sw_id suffix */
+        if (ch < 1 || ch > 2) {
+            /* sw_id format: "master_1", "ext0_2" etc - last char is channel */
+            String sw_id_str = sw_id;
+            if (sw_id_str.length() > 0) {
+                char last = sw_id_str[sw_id_str.length()-1];
+                if (last == '1') ch = 1;
+                else if (last == '2') ch = 2;
+                else ch = 1; /* default */
+            }
+            Serial.printf("[MESH] ch was invalid, derived ch=%d from sw_id=%s\n",
+                          ch, sw_id.c_str());
+        }
 
         if (peer_uid_str.length()!=8) {
             server.send(400,"application/json","{\"error\":\"bad uid\"}");
@@ -2112,20 +2267,25 @@ static void setup_web(void) {
         bool ok = mesh_relay_remote(peer_uid, mesh_peers[idx].mac,
                                     sw_id.c_str(), ch, new_state);
 
-        if (ok) {
-            /* Optimistically update local cache */
-            xSemaphoreTake(state_mutex,portMAX_DELAY);
-            for (int i=0;i<mesh_peers[idx].switch_count;i++) {
-                if (strcmp(mesh_peers[idx].switches[i].id,sw_id.c_str())==0) {
-                    mesh_peers[idx].switches[i].state = new_state;
-                    break;
-                }
+        /* Optimistically update local cache regardless of send result.
+         * Gossip will correct state if relay actually failed. */
+        xSemaphoreTake(state_mutex,portMAX_DELAY);
+        for (int i=0;i<mesh_peers[idx].switch_count;i++) {
+            if (strcmp(mesh_peers[idx].switches[i].id,sw_id.c_str())==0) {
+                mesh_peers[idx].switches[i].state = new_state;
+                break;
             }
-            xSemaphoreGive(state_mutex);
+        }
+        xSemaphoreGive(state_mutex);
+
+        if (ok) {
             notify_ui();
             server.send(200,"application/json","{\"ok\":true}");
         } else {
-            server.send(500,"application/json","{\"error\":\"relay failed\"}");
+            /* Send failed -- still return 200 with warning so UI doesn't error */
+            Serial.println("[MESH] relay send failed");
+            notify_ui();
+            server.send(200,"application/json","{\"ok\":false,\"warn\":\"send failed\"}");
         }
     });
 
@@ -2177,7 +2337,7 @@ void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v6.2 - booting");
+    Serial.println("\n[MASTER] Unisync v8.5 - booting");
 
     /* Configure relay pins with pull-down before anything else
      * prevents GPIO float causing relay to fire during boot     */
@@ -2241,23 +2401,61 @@ void setup() {
     ws_notify_queue=xQueueCreate(8,sizeof(uint8_t));
     welcome_queue=xQueueCreate(8,sizeof(welcome_cmd_t));
 
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(AP_IP,AP_GW,AP_SUBNET);
-    WiFi.softAP(AP_SSID,AP_PASS);
-    Serial.printf("[WIFI] AP: %s  IP: %s\n",AP_SSID,AP_IP.toString().c_str());
+    /* WIFI_AP_STA required for ESP-NOW to work alongside AP mode.
+     * Pure WIFI_AP mode breaks ESP-NOW receive on ESP32-C6. */
+    /* Load mesh credentials BEFORE WiFi init so mesh_active is
+     * correct when choosing SSID (shared vs unique) */
+    relay_ack_sem = xSemaphoreCreateBinary();
+    mesh_nvs_load();
 
-    /* Get master UID from MAC - must be after WiFi init */
-    uint8_t mac[6]; WiFi.macAddress(mac);
-    master_uid[0]=mac[2]; master_uid[1]=mac[3];
-    master_uid[2]=mac[4]; master_uid[3]=mac[5];
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAPConfig(AP_IP,AP_GW,AP_SUBNET);
+    /* Disable STA auto-reconnect -- we don't connect to any router */
+    WiFi.disconnect(true);
+    WiFi.setAutoReconnect(false);
+    /* When not in mesh: broadcast unique SSID so user can identify this master.
+     * Once in mesh: only broadcast "Unisync" (shared SSID for auto-connect). */
+    if (!mesh_active) {
+        /* Use efuse base MAC for unique SSID -- available before WiFi init */
+        char unique_ssid[32];
+        uint8_t tmac[6];
+        esp_read_mac(tmac, ESP_MAC_WIFI_STA);
+        snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
+                 tmac[4], tmac[5]);
+        WiFi.softAP(unique_ssid, AP_PASS, AP_CHANNEL);
+        Serial.printf("[WIFI] AP (unique): %s\n", unique_ssid);
+    } else {
+        WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
+        Serial.printf("[WIFI] AP: %s\n", AP_SSID);
+    }
+    Serial.printf("[WIFI] IP: %s\n", AP_IP.toString().c_str());
+
+    /* Get master UID from factory-burned efuse MAC.
+     * esp_read_mac() reads the base MAC from efuse   guaranteed unique
+     * per chip from factory, does not depend on WiFi init order.
+     * Use bytes 2-5 (skip OUI bytes 0-1 which are Espressif OUI = same on all) */
+    {
+        uint8_t base_mac[6];
+        esp_read_mac(base_mac, ESP_MAC_WIFI_STA);
+        master_uid[0]=base_mac[2]; master_uid[1]=base_mac[3];
+        master_uid[2]=base_mac[4]; master_uid[3]=base_mac[5];
+    }
     Serial.printf("[MASTER] UID=%02X%02X%02X%02X\n",
                   master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+    {
+        uint8_t ap_mac[6]; esp_read_mac(ap_mac, ESP_MAC_WIFI_SOFTAP);
+        Serial.printf("[MASTER] STA MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+            master_uid[0],master_uid[1],master_uid[2],master_uid[3],
+            ap_mac[4]-1,ap_mac[5]-1);
+        Serial.printf("[MASTER] AP  MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+            ap_mac[0],ap_mac[1],ap_mac[2],ap_mac[3],ap_mac[4],ap_mac[5]);
+        Serial.println("[MASTER] Use AP MAC for mesh peer registration");
+    }
 
     setup_web();
 
-    /* Init mesh - must be after WiFi */
+    /* Init mesh ESP-NOW - must be after WiFi */
     relay_ack_sem = xSemaphoreCreateBinary();
-    mesh_nvs_load();
     mesh_init();
 
     xTaskCreate(task_touch,"touch",2048,NULL,3,NULL);
