@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v8.5
+ * Unisync - Master Firmware v10.6
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -115,6 +115,7 @@ static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63,
 #define MESH_PKT_JOIN_REJ  0x06  /* reject (wrong PIN) */
 #define MESH_PKT_LEAVE     0x07  /* master leaving mesh */
 #define MESH_PKT_PING      0x08  /* keepalive */
+#define MESH_PKT_PASS_CHG  0x09  /* password change broadcast */
 
 /* ================================================================
  * RELAY RATE LIMITING
@@ -270,9 +271,15 @@ static String       ota_status      = "";
 /* Mesh state */
 static mesh_peer_t  mesh_peers[MAX_MESH_MASTERS];
 static uint8_t      mesh_id[16]    = {0};  /* shared mesh secret */
-static bool         mesh_active    = false;
+static volatile bool mesh_active   = false; /* read from multiple tasks */
 static uint8_t      mesh_seq       = 0;
 static uint32_t     last_gossip_ms = 0;
+static char         mesh_name[32]  = "Unisync"; /* mesh SSID name - write protected by single-writer pattern */
+static char         mesh_pass[64]  = "12345678"; /* mesh WiFi password */
+/* Deferred softAP reconfiguration -- set from ESP-NOW callback, applied in loop() */
+static volatile bool mesh_cfg_pending      = false;
+static char          mesh_cfg_pending_name[32] = {0};
+static char          mesh_cfg_pending_pass[64] = {0};
 
 /* Mesh PIN (for inviting new masters) */
 static char         mesh_pin[7]    = {0};  /* 6 digits + null */
@@ -280,9 +287,6 @@ static uint32_t     mesh_pin_ms    = 0;    /* when PIN was generated */
 static bool         mesh_pin_valid = false;
 
 /* Pending relay ACK tracking */
-static uint8_t      pending_relay_req_id = 0;
-static bool         pending_relay_ack    = false;
-static SemaphoreHandle_t relay_ack_sem;
 
 /* Master UID (from ESP32 MAC) */
 static uint8_t master_uid[4] = {0};
@@ -515,13 +519,18 @@ static bool mesh_verify_pin(const char *pin) {
 static void mesh_recv_cb(const esp_now_recv_info_t *info,
                          const uint8_t *data, int len) {
     if (len < 2) return;
-
-    /* Try to parse as JSON (state broadcast) */
+    /* Parse packet to get type */
     StaticJsonDocument<1024> doc;
-    DeserializationError err = deserializeJson(doc, data, len);
-    if (err) return;
+    if (deserializeJson(doc, data, len) != DeserializationError::Ok) return;
 
     uint8_t type = doc["type"] | 0;
+
+    /* When not in mesh, only allow JOIN_ACK and JOIN_REJ.
+     * All other packets (gossip, relay, ping) are ignored.
+     * JOIN_ACK is what transitions mesh_active from false to true. */
+    if (!mesh_active &&
+        type != MESH_PKT_JOIN_ACK &&
+        type != MESH_PKT_JOIN_REJ) return;
     const char *uid_str = doc["uid"] | "";
 
     /* Parse sender UID */
@@ -542,7 +551,8 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         if (idx < 0) return; /* mesh full */
 
         /* Ensure this peer is registered as ESP-NOW peer with AP MAC.
-         * Re-register on every gossip in case peer rebooted or was lost. */
+         * Re-register on every gossip in case peer rebooted or was lost.
+         * mesh_active checked at top of recv_cb so we never reach here if left. */
         if (!esp_now_is_peer_exist(info->src_addr)) {
             esp_now_peer_info_t gpi={};
             memcpy(gpi.peer_addr, info->src_addr, 6);
@@ -614,7 +624,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         }
 
         /* Send ACK back */
-        StaticJsonDocument<128> ack;
+        StaticJsonDocument<384> ack; /* name(31)+pass(63)+mesh_id(32)+uid(8)+overhead */
         ack["type"]   = MESH_PKT_RELAY_ACK;
         ack["uid"]    = String(uid_str[0])?uid_str:"";
         ack["req_id"] = req_id;
@@ -623,11 +633,8 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         mesh_send(info->src_addr, ack_str.c_str(), ack_str.length()+1);
 
     } else if (type == MESH_PKT_RELAY_ACK) {
-        uint8_t req_id = doc["req_id"] | 0;
-        if (req_id == pending_relay_req_id) {
-            pending_relay_ack = true;
-            xSemaphoreGive(relay_ack_sem);
-        }
+        /* Fire-and-forget relay -- ACK received but ignored.
+         * State confirmed via next gossip broadcast. */
 
     } else if (type == MESH_PKT_JOIN_REQ) {
         /* New master wants to join our mesh */
@@ -656,16 +663,18 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         Serial.printf("[MESH] Verifying PIN: '%s' against '%s'\n", pin, mesh_pin);
         if (mesh_verify_pin(pin)) {
             /* Send mesh credentials */
-            StaticJsonDocument<128> ack;
+            StaticJsonDocument<384> ack; /* name(31)+pass(63)+mesh_id(32)+uid(8)+overhead */
             char mid_hex[33];
-            for (int i=0;i<16;i++) sprintf(mid_hex+i*2,"%02X",mesh_id[i]);
+            for (int i=0;i<16;i++) snprintf(mid_hex+i*2, 3, "%02X", mesh_id[i]);
             mid_hex[32]='\0';
-            ack["type"]    = MESH_PKT_JOIN_ACK;
+            ack["type"]      = MESH_PKT_JOIN_ACK;
             char self_uid[12];
             snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
                      master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-            ack["uid"]     = self_uid;
-            ack["mesh_id"] = mid_hex;
+            ack["uid"]       = self_uid;
+            ack["mesh_id"]   = mid_hex;
+            ack["mesh_name"] = mesh_name;
+            ack["mesh_pass"] = mesh_pass;
             String ack_str; serializeJson(ack, ack_str);
             /* Register sender as ESP-NOW peer first */
             esp_now_peer_info_t pi={};
@@ -707,21 +716,26 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 char byte_str[3]={mid_hex[i*2],mid_hex[i*2+1],0};
                 mesh_id[i]=(uint8_t)strtoul(byte_str,NULL,16);
             }
+            /* Store mesh name and password from ACK */
+            const char *mn = doc["mesh_name"] | "Unisync";
+            strncpy(mesh_name, mn, sizeof(mesh_name)-1);
+            const char *mp = doc["mesh_pass"] | "12345678";
+            strncpy(mesh_pass, mp, sizeof(mesh_pass)-1);
             mesh_active = true;
             /* Register sender as peer */
             esp_now_peer_info_t pi={};
             memcpy(pi.peer_addr, info->src_addr, 6);
             pi.channel=AP_CHANNEL; pi.encrypt=false;
-    pi.ifidx=WIFI_IF_AP;
+            pi.ifidx=WIFI_IF_AP;
             if (!esp_now_is_peer_exist(pi.peer_addr))
                 esp_now_add_peer(&pi);
             mesh_nvs_save();
-            Serial.println("[MESH] Joined mesh successfully");
-            /* Switch from unique SSID to shared "Unisync" SSID */
+            Serial.printf("[MESH] Joined mesh: %s\n", mesh_name);
+            /* Switch to mesh-name SSID */
             WiFi.softAPdisconnect(false);
             delay(100);
-            WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
-            Serial.println("[WIFI] Switched to shared SSID: Unisync");
+            WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+            Serial.printf("[WIFI] Switched to mesh SSID: %s\n", mesh_name);
             notify_ui();
         }
 
@@ -732,13 +746,21 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         /* UI will show timeout error - nothing more to do */
 
     } else if (type == MESH_PKT_LEAVE) {
-        /* Peer leaving - mark offline */
+        /* Peer leaving mesh -- fully deregister it */
         int idx = mesh_find_peer(src_uid);
         if (idx >= 0) {
+            Serial.printf("[MESH] Peer left mesh: %s\n", mesh_peers[idx].name);
+            /* Remove ESP-NOW peer registration */
+            if (esp_now_is_peer_exist(mesh_peers[idx].mac))
+                esp_now_del_peer(mesh_peers[idx].mac);
+            /* Clear peer slot completely */
             xSemaphoreTake(state_mutex, portMAX_DELAY);
-            mesh_peers[idx].online = false;
+            memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
             xSemaphoreGive(state_mutex);
+            /* Persist updated peer list */
+            mesh_nvs_save();
             notify_ui();
+            Serial.println("[MESH] Peer deregistered and removed from NVS");
         }
 
     } else if (type == MESH_PKT_PING) {
@@ -749,6 +771,22 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             mesh_peers[idx].last_seen_ms = millis();
             mesh_peers[idx].online = true;
             xSemaphoreGive(state_mutex);
+        }
+
+    } else if (type == MESH_PKT_PASS_CHG) {
+        /* Name/password change -- always apply, packet always has both */
+        const char *new_pass = doc["pass"] | "";
+        const char *new_name = doc["name"] | "";
+        if (strlen(new_pass) >= 8 && strlen(new_name) > 0) {
+            strncpy(mesh_name, new_name, sizeof(mesh_name)-1);
+            strncpy(mesh_pass, new_pass, sizeof(mesh_pass)-1);
+            mesh_nvs_save();
+            Serial.printf("[MESH] Config updated: %s\n", mesh_name);
+            /* Defer softAP call to loop() -- calling WiFi driver from
+             * ESP-NOW callback causes partial AP state / ghost SSID */
+            strncpy(mesh_cfg_pending_name, mesh_name, sizeof(mesh_cfg_pending_name)-1);
+            strncpy(mesh_cfg_pending_pass, mesh_pass, sizeof(mesh_cfg_pending_pass)-1);
+            mesh_cfg_pending = true;
         }
     }
 }
@@ -989,6 +1027,8 @@ static void mesh_nvs_save(void) {
     prefs.begin("mesh", false);
     prefs.putBytes("mesh_id", mesh_id, 16);
     prefs.putBool("active", mesh_active);
+    prefs.putString("mesh_name", mesh_name);
+    prefs.putString("mesh_pass", mesh_pass);
     uint8_t peer_count = 0;
     for (int i=0; i<MAX_MESH_MASTERS; i++)
         if (mesh_peers[i].last_seen_ms > 0 ||
@@ -1014,6 +1054,10 @@ static void mesh_nvs_load(void) {
     mesh_active = prefs.getBool("active",false);
     if (mesh_active) {
         prefs.getBytes("mesh_id",mesh_id,16);
+        String mn = prefs.getString("mesh_name","Unisync");
+        strncpy(mesh_name, mn.c_str(), sizeof(mesh_name)-1);
+        String mp = prefs.getString("mesh_pass","12345678");
+        strncpy(mesh_pass, mp.c_str(), sizeof(mesh_pass)-1);
         uint8_t pc = prefs.getUChar("peer_count",0);
         for (int i=0;i<pc&&i<MAX_MESH_MASTERS;i++) {
             char key[12];
@@ -1033,10 +1077,19 @@ static void mesh_nvs_load(void) {
 }
 
 static void mesh_nvs_clear(void) {
+    /* Remove all registered ESP-NOW peers */
+    for (int i=0;i<MAX_MESH_MASTERS;i++) {
+        bool has_mac=false;
+        for (int j=0;j<6;j++) if (mesh_peers[i].mac[j]) { has_mac=true; break; }
+        if (has_mac && esp_now_is_peer_exist(mesh_peers[i].mac))
+            esp_now_del_peer(mesh_peers[i].mac);
+    }
     prefs.begin("mesh",false); prefs.clear(); prefs.end();
     memset(mesh_id,0,16);
     memset(mesh_peers,0,sizeof(mesh_peers));
     mesh_active=false;
+    strncpy(mesh_name,"Unisync",sizeof(mesh_name)-1);
+    strncpy(mesh_pass,"12345678",sizeof(mesh_pass)-1);
 }
 
 /* ================================================================
@@ -1586,6 +1639,19 @@ static void task_bus(void *arg) {
             mesh_check_timeouts();
         }
 
+        /* Apply deferred WiFi AP reconfiguration from mesh_recv_cb.
+         * softAP must NOT be called from ESP-NOW callback context --
+         * doing so causes partial AP state and ghost SSIDs. */
+        if (mesh_cfg_pending) {
+            mesh_cfg_pending = false;
+            WiFi.softAPdisconnect(true);
+            delay(100);
+            WiFi.softAP(mesh_cfg_pending_name, mesh_cfg_pending_pass, AP_CHANNEL);
+            Serial.printf("[WIFI] AP reconfigured (deferred): %s\n",
+                          mesh_cfg_pending_name);
+            notify_ui();
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -1616,7 +1682,7 @@ static String build_state_json(void) {
     bool       snap_scan     = scan_active;
     bool       snap_r1       = master_relay1;
     bool       snap_r2       = master_relay2;
-    char       snap_mname[24]; strncpy(snap_mname, master_name, sizeof(snap_mname));
+    char       snap_mname[24]; strncpy(snap_mname, master_name, sizeof(snap_mname)-1); snap_mname[23]='\0';
     String     snap_order    = switch_order;
     extension_t snap_ext[MAX_EXTENSIONS];
     memcpy(snap_ext, extensions, sizeof(extensions));
@@ -1744,6 +1810,7 @@ static String build_state_json(void) {
 
     /* Mesh peers */
     doc["mesh_active"] = mesh_active;
+    doc["mesh_name"]   = mesh_name;
     char self_uid_str[12];
     snprintf(self_uid_str,sizeof(self_uid_str),"%02X%02X%02X%02X",
              master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
@@ -1910,7 +1977,7 @@ static void setup_web(void) {
             strncpy(e->name,name.c_str(),sizeof(e->name)-1);
             e->name[sizeof(e->name)-1]='\0';
         }
-        char slot_name[24]; strncpy(slot_name,e->name,sizeof(slot_name));
+        char slot_name[24]; strncpy(slot_name,e->name,sizeof(slot_name)-1); slot_name[23]='\0';
         pending_remove(new_uid);
         xSemaphoreGive(state_mutex);
 
@@ -2167,16 +2234,22 @@ static void setup_web(void) {
             server.send(400,"application/json","{\"error\":\"already in mesh\"}");
             return;
         }
+        /* Get mesh name from request, default to "Unisync" */
+        String name = server.arg("name");
+        name.trim();
+        if (name.length() == 0) name = "Unisync";
+        if (name.length() > 31) name = name.substring(0,31);
+        strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);
         /* Generate random mesh ID */
         for (int i=0;i<16;i++) mesh_id[i]=(uint8_t)(esp_random()&0xFF);
         mesh_active = true;
         mesh_nvs_save();
-        Serial.println("[MESH] New mesh created");
-        /* Switch to shared SSID now that mesh is active */
+        Serial.printf("[MESH] New mesh created: %s\n", mesh_name);
+        /* Switch to mesh-name SSID */
         WiFi.softAPdisconnect(false);
         delay(100);
-        WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
-        Serial.println("[WIFI] Switched to shared SSID: Unisync");
+        WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+        Serial.printf("[WIFI] Switched to mesh SSID: %s\n", mesh_name);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -2210,6 +2283,7 @@ static void setup_web(void) {
             WiFi.softAP(unique_ssid, AP_PASS, AP_CHANNEL);
             Serial.printf("[WIFI] Reverted to unique SSID: %s\n", unique_ssid);
         }
+        strncpy(mesh_name, "Unisync", sizeof(mesh_name)-1);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -2289,10 +2363,96 @@ static void setup_web(void) {
         }
     });
 
+    /* Change mesh WiFi password -- propagates to all mesh peers */
+    server.on("/api/mesh/passwd", HTTP_POST, [](){
+        if (!mesh_active) {
+            server.send(400,"application/json","{\"error\":\"not in mesh\"}");
+            return;
+        }
+        String old_pass = server.arg("old");
+        String pass     = server.arg("pass");
+        String name     = server.arg("name");
+        pass.trim(); old_pass.trim();
+        /* Verify old password */
+        if (old_pass != String(mesh_pass)) {
+            server.send(403,"application/json",
+                "{\"error\":\"Current password is incorrect\"}");
+            return;
+        }
+        if (pass.length() < 8) {
+            server.send(400,"application/json",
+                "{\"error\":\"New password must be at least 8 characters\"}");
+            return;
+        }
+        if (pass.length() > 63) pass = pass.substring(0,63);
+        if (name.length() > 0 && name.length() <= 31)
+            strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);
+        strncpy(mesh_pass, pass.c_str(), sizeof(mesh_pass)-1);
+        mesh_nvs_save();
+        /* Broadcast password change to all peers */
+        StaticJsonDocument<256> doc; /* passwd bcast: name+pass+uid+seq */
+        char self_uid[12];
+        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        doc["type"] = MESH_PKT_PASS_CHG;
+        doc["uid"]  = self_uid;
+        doc["pass"] = mesh_pass;   /* always current password */
+        doc["name"] = mesh_name;   /* always current name from NVS/state */
+        String payload; serializeJson(doc,payload);
+        mesh_broadcast(payload.c_str(), payload.length()+1);
+        Serial.printf("[MESH] Password change broadcast: %s\n", mesh_name);
+        /* Apply locally */
+        WiFi.softAPdisconnect(false);
+        delay(100);
+        WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+        Serial.printf("[WIFI] AP restarted: %s\n", mesh_name);
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
+    /* Rename mesh */
+    server.on("/api/mesh/rename", HTTP_POST, [](){
+        if (!mesh_active) {
+            server.send(400,"application/json","{\"error\":\"not in mesh\"}");
+            return;
+        }
+        String name = server.arg("name");
+        name.trim();
+        if (name.length()==0) {
+            server.send(400,"application/json","{\"error\":\"name required\"}");
+            return;
+        }
+        if (name.length()>31) name=name.substring(0,31);
+        strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);
+        mesh_nvs_save();
+        /* Broadcast new name to all peers -- they switch SSID simultaneously */
+        {
+            StaticJsonDocument<256> bcast; /* name+pass+uid+seq */
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            bcast["type"] = MESH_PKT_PASS_CHG; /* carries both name+pass */
+            bcast["uid"]  = self_uid;
+            bcast["name"] = mesh_name;
+            bcast["pass"] = mesh_pass;
+            String bpayload; serializeJson(bcast, bpayload);
+            mesh_broadcast(bpayload.c_str(), bpayload.length()+1);
+            Serial.printf("[MESH] Rename broadcast: %s\n", mesh_name);
+        }
+        /* No delay needed -- broadcast is queued by esp_now_send synchronously */
+        WiFi.softAPdisconnect(false);
+        delay(100);
+        WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+        Serial.printf("[WIFI] SSID changed to: %s\n", mesh_name);
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
     /* Mesh status */
     server.on("/api/mesh/status", HTTP_GET, [](){
         StaticJsonDocument<512> doc;
-        doc["active"] = mesh_active;
+        doc["active"]    = mesh_active;
+        doc["mesh_name"] = mesh_name;
         doc["pin_valid"] = mesh_pin_valid;
         if (mesh_pin_valid) doc["pin"] = mesh_pin;
         int online_count = 0;
@@ -2337,7 +2497,7 @@ void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v8.5 - booting");
+    Serial.println("\n[MASTER] Unisync v10.6 - booting");
 
     /* Configure relay pins with pull-down before anything else
      * prevents GPIO float causing relay to fire during boot     */
@@ -2405,13 +2565,17 @@ void setup() {
      * Pure WIFI_AP mode breaks ESP-NOW receive on ESP32-C6. */
     /* Load mesh credentials BEFORE WiFi init so mesh_active is
      * correct when choosing SSID (shared vs unique) */
-    relay_ack_sem = xSemaphoreCreateBinary();
     mesh_nvs_load();
+
+    /* Explicitly tear down any previous WiFi state from before RST.
+     * Without this, the old AP SSID keeps broadcasting during boot. */
+    WiFi.disconnect(true);
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(100);
 
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAPConfig(AP_IP,AP_GW,AP_SUBNET);
-    /* Disable STA auto-reconnect -- we don't connect to any router */
-    WiFi.disconnect(true);
     WiFi.setAutoReconnect(false);
     /* When not in mesh: broadcast unique SSID so user can identify this master.
      * Once in mesh: only broadcast "Unisync" (shared SSID for auto-connect). */
@@ -2425,8 +2589,9 @@ void setup() {
         WiFi.softAP(unique_ssid, AP_PASS, AP_CHANNEL);
         Serial.printf("[WIFI] AP (unique): %s\n", unique_ssid);
     } else {
-        WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
-        Serial.printf("[WIFI] AP: %s\n", AP_SSID);
+        /* Use mesh name as SSID -- all masters in same mesh share this SSID */
+        WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+        Serial.printf("[WIFI] AP (mesh): %s\n", mesh_name);
     }
     Serial.printf("[WIFI] IP: %s\n", AP_IP.toString().c_str());
 
@@ -2455,7 +2620,6 @@ void setup() {
     setup_web();
 
     /* Init mesh ESP-NOW - must be after WiFi */
-    relay_ack_sem = xSemaphoreCreateBinary();
     mesh_init();
 
     xTaskCreate(task_touch,"touch",2048,NULL,3,NULL);

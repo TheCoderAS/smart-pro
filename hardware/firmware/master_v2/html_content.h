@@ -8,7 +8,6 @@ static const char SETTINGS_HTML[] PROGMEM = R"SETHTML(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Settings - Unisync</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#0a0a0f;--bg2:#111118;--bg3:#1a1a24;--bg4:#22222e;
@@ -21,7 +20,7 @@ static const char SETTINGS_HTML[] PROGMEM = R"SETHTML(
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:var(--bg);color:var(--text);
-  font-family:'Inter',system-ui,sans-serif;min-height:100vh;font-size:15px}
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;min-height:100vh;font-size:15px}
 .app{max-width:480px;margin:0 auto;padding:20px 16px 60px}
 .back{display:flex;align-items:center;gap:6px;color:var(--accent);
   font-size:13px;text-decoration:none;margin-bottom:24px;
@@ -46,7 +45,7 @@ h1{font-size:22px;font-weight:600;margin-bottom:4px}
 .file-zone.has-file{border-color:#22c55e;color:#22c55e;background:var(--greenbg)}
 .fname{font-size:11px;color:var(--text3);margin-top:6px}
 .btn{width:100%;padding:13px;border:none;border-radius:var(--r12);
-  font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;
+  font-weight:600;cursor:pointer;font-family:inherit;
   margin-bottom:8px;transition:all 0.15s}
 .btn.primary{background:var(--accent);color:#fff}
 .btn.primary:hover{background:var(--accent2)}
@@ -62,11 +61,9 @@ h1{font-size:22px;font-weight:600;margin-bottom:4px}
 .mesh-status{font-size:13px;padding:10px 14px;border-radius:var(--r8);
   margin-bottom:14px}
 .mesh-status.active{background:var(--greenbg);color:var(--green)}
+.field-label{font-size:10px;font-weight:600;letter-spacing:0.1em;color:var(--text3);text-transform:uppercase;display:block;margin-bottom:6px}
 .mesh-status.inactive{background:var(--bg3);color:var(--text3)}
-.sheet-input{width:100%;padding:12px 14px;background:var(--bg3);
-  border:1px solid var(--border);border-radius:var(--r12);color:var(--text);
-  font-size:18px;letter-spacing:8px;font-family:monospace;text-align:center;
-  outline:none;margin-bottom:12px;transition:border-color 0.15s}
+.sheet-input{width:100%;background:var(--bg3);border:1.5px solid var(--border2);border-radius:10px;color:var(--text);font-size:16px;padding:12px 14px;margin-bottom:14px;outline:none;box-sizing:border-box;letter-spacing:normal;-webkit-appearance:none}
 .sheet-input:focus{border-color:var(--accent)}
 </style>
 </head>
@@ -102,36 +99,65 @@ h1{font-size:22px;font-weight:600;margin-bottom:4px}
   <div class="card">
     <div class="card-label">Mesh network</div>
     <div class="mesh-status inactive" id="mesh-status">Not in any mesh</div>
-    <div id="mesh-join-section">
-      <p style="font-size:13px;color:var(--text3);margin-bottom:14px;line-height:1.6">
-        On the existing master tap <b style="color:var(--text)">Invite Master</b>
-        and enter the PIN and MAC shown there.
-      </p>
-      <div style="margin-bottom:10px">
-        <label style="font-size:10px;font-weight:600;letter-spacing:0.1em;
-               color:var(--text3);text-transform:uppercase;display:block;
-               margin-bottom:6px">6-digit PIN</label>
-        <input class="sheet-input" id="mesh-pin" type="text"
-               inputmode="numeric" maxlength="6" placeholder="123456"/>
-      </div>
+
+    <!-- When IN mesh: rename + password + leave -->
+    <div id="mesh-active-section" style="display:none">
+
       <div style="margin-bottom:14px">
-        <label style="font-size:10px;font-weight:600;letter-spacing:0.1em;
-               color:var(--text3);text-transform:uppercase;display:block;
-               margin-bottom:6px">Master MAC (12 hex chars, no colons)</label>
-        <input class="sheet-input" id="mesh-mac" type="text"
-               inputmode="text" maxlength="12" placeholder="AABBCCDDEEFF"
-               style="letter-spacing:3px;font-size:15px"/>
+        <label class="field-label">Mesh name (WiFi network name)</label>
+        <input class="sheet-input" id="mesh-name-edit" type="text"
+               maxlength="31" placeholder="Mesh name" style="width:100%;margin-bottom:8px"/>
+        <button class="btn primary" onclick="renameMeshNetwork()"
+                style="width:100%">Save</button>
+        <div id="rename-mesh-msg" style="font-size:11px;margin-top:6px"></div>
       </div>
-      <button class="btn primary" id="join-btn" onclick="joinMesh()">Join mesh</button>
+
+      <div style="margin-bottom:14px">
+        <label class="field-label">Current WiFi password</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="sheet-input" id="mesh-pass-old" type="password"
+                 maxlength="63" placeholder="Current password"
+                 style="margin:0;flex:1;letter-spacing:normal;border:none;cursor:pointer;
+                         color:var(--text3);padding:0 6px;font-size:18px"
+                  id="eye-old">&#128065;</button>
         </div>
-    <button class="btn danger" id="leave-btn" onclick="leaveMesh()"
-      style="display:none">Leave mesh</button>
-    <div class="status" id="mesh-msg"></div>
+        <label class="field-label" style="margin-top:10px">New WiFi password (min 8 chars)</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="sheet-input" id="mesh-pass-new" type="password"
+                 maxlength="63" placeholder="New password"
+                 style="margin:0;flex:1;letter-spacing:normal;border:none;cursor:pointer;
+                         color:var(--text3);padding:0 6px;font-size:18px"
+                  id="eye-new">&#128065;</button>
+        </div>
+        <button class="btn primary" onclick="changeMeshPass()"
+                style="width:100%;margin-top:10px">Change password on all masters</button>
+        <div id="change-pass-msg" style="font-size:11px;margin-top:6px"></div>
+      </div>
+
+      <button class="btn danger" onclick="leaveMesh()" style="width:100%">Leave mesh</button>
+    </div>
+
+    <!-- When NOT in mesh: instruction only -->
+    <div id="mesh-inactive-section">
+      <p style="font-size:13px;color:var(--text3);line-height:1.6">
+        Open the main screen on an existing mesh master and tap
+        <b style="color:var(--text)">+ Invite Master</b>.
+        Follow the steps   you will be directed here automatically.
+      </p>
+    </div>
+
+    <div class="status" id="mesh-msg" style="margin-top:8px"></div>
   </div>
-</div>
 
 <script>
 var selFile=null;
+
+function toggleVis(inputId, btnId){
+  var inp=document.getElementById(inputId);
+  var btn=document.getElementById(btnId);
+  if(inp.type==='password'){inp.type='text';btn.innerHTML='&#128683;';}
+  else{inp.type='password';btn.innerHTML='&#128065;';}
+}
 
 function uptime(s){
   if(s<60)return s+'s';
@@ -146,7 +172,7 @@ function loadInfo(){
     var d=JSON.parse(xhr.responseText);
     document.getElementById('sub').textContent='192.168.4.1 | Uptime: '+uptime(d.uptime);
     document.getElementById('info').innerHTML=
-      row('Firmware','v8.5')+
+      row('Firmware','v10.6')+
       row('Free heap',d.free_heap.toLocaleString()+' bytes')+
       row('Master UID',d.uid)+
       row('IP address','192.168.4.1');
@@ -208,122 +234,73 @@ function startOTA(){
 }
 
 function loadMesh(){
-  var xhr=new XMLHttpRequest();
-  xhr.open('GET','/api/mesh/status',true);
-  xhr.onload=function(){
-    var d=JSON.parse(xhr.responseText);
+  fetch('/api/mesh/status').then(function(r){return r.json();}).then(function(d){
     var ms=document.getElementById('mesh-status');
-    var lb=document.getElementById('leave-btn');
-    var js=document.getElementById('mesh-join-section');
+    var as=document.getElementById('mesh-active-section');
+    var is=document.getElementById('mesh-inactive-section');
+    var ni=document.getElementById('mesh-name-edit');
     if(d.active){
       ms.className='mesh-status active';
       ms.textContent='In mesh - '+d.peer_count+
         ' peer'+(d.peer_count!==1?'s':'')+' online';
-      lb.style.display='block';
-      js.style.display='none';
+      as.style.display='block';
+      is.style.display='none';
+      if(ni&&d.mesh_name) ni.value=d.mesh_name;
     } else {
       ms.className='mesh-status inactive';
       ms.textContent='Not in any mesh';
-      lb.style.display='none';
-      js.style.display='block';
+      as.style.display='none';
+      is.style.display='block';
     }
-  };
-  xhr.send();
+  });
 }
 
-async function joinMesh(){
-  var pin=document.getElementById('mesh-pin').value.trim();
-  var mac=document.getElementById('mesh-mac').value.trim().replace(/:/g,'').toUpperCase();
-  var msg=document.getElementById('mesh-msg');
-  if(pin.length!==6){
-    msg.innerHTML='<span class="err">PIN must be 6 digits</span>';return;
-  }
-  if(mac.length!==12){
-    msg.innerHTML='<span class="err">MAC must be 12 hex characters (no colons)</span>';return;
-  }
-  var btn=document.getElementById('join-btn');
-  btn.disabled=true;btn.textContent='Joining...';
-  msg.innerHTML='<span style="color:var(--text3)">Connecting to master 1...</span>';
-  try {
-    var r=await fetch('/api/mesh/join?pin='+pin+'&mac='+mac,{method:'POST'});
-    var d=await r.json();
-    if(r.ok&&d.status==='pending'){
-      msg.innerHTML='<span style="color:var(--accent2)">Request sent. Waiting for approval...</span>';
-      /* Poll until mesh_active */
-      var poll=setInterval(async function(){
-        try{
-          var sr=await fetch('/api/mesh/status');
-          var sd=await sr.json();
-          if(sd.active){
-            clearInterval(poll);
-            msg.innerHTML='<span class="ok">Joined mesh!</span>';
-            btn.textContent='Join mesh';btn.disabled=false;
-            loadMesh();
-          }
-        }catch(e){}
-      },2000);
-      setTimeout(function(){
-        clearInterval(poll);
-        if(!document.getElementById('join-btn').disabled) return;
-        msg.innerHTML='<span class="err">Timed out. Check PIN, MAC and try again.</span>';
-        btn.textContent='Join mesh';btn.disabled=false;
-      },60000);
-    } else {
-      msg.innerHTML='<span class="err">'+(d.error||'Failed')+'</span>';
-      btn.disabled=false;btn.textContent='Join mesh';
-    }
-  } catch(e){
-    msg.innerHTML='<span class="err">Network error: '+e.message+'</span>';
-    btn.disabled=false;btn.textContent='Join mesh';
+async function renameMeshNetwork(){
+  var name=document.getElementById('mesh-name-edit').value.trim();
+  var msg=document.getElementById('rename-mesh-msg');
+  if(!name){msg.innerHTML='<span style="color:var(--red)">Name required</span>';return;}
+  msg.innerHTML='<span style="color:var(--text3)">Saving...</span>';
+  var r=await fetch('/api/mesh/rename?name='+encodeURIComponent(name),{method:'POST'});
+  var d=await r.json();
+  if(d.ok){
+    msg.innerHTML='<span style="color:var(--green)">Saved. WiFi name is now: '+name+'</span>';
+    setTimeout(function(){msg.innerHTML='';},4000);
+  } else {
+    msg.innerHTML='<span style="color:var(--red)">Failed</span>';
   }
 }
 
-function openMaster1(){
-  /* Open Master 1 with pre-filled params so it can approve this join */
-  var url='http://192.168.4.1/settings?approve_mac='+joinMyMac+
-          '&approve_uid='+joinMyUid+'&approve_pin='+joinPin;
-  window.open(url,'_blank');
+async function changeMeshPass(){
+  var oldp=document.getElementById('mesh-pass-old').value;
+  var newp=document.getElementById('mesh-pass-new').value;
+  var msg=document.getElementById('change-pass-msg');
+  if(oldp.length<8){msg.innerHTML='<span style="color:var(--red)">Enter current password</span>';return;}
+  if(newp.length<8){msg.innerHTML='<span style="color:var(--red)">New password min 8 chars</span>';return;}
+  msg.innerHTML='<span style="color:var(--text3)">Verifying and changing on all masters...</span>';
+  var r=await fetch('/api/mesh/passwd?old='+encodeURIComponent(oldp)+
+                    '&pass='+encodeURIComponent(newp),{method:'POST'});
+  var d=await r.json();
+  if(d.ok){
+    msg.innerHTML='<span style="color:var(--green)">Done. Reconnect with new password.</span>';
+    document.getElementById('mesh-pass-old').value='';
+    document.getElementById('mesh-pass-new').value='';
+  } else {
+    msg.innerHTML='<span style="color:var(--red)">'+(d.error||'Failed')+'</span>';
+  }
 }
 
 function leaveMesh(){
-  if(!confirm('Leave the mesh? This board will operate independently.'))return;
-  var xhr=new XMLHttpRequest();
-  xhr.open('POST','/api/mesh/leave',true);
-  xhr.onload=function(){
+  if(!confirm('Leave mesh? This board will operate standalone.'))return;
+  fetch('/api/mesh/leave',{method:'POST'}).then(function(){
     document.getElementById('mesh-msg').innerHTML='<span class="ok">Left mesh.</span>';
     loadMesh();
-  };
-  xhr.send();
+  });
 }
 
 loadInfo();
 loadMesh();
 
-/* Auto-fill PIN and MAC from URL params */
-(function(){
-  var params=new URLSearchParams(window.location.search);
-  var pin=params.get('pin');
-  var mac=params.get('mac');
-  if(pin&&mac){
-    var pinInput=document.getElementById('mesh-pin');
-    var macInput=document.getElementById('mesh-mac');
-    if(pinInput) pinInput.value=pin;
-    if(macInput) macInput.value=mac;
-    /* Scroll to mesh section */
-    var section=document.getElementById('mesh-join-section');
-    if(section) setTimeout(function(){
-      section.scrollIntoView({behavior:'smooth',block:'center'});
-    },400);
-    /* Highlight inputs */
-    var style='border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,0.2)';
-    if(pinInput) pinInput.style.cssText+=style;
-    if(macInput) macInput.style.cssText+=style;
-    /* Show hint */
-    var msg=document.getElementById('mesh-msg');
-    if(msg) msg.innerHTML=
-      '<span style="color:var(--accent2)">PIN and MAC pre-filled. Tap Join mesh.</span>';
-  }
-})();
+
 </script>
 </body>
 </html>
@@ -336,8 +313,7 @@ static const char HTML[] PROGMEM = R"MAINHTML(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Unisync</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
 <style>
 :root{
   --bg:#0a0a0f;--bg2:#111118;--bg3:#1a1a24;--bg4:#22222e;
@@ -350,7 +326,7 @@ static const char HTML[] PROGMEM = R"MAINHTML(
   --r8:8px;--r12:12px;--r16:16px;--r20:20px;
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;
+html,body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
   min-height:100vh;font-size:15px;line-height:1.5}
 /* Scrollbar */
 ::-webkit-scrollbar{width:4px}
@@ -368,7 +344,7 @@ html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,s
 .master-title{font-size:22px;font-weight:600;color:var(--text);cursor:pointer;
   display:flex;align-items:center;gap:6px}
 .master-title:hover .edit-icon{opacity:1}
-.edit-icon{opacity:0;color:var(--text3);font-size:14px;transition:opacity 0.2s}
+.edit-icon{opacity:0;color:var(--text3);transition:opacity 0.2s}
 .conn-row{display:flex;align-items:center;gap:6px;margin-top:4px}
 .conn-dot{width:6px;height:6px;border-radius:50%;background:var(--text3);
   transition:background 0.4s,box-shadow 0.4s}
@@ -405,7 +381,7 @@ html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,s
 .master-icon.self{background:var(--accentbg);color:var(--accent)}
 .master-icon.peer{background:var(--bg3);color:var(--text2)}
 .master-info{}
-.master-name{font-size:14px;font-weight:500;color:var(--text)}
+.master-name{font-weight:500;color:var(--text)}
 .master-meta{font-size:11px;color:var(--text3);margin-top:1px}
 .master-header-right{display:flex;align-items:center;gap:8px}
 .status-pill{font-size:10px;font-weight:600;padding:3px 8px;border-radius:20px;
@@ -498,17 +474,14 @@ html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,s
   border-radius:2px;margin:0 auto 20px;display:block}
 .sheet h2{font-size:17px;font-weight:600;color:var(--text);margin-bottom:4px}
 .sheet .subtitle{font-size:13px;color:var(--text3);margin-bottom:20px}
-.sheet-input{width:100%;padding:12px 14px;background:var(--bg3);
-  border:1px solid var(--border);border-radius:var(--r12);color:var(--text);
-  font-size:15px;outline:none;font-family:inherit;margin-bottom:12px;
-  transition:border-color 0.15s}
+.sheet-input{width:100%;background:var(--bg3);border:1.5px solid var(--border2);border-radius:10px;color:var(--text);font-size:16px;padding:12px 14px;margin-bottom:14px;outline:none;box-sizing:border-box;letter-spacing:normal;-webkit-appearance:none}
 .sheet-input:focus{border-color:var(--accent)}
 .sheet-select{width:100%;padding:12px 14px;background:var(--bg3);
   border:1px solid var(--border);border-radius:var(--r12);color:var(--text);
   font-size:13px;outline:none;font-family:inherit;margin-bottom:10px}
 .btn-row{display:flex;gap:10px}
 .btn{flex:1;padding:12px;border:none;border-radius:var(--r12);
-  font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+  font-weight:600;cursor:pointer;font-family:inherit}
 .btn.primary{background:var(--accent);color:#fff}
 .btn.primary:hover{background:var(--accent2)}
 .btn.ghost{background:var(--bg3);color:var(--text2);border:1px solid var(--border)}
@@ -573,39 +546,87 @@ html,body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,s
   </div>
 </div>
 
-<!-- Mesh PIN modal -->
+<!-- Create mesh modal -->
+<div class="overlay" id="create-mesh-overlay">
+  <div class="sheet">
+    <span class="sheet-handle"></span>
+    <h2>Create mesh network</h2>
+    <div class="subtitle">This name becomes your WiFi network name. Use something unique to avoid conflicts with nearby Unisync installations.</div>
+    <div style="background:var(--yellowbg);border:1px solid #f59e0b30;border-radius:8px;
+         padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--yellow)">
+      &#9888; Choose a unique name. If neighbours also use Unisync,
+      same names will cause confusion.
+    </div>
+    <label style="font-size:10px;font-weight:600;letter-spacing:0.1em;
+           color:var(--text3);text-transform:uppercase;display:block;margin-bottom:6px">
+      Mesh name (becomes WiFi name)
+    </label>
+    <input class="sheet-input" id="mesh-name-input" type="text"
+           maxlength="31" placeholder="e.g. Home, Office, Floor 2"/>
+    <div id="create-mesh-err"
+         style="font-size:11px;color:var(--red);margin-bottom:8px"></div>
+    <div class="btn-row">
+      <button class="btn ghost" onclick="closeCreateMesh()">Cancel</button>
+      <button class="btn primary" id="create-mesh-btn"
+              onclick="submitCreateMesh()">Create mesh</button>
+    </div>
+  </div>
+</div>
+
+<!-- Mesh invite modal -->
 <div class="overlay" id="pin-overlay">
   <div class="sheet">
     <span class="sheet-handle"></span>
-    <h2>Invite new master</h2>
-    <div class="subtitle">On the new master go to Settings &gt; Mesh &gt; Join and enter these details</div>
-    <div style="margin-bottom:14px">
-      <div style="font-size:10px;font-weight:600;letter-spacing:0.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px">PIN</div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <div style="font-size:34px;font-weight:700;letter-spacing:8px;color:var(--accent);font-family:monospace;flex:1" id="pin-display">------</div>
-        <button class="btn ghost" onclick="copyPin()" id="copy-pin-btn" style="flex:none;padding:8px 14px;font-size:12px">Copy</button>
+    <div id="invite-step-1">
+      <h2>Add new master</h2>
+      <div class="subtitle">Two steps to add a master to your mesh</div>
+      <div style="display:flex;flex-direction:column;gap:14px;margin:20px 0">
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent);
+               color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;
+               justify-content:center;flex-shrink:0">1</div>
+          <div>
+            <div style="font-weight:500;color:var(--text)">Switch phone WiFi to the new master</div>
+            <div style="font-size:13px;font-weight:700;color:var(--accent);
+                 font-family:monospace;margin-top:4px" id="invite-target-ssid">Unisync-????</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">Password: same as this mesh</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent);
+               color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;
+               justify-content:center;flex-shrink:0">2</div>
+          <div>
+            <div style="font-weight:500;color:var(--text)">Come back to this tab and tap below</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">Keep this tab open while switching</div>
+          </div>
+        </div>
       </div>
-    </div>
-    <div style="margin-bottom:14px">
-      <div style="font-size:10px;font-weight:600;letter-spacing:0.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px">This master MAC</div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <div style="font-size:14px;font-weight:600;letter-spacing:2px;color:var(--text2);font-family:monospace;flex:1" id="pin-mac">------------</div>
-        <button class="btn ghost" onclick="copyMac()" id="copy-mac-btn" style="flex:none;padding:8px 14px;font-size:12px">Copy</button>
+      <div class="pin-timer" id="pin-timer">Valid for 5m 0s</div>
+      <div class="pin-bar" style="margin-bottom:16px">
+        <div class="pin-fill" id="pin-fill" style="width:100%"></div>
       </div>
+      <button class="btn primary" onclick="inviteStep2()" style="width:100%;margin-bottom:8px">I switched WiFi &mdash; Add to mesh &#8594;</button>
+      <button class="btn ghost" onclick="closePinModal()" style="width:100%">Cancel</button>
     </div>
-    <div class="pin-timer" id="pin-timer">Valid for 5m 0s</div>
-    <div class="pin-bar" style="margin-bottom:16px"><div class="pin-fill" id="pin-fill" style="width:100%"></div></div>
-    <div style="margin-bottom:12px">
-      <div style="font-size:10px;font-weight:600;letter-spacing:0.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px">Join link for new master</div>
-      <div style="font-size:11px;color:var(--text2);background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:10px;font-family:monospace;word-break:break-all;margin-bottom:8px" id="join-link-display">--</div>
-      <button class="btn primary" onclick="copyJoinLink()" id="copy-link-btn" style="width:100%">Copy join link</button>
+    <div id="invite-step-2" style="display:none">
+      <h2>Adding master...</h2>
+      <div class="subtitle" id="invite-status-msg">Connecting to new master</div>
+      <div style="display:flex;justify-content:center;padding:32px 0">
+        <div style="width:44px;height:44px;border:3px solid var(--border2);
+             border-top-color:var(--accent);border-radius:50%;
+             animation:spin 0.7s linear infinite"></div>
+      </div>
+      <button class="btn ghost" onclick="closePinModal()" style="width:100%">Cancel</button>
     </div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6">
-      1. Copy the link above<br>
-      2. Switch WiFi to new master (Unisync-XXYY)<br>
-      3. Paste link in browser   PIN and MAC auto-fill
+    <div id="invite-step-3" style="display:none">
+      <h2 id="invite-done-title">Master added!</h2>
+      <div style="text-align:center;padding:24px 0">
+        <div style="font-size:44px;margin-bottom:14px">&#10003;</div>
+        <div style="font-size:13px;color:var(--text2);line-height:1.8" id="invite-done-msg">Switch back to your mesh WiFi to control all masters.</div>
+      </div>
+      <button class="btn primary" onclick="closePinModal()" style="width:100%">Done</button>
     </div>
-    <button class="btn ghost" onclick="closePinModal()" style="width:100%">Close</button>
   </div>
 </div>
 <!-- Topbar -->
@@ -963,28 +984,54 @@ async function submitRename(){
 async function startScan(){await fetch('/api/scan',{method:'POST'});}
 
 /* Mesh */
-async function createMesh(){
-  if(!confirm('Create a new mesh with this as the first board?'))return;
-  await fetch('/api/mesh/create',{method:'POST'});
+function createMesh(){
+  /* Show create mesh modal */
+  document.getElementById('create-mesh-overlay').classList.add('show');
+  setTimeout(function(){document.getElementById('mesh-name-input').focus();},200);
 }
+
+async function submitCreateMesh(){
+  var name=document.getElementById('mesh-name-input').value.trim();
+  if(!name){
+    document.getElementById('create-mesh-err').textContent='Please enter a name.';
+    return;
+  }
+  document.getElementById('create-mesh-err').textContent='';
+  document.getElementById('create-mesh-btn').disabled=true;
+  document.getElementById('create-mesh-btn').textContent='Creating...';
+  await fetch('/api/mesh/create?name='+encodeURIComponent(name),{method:'POST'});
+  document.getElementById('create-mesh-overlay').classList.remove('show');
+  document.getElementById('create-mesh-btn').disabled=false;
+  document.getElementById('create-mesh-btn').textContent='Create mesh';
+  document.getElementById('mesh-name-input').value='';
+}
+
+function closeCreateMesh(){
+  document.getElementById('create-mesh-overlay').classList.remove('show');
+}
+var invitePin='';
+var inviteMac='';
+var invitePollTimer=null;
+
 async function showInvite(){
   var r=await fetch('/api/mesh/invite',{method:'POST'});
   var d=await r.json();
-  currentPin=d.pin;
-  document.getElementById('pin-display').textContent=d.pin;
-  document.getElementById('pin-mac').textContent=d.mac||'--';
+  invitePin=d.pin; inviteMac=d.mac||'';
+
+  /* Derive new master SSID hint from our own MAC last 4 -- user needs to find it */
+  var ssidEl=document.getElementById('invite-target-ssid');
+  if(ssidEl) ssidEl.textContent='Unisync-XXYY (unique per board)';
+
+  document.getElementById('invite-step-1').style.display='block';
+  document.getElementById('invite-step-2').style.display='none';
+  document.getElementById('invite-step-3').style.display='none';
+  if(document.getElementById('invite-done-title'))
+    document.getElementById('invite-done-title').style.color='';
   document.getElementById('pin-overlay').classList.add('show');
+
   var rem=300;
   document.getElementById('pin-fill').style.width='100%';
   document.getElementById('pin-timer').textContent='Valid for 5m 0s';
-  /* Build join link */
-  var joinMac=d.mac||'';
-  var joinUrl='http://192.168.4.1/settings?pin='+d.pin+'&mac='+joinMac;
-  var linkEl=document.getElementById('join-link-display');
-  if(linkEl) linkEl.textContent=joinUrl;
-  /* Also update mac display */
-  var macEl=document.getElementById('pin-mac');
-  if(macEl&&joinMac) macEl.textContent=joinMac;
   if(pinInterval)clearInterval(pinInterval);
   pinInterval=setInterval(function(){
     rem--;
@@ -996,124 +1043,91 @@ async function showInvite(){
       document.getElementById('pin-overlay').classList.remove('show');}
   },1000);
 }
-async function createMesh(){
-  if(!confirm('Create a new mesh with this as the first board?'))return;
-  await fetch('/api/mesh/create',{method:'POST'});
+
+async function inviteStep2(){
+  document.getElementById('invite-step-1').style.display='none';
+  document.getElementById('invite-step-2').style.display='block';
+  var msg=document.getElementById('invite-status-msg');
+  msg.textContent='Calling new master at 192.168.4.1...';
+  try {
+    var url='/api/mesh/join?pin='+encodeURIComponent(invitePin)+
+            '&mac='+encodeURIComponent(inviteMac);
+    var r=await fetch(url,{method:'POST'});
+    var d=await r.json();
+    if(!r.ok){
+      showInviteError(d.error||'Join failed. PIN may have expired.');
+      return;
+    }
+    msg.textContent='Waiting for mesh handshake...';
+    var attempts=0;
+    invitePollTimer=setInterval(async function(){
+      attempts++;
+      try{
+        var sr=await fetch('/api/mesh/status');
+        var sd=await sr.json();
+        if(sd.active){clearInterval(invitePollTimer);showInviteDone();}
+      }catch(e){}
+      if(attempts>25){clearInterval(invitePollTimer);
+        showInviteError('Timed out. Make sure you switched to the new master WiFi.');}
+    },2000);
+  } catch(e){
+    showInviteError('Could not reach new master. Did you switch WiFi?');
+  }
 }
 
-function copyToClip(text,btnId,label){
-  function done(){var btn=document.getElementById(btnId);
-    if(btn){btn.textContent='Copied!';setTimeout(function(){btn.textContent=label;},2000);}}
-  if(navigator.clipboard){navigator.clipboard.writeText(text).then(done);}
-  else{var ta=document.createElement('textarea');ta.value=text;
-    ta.style.cssText='position:fixed;opacity:0';document.body.appendChild(ta);
-    ta.select();document.execCommand('copy');document.body.removeChild(ta);done();}
+function showInviteError(msg){
+  clearInterval(invitePollTimer);
+  document.getElementById('invite-step-2').style.display='none';
+  document.getElementById('invite-step-3').style.display='block';
+  document.getElementById('invite-done-title').textContent='Something went wrong';
+  document.getElementById('invite-done-title').style.color='var(--red)';
+  document.getElementById('invite-done-msg').textContent=msg;
 }
-function copyPin(){
-  var p=document.getElementById('pin-display').textContent.trim();
-  if(p==='------')return;copyToClip(p,'copy-pin-btn','Copy');
+
+function showInviteDone(){
+  document.getElementById('invite-step-2').style.display='none';
+  document.getElementById('invite-step-3').style.display='block';
+  document.getElementById('invite-done-title').textContent='Master added!';
+  document.getElementById('invite-done-title').style.color='var(--green)';
+  var mn=(allData&&allData.mesh_name)||'your mesh';
+  document.getElementById('invite-done-msg').innerHTML=
+    'Switch back to <b style="color:var(--accent)">'+mn+
+    '</b> WiFi to control all masters together.';
 }
-function copyMac(){
-  var m=document.getElementById('pin-mac').textContent.trim();
-  if(!m)return;
-  copyToClip(m,'copy-mac-btn','Copy');
-}
-function copyJoinLink(){
-  var link=document.getElementById('join-link-display');
-  if(!link)return;
-  var txt=link.textContent.trim();
-  if(!txt||txt==='--'||txt===''){
-    /* Fallback: rebuild from displayed PIN and MAC */
-    var pin=document.getElementById('pin-display').textContent.trim();
-    var mac=document.getElementById('pin-mac').textContent.trim();
-    txt='http://192.168.4.1/settings?pin='+pin+'&mac='+mac;
-    link.textContent=txt;
-  }
-  copyToClip(txt,'copy-link-btn','Copy join link');
-}
+
 function closePinModal(){
   document.getElementById('pin-overlay').classList.remove('show');
   if(pinInterval)clearInterval(pinInterval);
-  currentPin='';
+  if(invitePollTimer)clearInterval(invitePollTimer);
+  invitePin=''; inviteMac='';
+  document.getElementById('invite-step-1').style.display='block';
+  document.getElementById('invite-step-2').style.display='none';
+  document.getElementById('invite-step-3').style.display='none';
 }
 
-/* Batch modal */
-function renderBatch(pend,offSlots){
-  var list=document.getElementById('batch-list');
-  document.getElementById('batch-subtitle').textContent=
-    pend.length+' new extension'+(pend.length>1?'s':'')+' found';
-  list.innerHTML=pend.map(function(p){
-    var opts=offSlots.map(function(s){
-      return '<option value="replace:'+s.slot+'">Replace slot '+(s.slot+1)+'</option>';
-    }).join('');
-    return '<div class="ext-item">'+
-      '<div class="ext-uid">'+p.uid+'</div>'+
-      '<div class="sw-inputs">'+
-        '<div><label>Switch 1</label>'+
-          '<input class="sheet-input" id="sw1-'+p.uid+'" '+
-            'style="margin:0" type="text" placeholder="Living room light" maxlength="23"/></div>'+
-        '<div><label>Switch 2</label>'+
-          '<input class="sheet-input" id="sw2-'+p.uid+'" '+
-            'style="margin:0" type="text" placeholder="Bedroom fan" maxlength="23"/></div>'+
-      '</div>'+
-      '<select class="sheet-select" id="act-'+p.uid+'">'+
-        '<option value="new">Add as new</option>'+opts+'</select>'+
-      '<div class="ext-actions">'+
-        '<button class="btn danger" onclick="ignoreExt(\''+p.uid+'\')">Ignore</button>'+
-        '<button class="btn primary" onclick="assignExt(\''+p.uid+'\')">Add</button>'+
-      '</div>'+
-    '</div>';
-  }).join('');
-  document.getElementById('batch-overlay').classList.add('show');
-}
-function closeBatchModal(){document.getElementById('batch-overlay').classList.remove('show');}
-async function assignExt(uid){
-  var sw1=document.getElementById('sw1-'+uid).value.trim()||'Switch';
-  var sw2=document.getElementById('sw2-'+uid).value.trim()||'Switch';
-  var act=document.getElementById('act-'+uid).value;
-  var slot=-1;
-  if(act.startsWith('replace:')){
-    slot=parseInt(act.split(':')[1]);
-    if(!confirm('Replace offline slot '+(slot+1)+'?'))return;
-    await fetch('/api/replace?uid='+uid+'&slot='+slot,{method:'POST'});
-  } else {
-    var r=await fetch('/api/assign?uid='+uid,{method:'POST'});
-    var d=await r.json();slot=d.slot!==undefined?d.slot:-1;
-  }
-  if(slot>=0){
-    await fetch('/api/switch/rename?id=ext'+slot+'_1&name='+encodeURIComponent(sw1),{method:'POST'});
-    await fetch('/api/switch/rename?id=ext'+slot+'_2&name='+encodeURIComponent(sw2),{method:'POST'});
-  }
-  var pd=(allData.pending||[]).filter(function(p){return p.uid!==uid;});
-  if(pd.length===0)closeBatchModal();else renderBatch(pd,allData.offline_slots||[]);
-}
-async function ignoreExt(uid){
-  await fetch('/api/reject?uid='+uid,{method:'POST'});
-  var pd=(allData.pending||[]).filter(function(p){return p.uid!==uid;});
-  if(pd.length===0)closeBatchModal();else renderBatch(pd,allData.offline_slots||[]);
-}
-
-/* WebSocket */
-function connect(){
-  if(reconnTimer){clearTimeout(reconnTimer);reconnTimer=null;}
-  ws=new WebSocket('ws://192.168.4.1:81');
+function connectWS(){
+  var host=location.hostname;
+  ws=new WebSocket('ws://'+host+':81/ws');
   ws.onopen=function(){
-    document.getElementById('conn-dot').classList.add('on');
-    document.getElementById('conn-label').textContent='192.168.4.1';
-    document.getElementById('boot-overlay').classList.add('show');
+    var dot=document.getElementById('conn-dot');
+    var lbl=document.getElementById('conn-label');
+    if(dot) dot.style.background='var(--green)';
+    if(lbl) lbl.textContent='192.168.4.1';
   };
   ws.onmessage=function(e){
-    try{render(JSON.parse(e.data));}
-    catch(err){console.error('Render:',err);}
+    try{render(JSON.parse(e.data));}catch(ex){console.error('render err',ex);}
   };
   ws.onclose=function(){
-    document.getElementById('conn-dot').classList.remove('on');
-    document.getElementById('conn-label').textContent='Reconnecting...';
-    reconnTimer=setTimeout(connect,2000);
+    var dot=document.getElementById('conn-dot');
+    var lbl=document.getElementById('conn-label');
+    if(dot) dot.style.background='var(--red)';
+    if(lbl) lbl.textContent='Reconnecting...';
+    clearTimeout(reconnTimer);
+    reconnTimer=setTimeout(connectWS,2000);
   };
   ws.onerror=function(){ws.close();};
 }
-connect();
+connectWS();
 </script>
 </body>
 </html>

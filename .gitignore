@@ -8,3 +8,4 @@ out
 next-env.d.ts
 hardware/firmware/**/build/
 hardware/ki_cad/**/gerber/
+hardware/ki_cad/**/*.history
