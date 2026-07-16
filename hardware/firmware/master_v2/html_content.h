@@ -8,6 +8,7 @@ static const char SETTINGS_HTML[] PROGMEM = R"SETHTML(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Settings - Unisync</title>
+<link rel="icon" href="data:,">
 <style>
 :root{
   --bg:#0a0a0f;--bg2:#111118;--bg3:#1a1a24;--bg4:#22222e;
@@ -172,7 +173,7 @@ function loadInfo(){
     var d=JSON.parse(xhr.responseText);
     document.getElementById('sub').textContent='192.168.4.1 | Uptime: '+uptime(d.uptime);
     document.getElementById('info').innerHTML=
-      row('Firmware','v10.6')+
+      row('Firmware','v11.9')+
       row('Free heap',d.free_heap.toLocaleString()+' bytes')+
       row('Master UID',d.uid)+
       row('IP address','192.168.4.1');
@@ -313,6 +314,7 @@ static const char HTML[] PROGMEM = R"MAINHTML(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Unisync</title>
+<link rel="icon" href="data:,">
 
 <style>
 :root{
@@ -346,6 +348,14 @@ html,body{background:var(--bg);color:var(--text);font-family:-apple-system,Blink
 .master-title:hover .edit-icon{opacity:1}
 .edit-icon{opacity:0;color:var(--text3);transition:opacity 0.2s}
 .conn-row{display:flex;align-items:center;gap:6px;margin-top:4px}
+.kill-switch{position:relative;width:36px;height:20px;border-radius:10px;
+  background:var(--bg3);border:1.5px solid var(--border2);cursor:pointer;
+  transition:background 0.2s,border-color 0.2s;flex-shrink:0}
+.kill-switch.on{background:var(--accent);border-color:var(--accent)}
+.kill-switch.off{background:var(--bg3);border-color:var(--border2);opacity:0.4;cursor:default}
+.kill-switch-knob{position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:#fff;transition:transform 0.2s}
+.kill-switch.on .kill-switch-knob{transform:translateX(16px)}
 .conn-dot{width:6px;height:6px;border-radius:50%;background:var(--text3);
   transition:background 0.4s,box-shadow 0.4s}
 .conn-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
@@ -649,6 +659,8 @@ html,body{background:var(--bg);color:var(--text);font-family:-apple-system,Blink
     <button class="icon-btn" id="reorder-btn" onclick="toggleReorder()" title="Reorder switches">
       &#8661;
     </button>
+    <button class="icon-btn" id="master-reorder-btn" onclick="toggleMasterReorder()" title="Reorder boards" style="font-size:16px">&#8693;</button>
+    <button class="icon-btn" id="master-save-btn" onclick="saveMasterReorder()" style="display:none;color:var(--accent)" title="Save board order">&#10003;</button>
     <button class="icon-btn" id="save-btn" onclick="saveOrder()"
       style="display:none;border-color:#6366f1;color:#6366f1" title="Save order">&#10003;</button>
     <button class="icon-btn" id="cancel-btn" onclick="cancelReorder()"
@@ -666,6 +678,7 @@ html,body{background:var(--bg);color:var(--text);font-family:-apple-system,Blink
 var ws,reconnTimer=null;
 var allData={};
 var reorderMode=false,reorderList=[];
+var masterReorderMode=false,masterOrderList=[];
 var expandedMaster=null;
 var renameTarget=null,renameType=null;
 var pendingToggles={};
@@ -688,17 +701,22 @@ function swCard(sw,idx,isMesh,mUid){
   var off=!sw.online;
   var key=sw.id+'_'+mUid;
   var menu='';
-  if(!reorderMode)
+  if(!reorderMode){
+    /* Parse slot from switch id: ext0_1 -> slot 0, master_1 -> slot -1 */
+    var swSlot=sw.id&&sw.id.indexOf('ext')===0?sw.id.split('_')[0].replace('ext',''):'-1';
+    var renameArgs='\''+sw.id+'\',\''+sw.name.replace(/'/g,"\\'")+'\'';
+    if(isMesh) renameArgs+=',\''+mUid+'\','+swSlot;
+    else renameArgs+=',(undefined),'+swSlot;
     menu='<button class="sw-menu-btn" onclick="swMenu(\''+key+'\',event)">&#8942;</button>'+
       '<div class="sw-dropdown" id="drop-'+key+'">'+
-        '<div class="sw-dropdown-item" onclick="renameSw(\''+sw.id+'\',\''+
-          sw.name.replace(/'/g,"\\'")+'\''+(isMesh?(',\''+mUid+'\''):'')+')">Rename</div>'+
+        '<div class="sw-dropdown-item" onclick="renameSw('+renameArgs+')">Rename</div>'+
       '</div>';
+  }
   var clickFn=isMesh?
     'meshToggle(\''+mUid+'\',\''+sw.id+'\','+sw.ch+')':
     'localToggle(\''+sw.id+'\')';
   var moves='';
-  if(reorderMode&&!isMesh)
+  if(reorderMode)
     moves='<div class="move-grid">'+
       '<div class="move-btn blank"></div>'+
       '<div class="move-btn" onclick="mUp('+idx+')">&#8593;</div>'+
@@ -752,10 +770,21 @@ function render(d){
     localBody='<div class="sw-grid">'+g+'</div>';
   }
   secs.push({uid:d.self_uid,name:d.master_name||'Master 1',
-    online:true,isSelf:true,count:sws.length,body:localBody});
+    online:true,isSelf:true,count:sws.length,
+    switches:sws,body:localBody});
 
-  var peers=(d.mesh_peers||[]).filter(function(p){return p.name&&p.name.length>0;})
-    .sort(function(a,b){return a.name.localeCompare(b.name);});
+  /* Sort peers by mesh-wide master_order if available */
+  var peers=(d.mesh_peers||[]).filter(function(p){return p.name&&p.name.length>0;});
+  var masterOrderArr=(d.master_order||'').split(',').filter(Boolean);
+  if(masterOrderArr.length>0){
+    peers.sort(function(a,b){
+      var ai=masterOrderArr.indexOf(a.uid);
+      var bi=masterOrderArr.indexOf(b.uid);
+      if(ai<0)ai=999;if(bi<0)bi=999;return ai-bi;
+    });
+  } else {
+    peers.sort(function(a,b){return a.name.localeCompare(b.name);});
+  }
   peers.forEach(function(p){
     var pb='';
     if(!p.online) pb='<div class="empty-state" style="padding:20px">'+
@@ -769,7 +798,8 @@ function render(d){
       pb='<div class="sw-grid">'+pg+'</div>';
     }
     secs.push({uid:p.uid,name:p.name,online:p.online,
-      isSelf:false,count:(p.switches||[]).length,body:pb});
+      isSelf:false,count:(p.switches||[]).length,
+      switches:(p.switches||[]),body:pb});
   });
 
   /* Render sections */
@@ -790,9 +820,21 @@ function render(d){
     var icon=sec.isSelf?
       '<div class="master-icon self">&#9670;</div>':
       '<div class="master-icon peer">&#9671;</div>';
-    html+='<div class="master-card'+((!sec.online&&!sec.isSelf)?' offline':'')+'">'+
+    var dragHdl=masterReorderMode?
+      '<span style="display:flex;gap:4px;margin-right:4px">'+
+        '<button class="icon-btn" style="font-size:13px;padding:3px 7px" '+
+          'onclick="event.stopPropagation();masterMoveUp(\''+sec.uid+'\')" title="Move up">&#8593;</button>'+
+        '<button class="icon-btn" style="font-size:13px;padding:3px 7px" '+
+          'onclick="event.stopPropagation();masterMoveDown(\''+sec.uid+'\')" title="Move down">&#8595;</button>'+
+      '</span>':''
+    var rnBtn='<button class="icon-btn" style="font-size:12px;padding:4px 6px" '+
+      'onclick="renamePeerMaster(event,\''+sec.uid+'\',\''+
+      sec.name.replace(/'/g,"\\'")+'\')" title="Rename">&#9998;</button>';
+    html+='<div class="master-card'+((!sec.online&&!sec.isSelf)?' offline':'')+
+      '" id="mcard-'+sec.uid+'">'+
       '<div class="master-header" onclick="toggleAcc(\''+sec.uid+'\')">'+
         '<div class="master-header-left">'+
+          dragHdl+
           icon+
           '<div class="master-info">'+
             '<div class="master-name">'+sec.name+'</div>'+
@@ -800,6 +842,8 @@ function render(d){
           '</div>'+
         '</div>'+
         '<div class="master-header-right">'+
+          (sec.online||sec.isSelf?killSwitch(sec):'')+'\n          '+
+          rnBtn+
           pill+
           '<span class="chevron'+(open?' open':'')+'" id="chv-'+sec.uid+'">&#9654;</span>'+
         '</div>'+
@@ -829,6 +873,37 @@ function render(d){
     renderBatch(pend,d.offline_slots||[]);
   else if(pend.length===0)
     bov.classList.remove('show');
+}
+
+function killSwitch(sec){
+  var switches=sec.isSelf?(allData?allData.switches||[]:[]):(sec.switches||[]);
+  var anyOn=switches.some(function(sw){return sw.state;});
+  var cls='kill-switch '+(anyOn?'on':'off');
+  var mode=sec.isSelf?'local':'mesh';
+  /* Use data attributes to avoid quote escaping issues in onclick */
+  return '<div class="'+cls+'" '+
+    'data-uid="'+sec.uid+'" data-mode="'+mode+'" data-anyon="'+(anyOn?1:0)+'" '+
+    'onclick="killSwitchClick(event,this)" '+
+    'title="'+(anyOn?'Turn all off':'All off')+'">'+
+    '<div class="kill-switch-knob"></div></div>';
+}
+
+function killSwitchClick(event,el){
+  event.stopPropagation();
+  if(!parseInt(el.getAttribute('data-anyon'))) return;
+  killMaster(event,el.getAttribute('data-uid'),el.getAttribute('data-mode'));
+}
+
+async function killMaster(event,uid,mode){
+  event.stopPropagation();
+  if(mode==='local'){
+    /* Single endpoint kills all local switches atomically */
+    await fetch('/api/relay/killall',{method:'POST'});
+  } else {
+    /* Single wildcard mesh relay kills all peer switches atomically */
+    await fetch('/api/mesh/relay?peer_uid='+uid+'&sw_id=*&ch=0&state=0',{method:'POST'});
+  }
+  /* UI updates automatically via next WebSocket push / gossip */
 }
 
 function toggleAcc(uid){
@@ -906,8 +981,16 @@ function confirmToggle(k,actual){
 
 /* Reorder */
 function toggleReorder(){
-  reorderMode=true;reorderList=(allData.switches||[]).slice();
-  if(!expandedMaster)expandedMaster=allData.self_uid;
+  reorderMode=true;
+  /* Use expanded master's switches -- local or peer */
+  var selfUid=allData?allData.self_uid:'';
+  if(!expandedMaster)expandedMaster=selfUid;
+  if(expandedMaster===selfUid){
+    reorderList=(allData.switches||[]).slice();
+  } else {
+    var peer=(allData?allData.mesh_peers||[]:[]).find(function(p){return p.uid===expandedMaster;});
+    reorderList=peer?(peer.switches||[]).slice():[];
+  }
   document.getElementById('reorder-btn').style.display='none';
   document.getElementById('save-btn').style.display='flex';
   document.getElementById('cancel-btn').style.display='flex';
@@ -928,8 +1011,15 @@ function mLeft(i){if(swap(reorderList,i,i-1))render(allData);}
 function mRight(i){if(swap(reorderList,i,i+1))render(allData);}
 async function saveOrder(){
   var order=reorderList.map(function(s){return s.id;}).join(',');
-  await fetch('/api/switch/reorder',{method:'POST',
-    headers:{'Content-Type':'text/plain'},body:order});
+  var selfUid=allData.self_uid||'';
+  var targetUid=expandedMaster||selfUid;
+  if(targetUid===selfUid){
+    await fetch('/api/switch/reorder',{method:'POST',
+      headers:{'Content-Type':'text/plain'},body:order});
+  } else {
+    await fetch('/api/mesh/config?cmd=reorder_switches&target_uid='+targetUid+
+                '&order='+encodeURIComponent(order),{method:'POST'});
+  }
   reorderMode=false;
   document.getElementById('reorder-btn').style.display='flex';
   document.getElementById('save-btn').style.display='none';
@@ -948,16 +1038,16 @@ function swMenu(key,e){
 
 /* Rename */
 function renameMaster(){
-  renameTarget=null;renameType='master';
-  document.getElementById('rename-title').textContent='Rename board';
-  document.getElementById('rename-input').value=
-    document.getElementById('master-title-text').textContent;
-  document.getElementById('rename-overlay').classList.add('show');
-  setTimeout(function(){document.getElementById('rename-input').focus();},200);
+  var uid=allData?allData.self_uid:'';
+  var name=allData?allData.master_name:'';
+  renamePeerMaster({stopPropagation:function(){}},uid,name);
 }
-function renameSw(id,cur,pUid){
+function renameSw(id,cur,pUid,slot){
   document.querySelectorAll('.sw-dropdown.show').forEach(function(d){d.classList.remove('show');});
-  renameTarget={id:id,pUid:pUid||null};renameType='switch';
+  var parsedSlot=(slot!==undefined&&slot!=='')?parseInt(slot):
+    (id&&id.indexOf('ext')===0?parseInt(id.split('_')[0].replace('ext','')):0);
+  renameTarget={id:id,pUid:pUid||null,owner_uid:pUid||allData.self_uid,slot:parsedSlot};
+  renameType='switch';
   document.getElementById('rename-title').textContent='Rename switch';
   document.getElementById('rename-input').value=cur;
   document.getElementById('rename-overlay').classList.add('show');
@@ -967,15 +1057,34 @@ function closeRenameModal(){
   document.getElementById('rename-overlay').classList.remove('show');
   renameTarget=null;renameType=null;
 }
+
+async function saveMasterOrder(orderArr){
+  var order=orderArr.join(',');
+  await fetch('/api/mesh/config?cmd=reorder_masters&order='+
+              encodeURIComponent(order),{method:'POST'});
+}
 async function submitRename(){
   var name=document.getElementById('rename-input').value.trim();
   if(!name)return;
+  var selfUid=allData.self_uid||'';
   if(renameType==='master'){
-    await fetch('/api/master/rename?name='+encodeURIComponent(name),{method:'POST'});
-    document.getElementById('master-title-text').textContent=name;
-  } else {
-    await fetch('/api/switch/rename?id='+renameTarget.id+
-      '&name='+encodeURIComponent(name),{method:'POST'});
+    var targetUid=renameTarget||selfUid;
+    if(targetUid===selfUid){
+      await fetch('/api/master/rename?name='+encodeURIComponent(name),{method:'POST'});
+    } else {
+      await fetch('/api/mesh/config?cmd=rename_master&target_uid='+targetUid+
+                  '&name='+encodeURIComponent(name),{method:'POST'});
+    }
+  } else if(renameType==='switch'){
+    var targetUid2=renameTarget?renameTarget.owner_uid:selfUid;
+    var slot=renameTarget?renameTarget.slot:-1;
+    if(targetUid2===selfUid){
+      await fetch('/api/switch/rename?id='+renameTarget.id+
+                  '&name='+encodeURIComponent(name),{method:'POST'});
+    } else {
+      await fetch('/api/mesh/config?cmd=rename_switch&target_uid='+targetUid2+
+                  '&slot='+slot+'&name='+encodeURIComponent(name),{method:'POST'});
+    }
   }
   closeRenameModal();
 }
@@ -1103,6 +1212,149 @@ function closePinModal(){
   document.getElementById('invite-step-1').style.display='block';
   document.getElementById('invite-step-2').style.display='none';
   document.getElementById('invite-step-3').style.display='none';
+}
+
+function toggleMasterReorder(){
+  masterReorderMode=!masterReorderMode;
+  var rbtn=document.getElementById('master-reorder-btn');
+  var sbtn=document.getElementById('master-save-btn');
+  if(masterReorderMode){
+    /* Build from allData master_order, not DOM (DOM may not have all masters) */
+    masterOrderList=[];
+    masterEnsureList();
+    if(rbtn)rbtn.style.display='none';
+    if(sbtn)sbtn.style.display='flex';
+  } else {
+    if(rbtn)rbtn.style.display='flex';
+    if(sbtn)sbtn.style.display='none';
+  }
+  if(allData)render(allData);
+}
+
+async function saveMasterReorder(){
+  masterReorderMode=false;
+  var rbtn=document.getElementById('master-reorder-btn');
+  var sbtn=document.getElementById('master-save-btn');
+  if(rbtn)rbtn.style.display='flex';
+  if(sbtn)sbtn.style.display='none';
+  var self=allData?allData.self_uid:'';
+  var order=[self].concat(masterOrderList.filter(function(u){return u!==self;}));
+  await saveMasterOrder(order);
+  if(allData)render(allData);
+}
+
+function masterEnsureList(){
+  /* Rebuild from current render order if list is empty or stale */
+  if(!masterOrderList.length&&allData){
+    var ord=(allData.master_order||'').split(',').filter(Boolean);
+    masterOrderList=ord.length?ord:[allData.self_uid];
+    /* Append any peers not in order */
+    (allData.mesh_peers||[]).forEach(function(p){
+      if(masterOrderList.indexOf(p.uid)<0) masterOrderList.push(p.uid);
+    });
+  }
+}
+
+function masterMoveUp(uid){
+  masterEnsureList();
+  var i=masterOrderList.indexOf(uid);
+  if(i<=0)return;
+  masterOrderList.splice(i,1);
+  masterOrderList.splice(i-1,0,uid);
+  var fake=Object.assign({},allData,{master_order:masterOrderList.join(',')});
+  render(fake);
+}
+
+function masterMoveDown(uid){
+  masterEnsureList();
+  var i=masterOrderList.indexOf(uid);
+  if(i<0||i>=masterOrderList.length-1)return;
+  masterOrderList.splice(i,1);
+  masterOrderList.splice(i+1,0,uid);
+  var fake=Object.assign({},allData,{master_order:masterOrderList.join(',')});
+  render(fake);
+}
+
+function renamePeerMaster(event,uid,currentName){
+  event.stopPropagation();
+  renameTarget=uid;renameType='master';
+  document.getElementById('rename-title').textContent='Rename board';
+  document.getElementById('rename-input').value=currentName||'';
+  document.getElementById('rename-overlay').classList.add('show');
+  setTimeout(function(){document.getElementById('rename-input').focus();},200);
+}
+
+function closeBatchModal(){
+  document.getElementById('batch-overlay').classList.remove('show');
+}
+
+function renderBatch(pending, offlineSlots){
+  var overlay=document.getElementById('batch-overlay');
+  var list=document.getElementById('batch-list');
+  var sub=document.getElementById('batch-subtitle');
+  if(!overlay||!list) return;
+
+  sub.textContent=pending.length+' new extension'+(pending.length!==1?'s':'')+' found';
+
+  var html='';
+  pending.forEach(function(ext){
+    var uid=ext.uid||'';
+    html+='<div class="ext-item" id="ext-'+uid+'">';
+    html+='<div style="font-size:12px;color:var(--text3);margin-bottom:8px">UID: '+uid+'</div>';
+    html+='<div style="display:flex;gap:8px;margin-bottom:8px">';
+    html+='<input class="sheet-input" id="name-'+uid+'" type="text" ';
+    html+='placeholder="Switch name" maxlength="20" ';
+    html+='style="flex:1;margin:0;font-size:14px;padding:10px 12px"/>';
+    html+='</div>';
+    html+='<div style="display:flex;gap:8px">';
+    html+='<button class="btn primary" style="flex:1" ';
+    html+='onclick="assignExt(\''+uid+'\')" >Assign</button>';
+    if(offlineSlots&&offlineSlots.length>0){
+      html+='<button class="btn ghost" style="flex:1" ';
+      html+='onclick="replaceExt(\''+uid+'\')" >Replace offline</button>';
+    }
+    html+='<button class="btn danger" style="flex:none;padding:10px 14px" ';
+    html+='onclick="rejectExt(\''+uid+'\')" >&#10005;</button>';
+    html+='</div>';
+    html+='</div>';
+  });
+  list.innerHTML=html;
+  overlay.classList.add('show');
+  /* Focus first name input */
+  var first=list.querySelector('input');
+  if(first) setTimeout(function(){first.focus();},200);
+}
+
+async function assignExt(uid){
+  var inp=document.getElementById('name-'+uid);
+  var name=(inp?inp.value.trim():'')||'Switch';
+  var el=document.getElementById('ext-'+uid);
+  if(el){el.style.opacity='0.5';el.style.pointerEvents='none';}
+  var r=await fetch('/api/assign?uid='+uid+'&name='+encodeURIComponent(name),{method:'POST'});
+  var d=await r.json();
+  if(d.ok&&el) el.remove();
+  /* Close if no more pending */
+  if(!document.querySelector('.ext-item')) closeBatchModal();
+}
+
+async function rejectExt(uid){
+  var el=document.getElementById('ext-'+uid);
+  if(el){el.style.opacity='0.5';el.style.pointerEvents='none';}
+  await fetch('/api/reject?uid='+uid,{method:'POST'});
+  if(el) el.remove();
+  if(!document.querySelector('.ext-item')) closeBatchModal();
+}
+
+async function replaceExt(uid){
+  var inp=document.getElementById('name-'+uid);
+  var name=(inp?inp.value.trim():'')||'Switch';
+  /* For now same as assign -- replace logic handled server side */
+  var el=document.getElementById('ext-'+uid);
+  if(el){el.style.opacity='0.5';el.style.pointerEvents='none';}
+  var r=await fetch('/api/assign?uid='+uid+'&name='+encodeURIComponent(name)+'&replace=1',{method:'POST'});
+  var d=await r.json();
+  if(d.ok&&el) el.remove();
+  if(!document.querySelector('.ext-item')) closeBatchModal();
 }
 
 function connectWS(){

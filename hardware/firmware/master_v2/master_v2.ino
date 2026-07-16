@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v10.6
+ * Unisync - Master Firmware v11.9
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -116,6 +116,7 @@ static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63,
 #define MESH_PKT_LEAVE     0x07  /* master leaving mesh */
 #define MESH_PKT_PING      0x08  /* keepalive */
 #define MESH_PKT_PASS_CHG  0x09  /* password change broadcast */
+#define MESH_PKT_CONFIG    0x0A  /* config command: rename/reorder */
 
 /* ================================================================
  * RELAY RATE LIMITING
@@ -276,6 +277,8 @@ static uint8_t      mesh_seq       = 0;
 static uint32_t     last_gossip_ms = 0;
 static char         mesh_name[32]  = "Unisync"; /* mesh SSID name - write protected by single-writer pattern */
 static char         mesh_pass[64]  = "12345678"; /* mesh WiFi password */
+/* Master display order -- UID strings comma-separated, mesh-wide shared */
+static char         master_order_str[MAX_MESH_MASTERS * 10] = {0};
 /* Deferred softAP reconfiguration -- set from ESP-NOW callback, applied in loop() */
 static volatile bool mesh_cfg_pending      = false;
 static char          mesh_cfg_pending_name[32] = {0};
@@ -431,8 +434,9 @@ static void mesh_gossip(void) {
 
     /* Build state packet */
     StaticJsonDocument<1024> doc;
-    doc["type"]   = MESH_PKT_STATE;
-    doc["name"]   = master_name;
+    doc["type"]         = MESH_PKT_STATE;
+    doc["name"]         = master_name;
+    doc["master_order"] = master_order_str;
 
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     /* Snapshot local switches */
@@ -570,6 +574,13 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         const char *pname = doc["name"] | "Master";
         strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
         memcpy(mesh_peers[idx].mac, info->src_addr, 6);
+        /* Sync master_order from gossip if peer has a non-empty one */
+        const char *peer_order = doc["master_order"] | "";
+        if (strlen(peer_order) > strlen(master_order_str)) {
+            /* Peer has more entries -- use theirs as it's more complete */
+            strncpy(master_order_str, peer_order, sizeof(master_order_str)-1);
+            mesh_nvs_save();
+        }
 
         JsonArray sw = doc["switches"];
         mesh_peers[idx].switch_count = 0;
@@ -606,6 +617,31 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         int         ch     = doc["ch"]    | 0;
         bool        state  = doc["state"] | false;
         uint8_t     req_id = doc["req_id"]| 0;
+
+        /* Wildcard: kill all switches on this master */
+        if (strcmp(sw_id,"*")==0) {
+            /* Update state immediately before notify_ui() */
+            xSemaphoreTake(state_mutex,portMAX_DELAY);
+            master_relay1 = false;
+            master_relay2 = false;
+            for (int i=0;i<MAX_EXTENSIONS;i++) {
+                if (extensions[i].state==EXT_EMPTY) continue;
+                extensions[i].relay1 = false;
+                extensions[i].relay2 = false;
+                relay_cmd_t e1; e1.target=i; e1.channel=1; e1.state=false;
+                relay_cmd_t e2; e2.target=i; e2.channel=2; e2.state=false;
+                xQueueSend(ext_relay_queue,&e1,0);
+                xQueueSend(ext_relay_queue,&e2,0);
+            }
+            xSemaphoreGive(state_mutex);
+            relay_cmd_t k1; k1.target=-1; k1.channel=1; k1.state=false;
+            relay_cmd_t k2; k2.target=-1; k2.channel=2; k2.state=false;
+            xQueueSend(master_relay_queue,&k1,0);
+            xQueueSend(master_relay_queue,&k2,0);
+            Serial.println("[MESH] Kill all (remote)");
+            notify_ui();
+            return;
+        }
 
         /* Execute locally */
         relay_cmd_t cmd;
@@ -671,10 +707,11 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             char self_uid[12];
             snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
                      master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-            ack["uid"]       = self_uid;
-            ack["mesh_id"]   = mid_hex;
-            ack["mesh_name"] = mesh_name;
-            ack["mesh_pass"] = mesh_pass;
+            ack["uid"]          = self_uid;
+            ack["mesh_id"]      = mid_hex;
+            ack["mesh_name"]    = mesh_name;
+            ack["mesh_pass"]    = mesh_pass;
+            ack["master_order"] = master_order_str;
             String ack_str; serializeJson(ack, ack_str);
             /* Register sender as ESP-NOW peer first */
             esp_now_peer_info_t pi={};
@@ -686,6 +723,17 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             vTaskDelay(pdMS_TO_TICKS(10));
             esp_err_t send_err = esp_now_send(info->src_addr,
                 (const uint8_t*)ack_str.c_str(), ack_str.length()+1);
+            /* Add new master UID to order */
+            char new_uid_str[12];
+            snprintf(new_uid_str,sizeof(new_uid_str),"%02X%02X%02X%02X",
+                     src_uid[0],src_uid[1],src_uid[2],src_uid[3]);
+            master_order_add(new_uid_str);
+            /* Also ensure self is in order */
+            char self_uid2[12];
+            snprintf(self_uid2,sizeof(self_uid2),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            master_order_add(self_uid2);
+            mesh_nvs_save();
             Serial.printf("[MESH] JOIN_ACK send result: %d\n", send_err);
             Serial.printf("[MESH] JOIN_ACK sent to %02X:%02X:%02X:%02X:%02X:%02X\n",
                 info->src_addr[0],info->src_addr[1],info->src_addr[2],
@@ -716,11 +764,18 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 char byte_str[3]={mid_hex[i*2],mid_hex[i*2+1],0};
                 mesh_id[i]=(uint8_t)strtoul(byte_str,NULL,16);
             }
-            /* Store mesh name and password from ACK */
+            /* Store mesh name, password, and master order from ACK */
             const char *mn = doc["mesh_name"] | "Unisync";
             strncpy(mesh_name, mn, sizeof(mesh_name)-1);
             const char *mp = doc["mesh_pass"] | "12345678";
             strncpy(mesh_pass, mp, sizeof(mesh_pass)-1);
+            const char *mo = doc["master_order"] | "";
+            strncpy(master_order_str, mo, sizeof(master_order_str)-1);
+            /* Add self to master_order if not already there */
+            char self_uid_str[12];
+            snprintf(self_uid_str,sizeof(self_uid_str),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            master_order_add(self_uid_str);
             mesh_active = true;
             /* Register sender as peer */
             esp_now_peer_info_t pi={};
@@ -760,6 +815,14 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             /* Persist updated peer list */
             mesh_nvs_save();
             notify_ui();
+            /* Remove from master_order */
+            char leave_uid_str[12];
+            snprintf(leave_uid_str,sizeof(leave_uid_str),"%02X%02X%02X%02X",
+                     src_uid[0],src_uid[1],src_uid[2],src_uid[3]);
+            master_order_remove(leave_uid_str);
+            mesh_nvs_save();
+            /* Broadcast updated order to remaining peers */
+            mesh_send_config("reorder_masters", "", nullptr, master_order_str, -1);
             Serial.println("[MESH] Peer deregistered and removed from NVS");
         }
 
@@ -771,6 +834,66 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             mesh_peers[idx].last_seen_ms = millis();
             mesh_peers[idx].online = true;
             xSemaphoreGive(state_mutex);
+        }
+
+    } else if (type == MESH_PKT_CONFIG) {
+        /* Config command: rename master, rename switch, reorder switches, reorder masters */
+        const char *cmd        = doc["cmd"] | "";
+        const char *target_uid = doc["target_uid"] | "";
+        const char *name       = doc["name"] | "";
+        const char *order      = doc["order"] | "";
+        int         slot       = doc["slot"] | -1;
+
+        /* Reorder masters -- mesh-wide, applies on all nodes */
+        if (strcmp(cmd, "reorder_masters") == 0 && strlen(order) > 0) {
+            strncpy(master_order_str, order, sizeof(master_order_str)-1);
+            mesh_nvs_save();
+            Serial.printf("[MESH] Master order updated: %s\n", master_order_str);
+            notify_ui();
+
+        /* Rename master -- only apply if this is the target */
+        } else if (strcmp(cmd, "rename_master") == 0 && strlen(name) > 0) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0) {
+                nvs_save_master_name(name);
+                strncpy(master_name, name, sizeof(master_name)-1);
+                Serial.printf("[MESH] Master renamed: %s\n", master_name);
+                notify_ui();
+            }
+
+        /* Rename switch -- only apply if this is the target */
+        } else if (strcmp(cmd, "rename_switch") == 0 &&
+                   strlen(name) > 0 && slot >= 0 && slot < MAX_EXTENSIONS) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0) {
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                if (extensions[slot].state != EXT_EMPTY) {
+                    strncpy(extensions[slot].name, name, sizeof(extensions[slot].name)-1);
+                    uint8_t uid[4]; memcpy(uid, extensions[slot].uid, 4);
+                    xSemaphoreGive(state_mutex);
+                    nvs_save(uid, slot, name);
+                    Serial.printf("[MESH] Switch slot%d renamed: %s\n", slot+1, name);
+                    notify_ui();
+                } else {
+                    xSemaphoreGive(state_mutex);
+                }
+            }
+
+        /* Reorder switches -- only apply if this is the target */
+        } else if (strcmp(cmd, "reorder_switches") == 0 && strlen(order) > 0) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0) {
+                nvs_save_switch_order(order);
+                switch_order = String(order);
+                Serial.printf("[MESH] Switch order updated: %s\n", order);
+                notify_ui();
+            }
         }
 
     } else if (type == MESH_PKT_PASS_CHG) {
@@ -1023,12 +1146,41 @@ static String nvs_load_switch_order(void) {
 /* ================================================================
  * MESH NVS
  * ================================================================ */
+/* Add a UID to master_order if not already present */
+static void master_order_add(const char *uid) {
+    if (!uid || strlen(uid) == 0) return;
+    if (strstr(master_order_str, uid)) return; /* already in list */
+    if (strlen(master_order_str) > 0)
+        strncat(master_order_str, ",", sizeof(master_order_str)-strlen(master_order_str)-1);
+    strncat(master_order_str, uid, sizeof(master_order_str)-strlen(master_order_str)-1);
+}
+
+/* Remove a UID from master_order */
+static void master_order_remove(const char *uid) {
+    if (!uid || strlen(uid)==0) return;
+    char tmp[sizeof(master_order_str)] = {0};
+    char buf[sizeof(master_order_str)];
+    strncpy(buf, master_order_str, sizeof(buf)-1);
+    char *tok = strtok(buf, ",");
+    bool first = true;
+    while (tok) {
+        if (strcmp(tok, uid) != 0) {
+            if (!first) strncat(tmp, ",", sizeof(tmp)-strlen(tmp)-1);
+            strncat(tmp, tok, sizeof(tmp)-strlen(tmp)-1);
+            first = false;
+        }
+        tok = strtok(NULL, ",");
+    }
+    strncpy(master_order_str, tmp, sizeof(master_order_str)-1);
+}
+
 static void mesh_nvs_save(void) {
     prefs.begin("mesh", false);
     prefs.putBytes("mesh_id", mesh_id, 16);
     prefs.putBool("active", mesh_active);
     prefs.putString("mesh_name", mesh_name);
     prefs.putString("mesh_pass", mesh_pass);
+    prefs.putString("master_order", master_order_str);
     uint8_t peer_count = 0;
     for (int i=0; i<MAX_MESH_MASTERS; i++)
         if (mesh_peers[i].last_seen_ms > 0 ||
@@ -1058,6 +1210,8 @@ static void mesh_nvs_load(void) {
         strncpy(mesh_name, mn.c_str(), sizeof(mesh_name)-1);
         String mp = prefs.getString("mesh_pass","12345678");
         strncpy(mesh_pass, mp.c_str(), sizeof(mesh_pass)-1);
+        String mo = prefs.getString("master_order","");
+        strncpy(master_order_str, mo.c_str(), sizeof(master_order_str)-1);
         uint8_t pc = prefs.getUChar("peer_count",0);
         for (int i=0;i<pc&&i<MAX_MESH_MASTERS;i++) {
             char key[12];
@@ -1763,26 +1917,26 @@ static String build_state_json(void) {
         }
     }
 
-    /* Add any switches not yet in order (new extensions) */
+    /* Add any switches not yet in order (new extensions) -- use snapshot */
     for(int i=0;i<MAX_EXTENSIONS;i++) {
-        if(extensions[i].state==EXT_EMPTY) continue;
+        if(snap_ext[i].state==EXT_EMPTY) continue;
         for(int ch=1;ch<=2;ch++) {
             snprintf(sw_id,sizeof(sw_id),"ext%d_%d",i,ch);
             if(effective_order.indexOf(sw_id)<0) {
                 JsonObject sw=switches.createNestedObject();
                 sw["id"]=sw_id;
-                xSemaphoreGive(state_mutex);
+                /* nvs_load_switch_name reads flash -- safe without mutex
+                 * since we use snap_ext for state, not live extensions[] */
                 nvs_load_switch_name(sw_id,sw_name,sizeof(sw_name));
-                xSemaphoreTake(state_mutex,portMAX_DELAY);
                 if(String(sw_name)=="Switch") {
                     snprintf(sw_name,sizeof(sw_name),"Switch %d",ch+(i*2)+2);
                 }
                 sw["name"]=sw_name;
-                sw["device_name"]=master_name;
+                sw["device_name"]=snap_mname;
                 sw["color"]=SLOT_COLORS[i+1<6?i+1:5];
                 sw["channel"]=ch;
-                sw["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
-                sw["online"]=(extensions[i].state==EXT_ONLINE);
+                sw["state"]=(ch==1)?snap_ext[i].relay1:snap_ext[i].relay2;
+                sw["online"]=(snap_ext[i].state==EXT_ONLINE);
             }
         }
     }
@@ -1809,8 +1963,9 @@ static String build_state_json(void) {
     }
 
     /* Mesh peers */
-    doc["mesh_active"] = mesh_active;
+    doc["mesh_active"]  = mesh_active;
     doc["mesh_name"]   = mesh_name;
+    doc["master_order"] = master_order_str;
     char self_uid_str[12];
     snprintf(self_uid_str,sizeof(self_uid_str),"%02X%02X%02X%02X",
              master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
@@ -1873,12 +2028,72 @@ static void task_web(void *arg) {
 /* ================================================================
  * WEB ROUTES
  * ================================================================ */
+/* Send a CONFIG command -- to all peers if target_uid is empty, else direct */
+static void mesh_send_config(const char *cmd, const char *target_uid,
+                              const char *name, const char *order, int slot) {
+    StaticJsonDocument<256> doc;
+    char self_uid[12];
+    snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+    doc["type"]       = MESH_PKT_CONFIG;
+    doc["uid"]        = self_uid;
+    doc["cmd"]        = cmd;
+    doc["target_uid"] = target_uid ? target_uid : "";
+    doc["name"]       = name  ? name  : "";
+    doc["order"]      = order ? order : "";
+    doc["slot"]       = slot;
+    String payload; serializeJson(doc, payload);
+    if (target_uid && strlen(target_uid) > 0) {
+        /* Send directly to target peer */
+        uint8_t peer_uid[4];
+        for (int i=0;i<4;i++) {
+            char b[3]={target_uid[i*2],target_uid[i*2+1],0};
+            peer_uid[i]=(uint8_t)strtoul(b,NULL,16);
+        }
+        int idx = mesh_find_peer(peer_uid);
+        if (idx >= 0)
+            esp_now_send(mesh_peers[idx].mac,
+                         (const uint8_t*)payload.c_str(), payload.length()+1);
+    } else {
+        /* Broadcast to all peers */
+        mesh_broadcast(payload.c_str(), payload.length()+1);
+    }
+}
+
 static void setup_web(void) {
     server.on("/", HTTP_GET, [](){
         server.send_P(200,"text/html",HTML);
     });
 
     /* Relay toggle - immediate, with rate limiting */
+    /* Kill all switches on this master */
+    server.on("/api/relay/killall", HTTP_POST, [](){
+        /* Update master relay state immediately under mutex so
+         * notify_ui() snapshot reflects the new OFF state */
+        xSemaphoreTake(state_mutex,portMAX_DELAY);
+        master_relay1 = false;
+        master_relay2 = false;
+        /* Turn off all registered extension relays */
+        for (int i=0;i<MAX_EXTENSIONS;i++) {
+            if (extensions[i].state==EXT_EMPTY) continue;
+            extensions[i].relay1 = false;
+            extensions[i].relay2 = false;
+            relay_cmd_t ec1; ec1.target=i; ec1.channel=1; ec1.state=false;
+            relay_cmd_t ec2; ec2.target=i; ec2.channel=2; ec2.state=false;
+            xQueueSend(ext_relay_queue,&ec1,0);
+            xQueueSend(ext_relay_queue,&ec2,0);
+        }
+        xSemaphoreGive(state_mutex);
+        /* Queue GPIO relay commands for master relays */
+        relay_cmd_t cmd1; cmd1.target=-1; cmd1.channel=1; cmd1.state=false;
+        relay_cmd_t cmd2; cmd2.target=-1; cmd2.channel=2; cmd2.state=false;
+        xQueueSend(master_relay_queue,&cmd1,0);
+        xQueueSend(master_relay_queue,&cmd2,0);
+        notify_ui();
+        Serial.println("[RELAY] Kill all");
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
     server.on("/api/relay", HTTP_POST, [](){
         String id=server.arg("id");
         int ch=server.arg("ch").toInt();
@@ -1887,8 +2102,11 @@ static void setup_web(void) {
         /* id format: "master_1" or "master_2" */
         if (id.startsWith("master")&&(ch==1||ch==2)) {
             relay_cmd_t cmd; cmd.target=-1; cmd.channel=ch;
+            String stateArg=server.arg("state");
             xSemaphoreTake(state_mutex,portMAX_DELAY);
-            cmd.state=(ch==1)?!master_relay1:!master_relay2;
+            if (stateArg=="0")      cmd.state=false;
+            else if (stateArg=="1") cmd.state=true;
+            else cmd.state=(ch==1)?!master_relay1:!master_relay2; /* toggle if no state arg */
             xSemaphoreGive(state_mutex);
             xQueueSend(master_relay_queue,&cmd,0);
             server.send(200,"application/json","{\"ok\":true}"); return;
@@ -1899,8 +2117,11 @@ static void setup_web(void) {
             int slot=(us>0)?id.substring(3,us).toInt():id.substring(3).toInt();
             if (slot>=0&&slot<MAX_EXTENSIONS) {
                 relay_cmd_t cmd; cmd.target=slot; cmd.channel=ch;
+                String extSt=server.arg("state");
                 xSemaphoreTake(state_mutex,portMAX_DELAY);
-                cmd.state=(ch==1)?!extensions[slot].relay1:!extensions[slot].relay2;
+                if (extSt=="0")      cmd.state=false;
+                else if (extSt=="1") cmd.state=true;
+                else cmd.state=(ch==1)?!extensions[slot].relay1:!extensions[slot].relay2;
                 xSemaphoreGive(state_mutex);
                 xQueueSend(ext_relay_queue,&cmd,0);
                 server.send(200,"application/json","{\"ok\":true}"); return;
@@ -2243,6 +2464,11 @@ static void setup_web(void) {
         /* Generate random mesh ID */
         for (int i=0;i<16;i++) mesh_id[i]=(uint8_t)(esp_random()&0xFF);
         mesh_active = true;
+        /* Init master_order with self */
+        char self_uid4[12];
+        snprintf(self_uid4,sizeof(self_uid4),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        master_order_add(self_uid4);
         mesh_nvs_save();
         Serial.printf("[MESH] New mesh created: %s\n", mesh_name);
         /* Switch to mesh-name SSID */
@@ -2270,6 +2496,13 @@ static void setup_web(void) {
         String payload; serializeJson(doc,payload);
         mesh_broadcast(payload.c_str(),payload.length()+1);
         delay(100);
+        /* Remove self from master_order before clearing */
+        {
+            char self_uid3[12];
+            snprintf(self_uid3,sizeof(self_uid3),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            master_order_remove(self_uid3);
+        }
         mesh_nvs_clear();
         /* Switch back to unique SSID   master is now standalone again */
         {
@@ -2306,6 +2539,39 @@ static void setup_web(void) {
             }
             Serial.printf("[MESH] ch was invalid, derived ch=%d from sw_id=%s\n",
                           ch, sw_id.c_str());
+        }
+
+        /* Wildcard sw_id="*" means kill all on target peer */
+        if (sw_id == "*") {
+            if (peer_uid_str.length()!=8) {
+                server.send(400,"application/json","{\"error\":\"bad uid\"}");
+                return;
+            }
+            uint8_t peer_uid[4];
+            peer_uid[0]=strtoul(peer_uid_str.substring(0,2).c_str(),NULL,16);
+            peer_uid[1]=strtoul(peer_uid_str.substring(2,4).c_str(),NULL,16);
+            peer_uid[2]=strtoul(peer_uid_str.substring(4,6).c_str(),NULL,16);
+            peer_uid[3]=strtoul(peer_uid_str.substring(6,8).c_str(),NULL,16);
+            int idx = mesh_find_peer(peer_uid);
+            if (idx<0) {
+                server.send(404,"application/json","{\"error\":\"peer not found\"}");
+                return;
+            }
+            /* Send killall relay command to peer */
+            StaticJsonDocument<128> doc;
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            doc["type"]    = MESH_PKT_RELAY_CMD;
+            doc["uid"]     = self_uid;
+            doc["sw_id"]   = "*";
+            doc["ch"]      = 0;
+            doc["state"]   = false;
+            String payload; serializeJson(doc,payload);
+            esp_now_send(mesh_peers[idx].mac,
+                         (const uint8_t*)payload.c_str(), payload.length()+1);
+            server.send(200,"application/json","{\"ok\":true}");
+            return;
         }
 
         if (peer_uid_str.length()!=8) {
@@ -2448,6 +2714,74 @@ static void setup_web(void) {
         server.send(200,"application/json","{\"ok\":true}");
     });
 
+    /* Mesh config proxy -- rename/reorder masters and peer switches */
+    server.on("/api/mesh/config", HTTP_POST, [](){
+        if (!mesh_active) {
+            server.send(400,"application/json","{\"error\":\"not in mesh\"}");
+            return;
+        }
+        String cmd        = server.arg("cmd");
+        String target_uid = server.arg("target_uid");
+        String name       = server.arg("name");
+        String order      = server.arg("order");
+        int    slot       = server.arg("slot").toInt();
+
+        char self_uid[12];
+        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        bool is_self = (target_uid == String(self_uid));
+
+        if (cmd == "reorder_masters") {
+            /* Mesh-wide -- apply locally and broadcast to all */
+            strncpy(master_order_str, order.c_str(), sizeof(master_order_str)-1);
+            mesh_nvs_save();
+            mesh_send_config("reorder_masters", "", nullptr, order.c_str(), -1);
+            notify_ui();
+
+        } else if (cmd == "rename_master") {
+            if (is_self) {
+                /* Apply locally */
+                nvs_save_master_name(name.c_str());
+                strncpy(master_name, name.c_str(), sizeof(master_name)-1);
+                notify_ui();
+            } else {
+                /* Proxy to target peer */
+                mesh_send_config("rename_master", target_uid.c_str(),
+                                 name.c_str(), nullptr, -1);
+            }
+
+        } else if (cmd == "rename_switch") {
+            if (is_self) {
+                /* Apply locally */
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                if (slot >= 0 && slot < MAX_EXTENSIONS &&
+                    extensions[slot].state != EXT_EMPTY) {
+                    strncpy(extensions[slot].name, name.c_str(),
+                            sizeof(extensions[slot].name)-1);
+                    uint8_t uid[4]; memcpy(uid, extensions[slot].uid, 4);
+                    xSemaphoreGive(state_mutex);
+                    nvs_save(uid, slot, name.c_str());
+                } else { xSemaphoreGive(state_mutex); }
+                notify_ui();
+            } else {
+                mesh_send_config("rename_switch", target_uid.c_str(),
+                                 name.c_str(), nullptr, slot);
+            }
+
+        } else if (cmd == "reorder_switches") {
+            if (is_self) {
+                nvs_save_switch_order(order.c_str());
+                switch_order = order;
+                notify_ui();
+            } else {
+                mesh_send_config("reorder_switches", target_uid.c_str(),
+                                 nullptr, order.c_str(), -1);
+            }
+        }
+
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
     /* Mesh status */
     server.on("/api/mesh/status", HTTP_GET, [](){
         StaticJsonDocument<512> doc;
@@ -2478,11 +2812,18 @@ static void setup_web(void) {
                    uint8_t *payload, size_t length){
         if (type==WStype_CONNECTED) {
             Serial.printf("[WS] Client #%u connected\n",num);
-            String json=build_state_json();
-            wss.sendTXT(num,json);
+            /* Signal notify queue -- state sent from task_web on next iteration.
+             * Do NOT call build_state_json() here -- NVS reads inside a
+             * WebSocket callback cause send timeout before client receives data. */
+            notify_ui();
         } else if (type==WStype_DISCONNECTED) {
             Serial.printf("[WS] Client #%u disconnected\n",num);
         }
+    });
+
+    /* Suppress favicon 404 */
+    server.on("/favicon.ico", HTTP_GET, [](){
+        server.send(204,"image/x-icon","");
     });
 
     server.begin();
@@ -2497,7 +2838,7 @@ void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v10.6 - booting");
+    Serial.println("\n[MASTER] Unisync v11.9 - booting");
 
     /* Configure relay pins with pull-down before anything else
      * prevents GPIO float causing relay to fire during boot     */
