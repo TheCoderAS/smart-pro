@@ -218,6 +218,8 @@ static void usart1_wait_tc(void) {
 }
 
 static bool usart1_available(void) {
+    if (LL_USART_IsActiveFlag_ORE(USART1))
+        LL_USART_ClearFlag_ORE(USART1);
     return LL_USART_IsActiveFlag_RXNE(USART1);
 }
 
@@ -286,10 +288,14 @@ static void hw_crc_init(void) {
 }
 
 static uint32_t crc32_compute(const uint8_t *data, uint8_t len) {
-    CRC->CR = CRC_CR_RESET;
-    volatile uint8_t *dr8 = (volatile uint8_t *)&CRC->DR;
-    while (len--) *dr8 = *data++;
-    return CRC->DR;
+    /* SW CRC32/ISO-HDLC -- matches master firmware exactly */
+    uint32_t crc = 0xFFFFFFFF;
+    while (len--) {
+        crc ^= *data++;
+        for (uint8_t i = 0; i < 8; i++)
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
+    }
+    return crc ^ 0xFFFFFFFF;
 }
 
 static uint32_t compute_response(const uint8_t *challenge) {
@@ -367,18 +373,13 @@ static void breath_tick(void) {
         return;
     }
 
-    if ((millis() - last_ms) < 30) return;
+    /* Registered: 32 steps * 125ms = 4s per cycle
+     * Unregistered: 32 steps * 31ms = ~1s per cycle */
+    uint32_t interval = (mode == MODE_REGISTERED) ? 125 : 31;
+    if ((millis() - last_ms) < interval) return;
     last_ms = millis();
-
-    if (mode == MODE_REGISTERED) {
-        /* Slow breathing: full cycle = 32 steps * 30ms = ~1s */
     TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
     step++;
-    } else {
-        /* Fast breathing when unregistered: skip every other step */
-        TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
-        step += 2;
-    }
 }
 
 /* ================================================================
@@ -428,6 +429,11 @@ static void rs485_send(uint8_t *frame, uint8_t len) {
     usart1_wait_tc();
     __NOP(); __NOP(); __NOP(); __NOP();
     PIN_CLR(PIN_RS485_DE);
+    /* Wait for MAX3485 RX enable, clear ORE and echo bytes */
+    __NOP(); __NOP(); __NOP(); __NOP();
+    if (LL_USART_IsActiveFlag_ORE(USART1)) LL_USART_ClearFlag_ORE(USART1);
+    if (LL_USART_IsActiveFlag_RXNE(USART1)) LL_USART_ReceiveData8(USART1);
+    rx_pos = 0; rx_elen = 0;
 }
 
 static void send_frame(uint8_t dst, uint8_t cmd,
@@ -466,8 +472,8 @@ static void set_relay2(bool s) {
  * ================================================================ */
 static void self_unregister(void) {
     relay1_state = false; relay2_state = false;
-    PIN_CLR(PIN_RELAY1); PIN_CLR(PIN_RELAY2);
-    PIN_SET(PIN_LED1);   PIN_SET(PIN_LED2);   /* LEDs on (active LOW) */
+    set_relay1(false);
+    set_relay2(false);
     wipe_registration();
     slot_address      = ADDR_UNASSIGNED;
     mode              = MODE_UNREGISTERED;
@@ -717,7 +723,6 @@ void setup() {
     gpio_init();
     tim17_pwm_init();  /* must be after gpio_init -- PA7 taken by timer */
     usart1_init();
-    hw_crc_init();
     uid_init();
     rand_seed = ((uint32_t)device_uid[0]<<24)|((uint32_t)device_uid[1]<<16)|
                 ((uint32_t)device_uid[2]<< 8)|(uint32_t)device_uid[3];
