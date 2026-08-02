@@ -107,28 +107,35 @@ static void nvs_load(void) {
 }
 
 static void nvs_flush(void) {
-    /* Unlock flash */
     if (READ_BIT(FLASH->CR, FLASH_CR_LOCK)) {
         WRITE_REG(FLASH->KEYR, 0x45670123UL);
         WRITE_REG(FLASH->KEYR, 0xCDEF89ABUL);
     }
+    /* Clear status flags */
+    WRITE_REG(FLASH->SR, FLASH_SR_EOP | FLASH_SR_WRPERR |
+              FLASH_SR_PGAERR | FLASH_SR_SIZERR | FLASH_SR_PGSERR);
     /* Erase page */
-    MODIFY_REG(FLASH->CR, FLASH_CR_PNB, (((NVS_PAGE_ADDR - FLASH_BASE) / NVS_PAGE_SIZE) << FLASH_CR_PNB_Pos));
+    uint32_t page = (NVS_PAGE_ADDR - FLASH_BASE) / NVS_PAGE_SIZE;
+    MODIFY_REG(FLASH->CR, FLASH_CR_PNB, (page << FLASH_CR_PNB_Pos));
     SET_BIT(FLASH->CR, FLASH_CR_PER);
     SET_BIT(FLASH->CR, FLASH_CR_STRT);
-    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1));
+    uint32_t t = millis();
+    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t)<200);
     CLEAR_BIT(FLASH->CR, FLASH_CR_PER);
-    /* Write 8 bytes as one double-word (64-bit) */
+    if (READ_BIT(FLASH->SR, FLASH_SR_EOP)) SET_BIT(FLASH->SR, FLASH_SR_EOP);
+    /* Write 8 bytes as double-word */
     SET_BIT(FLASH->CR, FLASH_CR_PG);
     volatile uint32_t *dst = (volatile uint32_t *)NVS_PAGE_ADDR;
     uint32_t w0, w1;
     memcpy(&w0, &nvs_shadow[0], 4);
     memcpy(&w1, &nvs_shadow[4], 4);
     dst[0] = w0;
+    __ISB();
     dst[1] = w1;
-    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1));
+    t = millis();
+    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t)<200);
     CLEAR_BIT(FLASH->CR, FLASH_CR_PG);
-    /* Lock flash */
+    if (READ_BIT(FLASH->SR, FLASH_SR_EOP)) SET_BIT(FLASH->SR, FLASH_SR_EOP);
     SET_BIT(FLASH->CR, FLASH_CR_LOCK);
 }
 
@@ -483,8 +490,16 @@ static void drain_events(uint8_t count) {
 static void handle_touch(void) {
     bool t1 = PIN_READ(PIN_TOUCH1);
     bool t2 = PIN_READ(PIN_TOUCH2);
-    if (t1 && !last_t1) { set_relay1(!relay1_state); push_event(1, relay1_state?1:0); }
-    if (t2 && !last_t2) { set_relay2(!relay2_state); push_event(2, relay2_state?1:0); }
+    if (t1 && !last_t1) {
+        set_relay1(!relay1_state);
+        push_event(1, relay1_state ? 1 : 0);
+        if (mode != MODE_REGISTERED) save_relay_state();
+    }
+    if (t2 && !last_t2) {
+        set_relay2(!relay2_state);
+        push_event(2, relay2_state ? 1 : 0);
+        if (mode != MODE_REGISTERED) save_relay_state();
+    }
     last_t1 = t1;
     last_t2 = t2;
 }
@@ -721,9 +736,19 @@ void setup() {
     rand_seed = ((uint32_t)device_uid[0]<<24)|((uint32_t)device_uid[1]<<16)|
                 ((uint32_t)device_uid[2]<< 8)|(uint32_t)device_uid[3];
     load_state();
-    /* Always boot OFF -- master restores state on first poll */
-    relay1_state = false; relay2_state = false;
-    set_relay1(false); set_relay2(false);
+    /* Boot relay state:
+     * Registered to a real master --> boot OFF, master restores on first poll
+     * Standalone (no master_uid)  --> restore from NVS */
+    { bool has_master = (master_uid[0]||master_uid[1]||
+                         master_uid[2]||master_uid[3]);
+      if (mode == MODE_REGISTERED && has_master) {
+          relay1_state = false; relay2_state = false;
+          set_relay1(false); set_relay2(false);
+      } else {
+          set_relay1(relay1_state);
+          set_relay2(relay2_state);
+      }
+    }
     last_poll_ms = millis();
     startup_blink();
 }
