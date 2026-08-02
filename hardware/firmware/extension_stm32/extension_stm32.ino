@@ -325,6 +325,22 @@ static const uint8_t BREATH_TABLE[32] = {
     115,  93,  71,  51,  34,  20,  10,   4
 };
 
+static void tim17_pwm_init(void) {
+    SET_BIT(RCC->APBENR2, RCC_APBENR2_TIM17EN);
+    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
+    LL_GPIO_SetPinMode(GPIOA,      LL_GPIO_PIN_7, LL_GPIO_MODE_ALTERNATE);
+    LL_GPIO_SetAFPin_0_7(GPIOA,    LL_GPIO_PIN_7, LL_GPIO_AF_5);
+    LL_GPIO_SetPinSpeed(GPIOA,     LL_GPIO_PIN_7, LL_GPIO_SPEED_FREQ_LOW);
+    LL_GPIO_SetPinOutputType(GPIOA,LL_GPIO_PIN_7, LL_GPIO_OUTPUT_PUSHPULL);
+    TIM17->PSC   = 0;
+    TIM17->ARR   = 255;
+    TIM17->CCR1  = 0;
+    TIM17->CCMR1 = (6u << TIM_CCMR1_OC1M_Pos) | TIM_CCMR1_OC1PE;
+    TIM17->CCER  = TIM_CCER_CC1E;
+    TIM17->BDTR  = TIM_BDTR_MOE;
+    TIM17->CR1   = TIM_CR1_CEN;
+}
+
 static void breath_tick(void) {
     static uint32_t last_ms = 0;
     static uint8_t  step    = 0;
@@ -698,6 +714,7 @@ static void startup_blink(void) {
  * ================================================================ */
 void setup() {
     gpio_init();
+    tim17_pwm_init();
     usart1_init();
     /* Seed random from UID */
     uid_init();
