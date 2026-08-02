@@ -231,6 +231,11 @@ static uint8_t usart1_read_byte(void) {
 static void gpio_init(void) {
     LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
 
+    /* Set relay pins HIGH before configuring as output.
+     * Active LOW relay: HIGH = relay OFF at boot, no glitch. */
+    GPIOA->BSRR = LL_GPIO_PIN_1 | LL_GPIO_PIN_2;  /* relays OFF */
+    GPIOA->BRR  = LL_GPIO_PIN_0 | LL_GPIO_PIN_5 | LL_GPIO_PIN_6; /* DE + LEDs LOW */
+
     /* Outputs match PIN_ defines:
      * PA0=RS485_DE, PA1=RELAY1, PA2=RELAY2, PA5=LED1, PA6=LED2
      * PA7 configured by tim17_pwm_init() */
@@ -245,10 +250,6 @@ static void gpio_init(void) {
     LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_4, LL_GPIO_MODE_INPUT);
     LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_3, LL_GPIO_PULL_NO);
     LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_4, LL_GPIO_PULL_NO);
-
-    /* All outputs LOW at boot -- relays OFF, DE in RX mode, LEDs OFF */
-    GPIOA->BRR = LL_GPIO_PIN_0 | LL_GPIO_PIN_1 | LL_GPIO_PIN_2 |
-                 LL_GPIO_PIN_5 | LL_GPIO_PIN_6;
 }
 
 /* ================================================================
@@ -450,14 +451,14 @@ static void send_frame(uint8_t dst, uint8_t cmd,
  * ================================================================ */
 static void set_relay1(bool s) {
     relay1_state = s;
-    if (s) { PIN_SET(PIN_RELAY1); PIN_CLR(PIN_LED1); }  /* relay ON,  LED off */
-    else   { PIN_CLR(PIN_RELAY1); PIN_SET(PIN_LED1); }  /* relay OFF, LED on  */
+    if (s) { PIN_CLR(PIN_RELAY1); PIN_SET(PIN_LED1); }  /* ON:  relay LOW, LED ON  */
+    else   { PIN_SET(PIN_RELAY1); PIN_CLR(PIN_LED1); }  /* OFF: relay HIGH, LED OFF */
 }
 
 static void set_relay2(bool s) {
     relay2_state = s;
-    if (s) { PIN_SET(PIN_RELAY2); PIN_CLR(PIN_LED2); }
-    else   { PIN_CLR(PIN_RELAY2); PIN_SET(PIN_LED2); }
+    if (s) { PIN_CLR(PIN_RELAY2); PIN_SET(PIN_LED2); }  /* ON:  relay LOW, LED ON  */
+    else   { PIN_SET(PIN_RELAY2); PIN_CLR(PIN_LED2); }  /* OFF: relay HIGH, LED OFF */
 }
 
 /* ================================================================
