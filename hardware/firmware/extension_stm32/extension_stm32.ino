@@ -96,7 +96,8 @@ static const uint8_t SECRET_KEY[16] = {
 #define NVS_MUID1       4
 #define NVS_MUID2       5
 #define NVS_MUID3       6
-#define NVS_MAGIC_VAL   0xA5
+#define NVS_MAGIC_VAL   0xA5  /* registered to master */
+#define NVS_RELAY_MAGIC 0x5A  /* standalone relay state only */
 
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
 static uint8_t nvs_shadow[8];
@@ -111,31 +112,24 @@ static void nvs_flush(void) {
         WRITE_REG(FLASH->KEYR, 0x45670123UL);
         WRITE_REG(FLASH->KEYR, 0xCDEF89ABUL);
     }
-    /* Clear status flags */
-    WRITE_REG(FLASH->SR, FLASH_SR_EOP | FLASH_SR_WRPERR |
-              FLASH_SR_PGAERR | FLASH_SR_SIZERR | FLASH_SR_PGSERR);
-    /* Erase page */
-    uint32_t page = (NVS_PAGE_ADDR - FLASH_BASE) / NVS_PAGE_SIZE;
-    MODIFY_REG(FLASH->CR, FLASH_CR_PNB, (page << FLASH_CR_PNB_Pos));
+    WRITE_REG(FLASH->SR, 0xFFFFFFFF);
+    MODIFY_REG(FLASH->CR, FLASH_CR_PNB, (15u << FLASH_CR_PNB_Pos));
     SET_BIT(FLASH->CR, FLASH_CR_PER);
     SET_BIT(FLASH->CR, FLASH_CR_STRT);
     uint32_t t = millis();
-    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t)<200);
+    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t) < 500);
     CLEAR_BIT(FLASH->CR, FLASH_CR_PER);
-    if (READ_BIT(FLASH->SR, FLASH_SR_EOP)) SET_BIT(FLASH->SR, FLASH_SR_EOP);
-    /* Write 8 bytes as double-word */
+    WRITE_REG(FLASH->SR, FLASH_SR_EOP);
     SET_BIT(FLASH->CR, FLASH_CR_PG);
     volatile uint32_t *dst = (volatile uint32_t *)NVS_PAGE_ADDR;
     uint32_t w0, w1;
     memcpy(&w0, &nvs_shadow[0], 4);
     memcpy(&w1, &nvs_shadow[4], 4);
-    dst[0] = w0;
-    __ISB();
-    dst[1] = w1;
+    dst[0] = w0; __ISB(); dst[1] = w1;
     t = millis();
-    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t)<200);
+    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t) < 500);
     CLEAR_BIT(FLASH->CR, FLASH_CR_PG);
-    if (READ_BIT(FLASH->SR, FLASH_SR_EOP)) SET_BIT(FLASH->SR, FLASH_SR_EOP);
+    WRITE_REG(FLASH->SR, FLASH_SR_EOP);
     SET_BIT(FLASH->CR, FLASH_CR_LOCK);
 }
 
@@ -366,19 +360,27 @@ static void breath_tick(void) {
  * ================================================================ */
 static void load_state(void) {
     nvs_load();
-    if (nvs_shadow[NVS_MAGIC] != NVS_MAGIC_VAL) {
-        mode         = MODE_UNREGISTERED;
-        slot_address = ADDR_UNASSIGNED;
-        return;
+    if (nvs_shadow[NVS_MAGIC] == NVS_MAGIC_VAL) {
+        /* Fully registered to a master */
+        slot_address  = nvs_shadow[NVS_ADDR];
+        master_uid[0] = nvs_shadow[NVS_MUID0];
+        master_uid[1] = nvs_shadow[NVS_MUID1];
+        master_uid[2] = nvs_shadow[NVS_MUID2];
+        master_uid[3] = nvs_shadow[NVS_MUID3];
+        relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
+        relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
+        mode          = MODE_REGISTERED;
+    } else if (nvs_shadow[NVS_MAGIC] == NVS_RELAY_MAGIC) {
+        /* Standalone -- relay state only, no master */
+        relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
+        relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
+        mode          = MODE_UNREGISTERED;
+        slot_address  = ADDR_UNASSIGNED;
+    } else {
+        /* No valid NVS */
+        mode          = MODE_UNREGISTERED;
+        slot_address  = ADDR_UNASSIGNED;
     }
-    slot_address  = nvs_shadow[NVS_ADDR];
-    master_uid[0] = nvs_shadow[NVS_MUID0];
-    master_uid[1] = nvs_shadow[NVS_MUID1];
-    master_uid[2] = nvs_shadow[NVS_MUID2];
-    master_uid[3] = nvs_shadow[NVS_MUID3];
-    relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
-    relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
-    mode          = MODE_REGISTERED;
 }
 
 static void save_registration(uint8_t addr, uint8_t *m_uid) {
@@ -397,6 +399,7 @@ static void save_registration(uint8_t addr, uint8_t *m_uid) {
 static void save_relay_state(void) {
     nvs_shadow[NVS_RELAY] = (relay1_state ? 0x01 : 0x00) |
                              (relay2_state ? 0x02 : 0x00);
+    nvs_shadow[NVS_MAGIC] = NVS_RELAY_MAGIC; /* standalone -- not registered */
     nvs_flush();
 }
 
