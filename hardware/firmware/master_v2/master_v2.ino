@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.9
+ * Unisync - Master Firmware v11.9.2.1
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -1253,6 +1253,16 @@ static void relay_state_save(void) {
     prefs.begin("relay_state",false);
     prefs.putBool("m_r1",master_relay1);
     prefs.putBool("m_r2",master_relay2);
+    /* Save extension relay states */
+    xSemaphoreTake(state_mutex,portMAX_DELAY);
+    for (int i=0;i<MAX_EXTENSIONS;i++) {
+        char k1[8],k2[8];
+        snprintf(k1,sizeof(k1),"e%d_r1",i);
+        snprintf(k2,sizeof(k2),"e%d_r2",i);
+        prefs.putBool(k1,extensions[i].relay1);
+        prefs.putBool(k2,extensions[i].relay2);
+    }
+    xSemaphoreGive(state_mutex);
     prefs.end();
 }
 
@@ -1260,6 +1270,14 @@ static void relay_state_load(void) {
     prefs.begin("relay_state",true);
     master_relay1=prefs.getBool("m_r1",false);
     master_relay2=prefs.getBool("m_r2",false);
+    /* Load extension relay states */
+    for (int i=0;i<MAX_EXTENSIONS;i++) {
+        char k1[8],k2[8];
+        snprintf(k1,sizeof(k1),"e%d_r1",i);
+        snprintf(k2,sizeof(k2),"e%d_r2",i);
+        extensions[i].relay1=prefs.getBool(k1,false);
+        extensions[i].relay2=prefs.getBool(k2,false);
+    }
     prefs.end();
 }
 
@@ -1598,6 +1616,7 @@ static void poll_extension(int i) {
         xSemaphoreGive(state_mutex); return;
     }
 
+    bool was_first_poll=!extensions[i].polled_once;
     extensions[i].missed=0;
     extensions[i].last_seen_ms=millis();
     extensions[i].polled_once=true;
@@ -1608,8 +1627,29 @@ static void poll_extension(int i) {
     if (resp[3]==CMD_STATE_RESP&&resp[4]>=3) {
         uint8_t flags=resp[5],evts=resp[7];
         bool r1=(flags>>0)&0x01, r2=(flags>>1)&0x01;
-        if (r1!=extensions[i].relay1||r2!=extensions[i].relay2) {
+        if (was_first_poll) {
+            /* First successful poll -- extension boots OFF.
+             * Send master's saved state if different. */
+            bool want_r1=extensions[i].relay1;
+            bool want_r2=extensions[i].relay2;
+            if (want_r1!=r1 || want_r2!=r2) {
+                uint8_t relay_byte=(want_r1?0x01:0x00)|(want_r2?0x02:0x00);
+                xSemaphoreGive(state_mutex);
+                bus_send(addr, CMD_SET_RELAY, &relay_byte, 1);
+                bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                extensions[i].relay1=want_r1;
+                extensions[i].relay2=want_r2;
+                Serial.printf("[RELAY] Restored ext%d: CH1=%s CH2=%s\n",
+                              i, want_r1?"ON":"OFF", want_r2?"ON":"OFF");
+            }
+            changed=true;
+        } else if (r1!=extensions[i].relay1||r2!=extensions[i].relay2) {
             extensions[i].relay1=r1; extensions[i].relay2=r2; changed=true;
+            /* Persist updated extension relay state to master NVS */
+            xSemaphoreGive(state_mutex);
+            relay_state_save();
+            xSemaphoreTake(state_mutex,portMAX_DELAY);
         }
         if (evts>0) {
             uint8_t drain[1]={evts};
@@ -2090,6 +2130,7 @@ static void setup_web(void) {
         xQueueSend(master_relay_queue,&cmd1,0);
         xQueueSend(master_relay_queue,&cmd2,0);
         notify_ui();
+        relay_state_save(); /* persist all-off state */
         Serial.println("[RELAY] Kill all");
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -2122,8 +2163,12 @@ static void setup_web(void) {
                 if (extSt=="0")      cmd.state=false;
                 else if (extSt=="1") cmd.state=true;
                 else cmd.state=(ch==1)?!extensions[slot].relay1:!extensions[slot].relay2;
+                /* Update in-memory state before persisting */
+                if (ch==1) extensions[slot].relay1=cmd.state;
+                else       extensions[slot].relay2=cmd.state;
                 xSemaphoreGive(state_mutex);
                 xQueueSend(ext_relay_queue,&cmd,0);
+                relay_state_save(); /* persist to NVS */
                 server.send(200,"application/json","{\"ok\":true}"); return;
             }
         }
@@ -2838,7 +2883,7 @@ void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v11.9 - booting");
+    Serial.println("\n[MASTER] Unisync v11.9.2 - booting");
 
     /* Configure relay pins with pull-down before anything else
      * prevents GPIO float causing relay to fire during boot     */
@@ -2860,7 +2905,11 @@ void setup() {
 
     BusSerial.begin(UART_BAUD, SERIAL_8N1, BUS_RX_PIN, BUS_TX_PIN);
 
-    relay_state_load();
+    /* Load master relay state (extension states loaded after nvs_restore_all) */
+    prefs.begin("relay_state",true);
+    master_relay1=prefs.getBool("m_r1",false);
+    master_relay2=prefs.getBool("m_r2",false);
+    prefs.end();
     digitalWrite(RELAY1_PIN, master_relay1?LOW:HIGH);
     digitalWrite(RELAY2_PIN, master_relay2?LOW:HIGH);
     Serial.printf("[RELAY] Restored: CH1=%s CH2=%s\n",
@@ -2882,6 +2931,17 @@ void setup() {
 
     prefs.begin("ext_map",false); prefs.end();
     nvs_restore_all();
+    /* Load extension relay states AFTER extensions are initialized */
+    { prefs.begin("relay_state",true);
+      for (int i=0;i<MAX_EXTENSIONS;i++) {
+          char k1[8],k2[8];
+          snprintf(k1,sizeof(k1),"e%d_r1",i);
+          snprintf(k2,sizeof(k2),"e%d_r2",i);
+          extensions[i].relay1=prefs.getBool(k1,false);
+          extensions[i].relay2=prefs.getBool(k2,false);
+      }
+      prefs.end();
+    }
 
     /* Load master name and switch order */
     nvs_load_master_name(master_name, sizeof(master_name));
