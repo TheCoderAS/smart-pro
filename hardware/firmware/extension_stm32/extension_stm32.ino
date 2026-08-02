@@ -1,5 +1,5 @@
 /*
- * Unisync - Extension Firmware v4.4
+ * Unisync - Extension Firmware v4.5
  * STM32G030F6P6 -- Arduino IDE + STM32duino + LL drivers
  *
  * Build settings:
@@ -8,19 +8,19 @@
  *   C Runtime:       Newlib Nano
  *   Upload:          STM32CubeProgrammer (SWD)
  *
- * Pin assignments (breakout board -- PA9/PA10 remapped to PA11/PA12):
- *   PA0  - TOUCH1      (TTP223 -- HIGH on touch)
- *   PA1  - TOUCH2      (TTP223 -- HIGH on touch)
- *   PA2  - RS485_TX    (USART1 TX -- AF1)
- *   PA3  - RS485_RX    (USART1 RX -- AF1)
- *   PA4  - RS485_DE    (MAX3485 DE/RE# -- HIGH=TX, LOW=RX)
- *   PA5  - LED1        (active LOW -- ON when switch OFF, OFF when switch ON)
- *   PA6  - LED2        (active LOW -- ON when switch OFF, OFF when switch ON)
- *   PA7  - LED3        (TIM17_CH1 AF5 -- hardware PWM breathing heartbeat)
- *   PA11 - RELAY1_DRV  (S8050 NPN -- HIGH=ON, LOW=OFF)
- *   PA12 - RELAY2_DRV  (S8050 NPN -- HIGH=ON, LOW=OFF)
+ * Pin assignments:
+ *   PA0  - RS485_DE    (MAX3485 DE/RE#)
+ *   PA1  - RELAY1_DRV  (active LOW relay module -- LOW=ON, HIGH=OFF)
+ *   PA2  - RELAY2_DRV  (active LOW relay module -- LOW=ON, HIGH=OFF)
+ *   PA3  - TOUCH1_IRQ  (TTP223 -- HIGH on touch)
+ *   PA4  - TOUCH2_IRQ  (TTP223 -- HIGH on touch)
+ *   PA5  - LED1        (active HIGH -- ON when relay ON)
+ *   PA6  - LED2        (active HIGH -- ON when relay ON)
+ *   PA7  - LED3        (TIM17_CH1 AF5 -- hardware PWM breathing)
+ *   PA11 - RS485_TX    (USART1 TX via SYSCFG remap)
+ *   PA12 - RS485_RX    (USART1 RX via SYSCFG remap)
  *   PA13 - SWDIO
- *   PA14 - SWDCLK + BOOT0 pulldown
+ *   PA14 - SWDCLK/BOOT0
  */
 
 #include "Arduino.h"
@@ -36,15 +36,14 @@
 #define PIN_CLR(pin)    (GPIOA->BRR  = (1u << (pin)))
 #define PIN_READ(pin)   ((GPIOA->IDR  >> (pin)) & 1u)
 
-#define PIN_TOUCH1     0
-#define PIN_TOUCH2     1
-/* PA2/PA3 = USART1 TX/RX via SYSCFG remap */
-#define PIN_RS485_DE   4
-#define PIN_LED1       5   /* active LOW */
-#define PIN_LED2       6   /* active LOW */
-/* PA7 = TIM17_CH1 PWM -- controlled via timer, not PIN_SET/CLR */
-#define PIN_RELAY1     11
-#define PIN_RELAY2     12
+#define PIN_RS485_DE   0
+#define PIN_RELAY1     1
+#define PIN_RELAY2     2
+#define PIN_TOUCH1     3
+#define PIN_TOUCH2     4
+#define PIN_LED1       5
+#define PIN_LED2       6
+/* PA7 = TIM17_CH1 -- controlled by timer, not PIN macros */
 
 /* ================================================================
  * PROTOCOL
@@ -169,35 +168,7 @@ static void tim17_pwm_init(void) {
 }
 
 /* Call from loop() -- non-blocking, updates PWM duty every 30ms */
-static void breath_tick(void) {
-    static uint32_t last_ms  = 0;
-    static uint8_t  step     = 0;
-    static bool     identify = false;
-    static uint8_t  id_count = 0;
 
-    if (identify) {
-        /* Fast full-on/off blink for identify command */
-        if ((millis() - last_ms) >= 125) {
-            last_ms = millis();
-            TIM17->CCR1 = (id_count & 1) ? 255 : 0;
-            if (++id_count >= 8) { identify = false; id_count = 0; }
-        }
-        return;
-    }
-
-    if ((millis() - last_ms) < 30) return;
-    last_ms = millis();
-
-    if (mode == MODE_REGISTERED) {
-        /* Slow breathing: full cycle = 32 steps * 30ms = ~1s */
-        TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
-        step++;
-    } else {
-        /* Fast breathing when unregistered: skip every other step */
-        TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
-        step += 2;
-    }
-}
 
 /* Call once to trigger identify blink */
 static void breath_identify(void) {
@@ -260,24 +231,24 @@ static uint8_t usart1_read_byte(void) {
 static void gpio_init(void) {
     LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
 
-    /* Outputs: RS485_DE(PA4), LED1(PA5), LED2(PA6), RELAY1(PA11), RELAY2(PA12) */
-    /* PA7 configured separately by tim17_pwm_init() */
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_4,  LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_5,  LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_6,  LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_11, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_12, LL_GPIO_MODE_OUTPUT);
+    /* Outputs match PIN_ defines:
+     * PA0=RS485_DE, PA1=RELAY1, PA2=RELAY2, PA5=LED1, PA6=LED2
+     * PA7 configured by tim17_pwm_init() */
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_OUTPUT); /* RS485_DE */
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_1, LL_GPIO_MODE_OUTPUT); /* RELAY1   */
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_2, LL_GPIO_MODE_OUTPUT); /* RELAY2   */
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_5, LL_GPIO_MODE_OUTPUT); /* LED1     */
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_6, LL_GPIO_MODE_OUTPUT); /* LED2     */
 
-    /* Inputs: TOUCH1(PA0), TOUCH2(PA1) */
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_INPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_1, LL_GPIO_MODE_INPUT);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_0, LL_GPIO_PULL_NO);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_1, LL_GPIO_PULL_NO);
+    /* Inputs: TOUCH1(PA3), TOUCH2(PA4) */
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_3, LL_GPIO_MODE_INPUT);
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_4, LL_GPIO_MODE_INPUT);
+    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_3, LL_GPIO_PULL_NO);
+    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_4, LL_GPIO_PULL_NO);
 
-    /* All outputs LOW -- relays OFF, DE in RX mode */
-    /* LED1/LED2 active LOW so LOW = LED ON -- set HIGH to turn OFF at boot */
-    GPIOA->BRR  = LL_GPIO_PIN_4 | LL_GPIO_PIN_11 | LL_GPIO_PIN_12;
-    GPIOA->BSRR = LL_GPIO_PIN_5 | LL_GPIO_PIN_6;  /* LEDs OFF at boot */
+    /* All outputs LOW at boot -- relays OFF, DE in RX mode, LEDs OFF */
+    GPIOA->BRR = LL_GPIO_PIN_0 | LL_GPIO_PIN_1 | LL_GPIO_PIN_2 |
+                 LL_GPIO_PIN_5 | LL_GPIO_PIN_6;
 }
 
 /* ================================================================
@@ -378,6 +349,36 @@ static uint8_t  rx_elen         = 0;
 
 static uint32_t last_announce_ms  = 0;
 static uint32_t announce_interval = 2000;
+
+static void breath_tick(void) {
+    static uint32_t last_ms  = 0;
+    static uint8_t  step     = 0;
+    static bool     identify = false;
+    static uint8_t  id_count = 0;
+
+    if (identify) {
+        /* Fast full-on/off blink for identify command */
+        if ((millis() - last_ms) >= 125) {
+            last_ms = millis();
+            TIM17->CCR1 = (id_count & 1) ? 255 : 0;
+            if (++id_count >= 8) { identify = false; id_count = 0; }
+        }
+        return;
+    }
+
+    if ((millis() - last_ms) < 30) return;
+    last_ms = millis();
+
+    if (mode == MODE_REGISTERED) {
+        /* Slow breathing: full cycle = 32 steps * 30ms = ~1s */
+    TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
+    step++;
+    } else {
+        /* Fast breathing when unregistered: skip every other step */
+        TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
+        step += 2;
+    }
+}
 
 /* ================================================================
  * PERSISTENCE
@@ -720,9 +721,12 @@ void setup() {
     rand_seed = ((uint32_t)device_uid[0]<<24)|((uint32_t)device_uid[1]<<16)|
                 ((uint32_t)device_uid[2]<< 8)|(uint32_t)device_uid[3];
     load_state();
-    /* Apply restored relay states + correct LED state */
-    set_relay1(relay1_state);
-    set_relay2(relay2_state);
+    /* Always boot with relays and LEDs OFF regardless of NVS state.
+     * Master restores state on first poll if registered. */
+    relay1_state = false;
+    relay2_state = false;
+    set_relay1(false);
+    set_relay2(false);
     last_poll_ms = millis();
 }
 
@@ -744,8 +748,8 @@ void loop() {
         break;
     case MODE_REGISTERED:
         if ((millis() - last_poll_ms) > ORPHAN_TIMEOUT_MS &&
-             millis() > ORPHAN_TIMEOUT_MS) {
-            self_unregister();
+                      millis() > ORPHAN_TIMEOUT_MS) {
+              self_unregister();
         }
         break;
     case MODE_OTA:
