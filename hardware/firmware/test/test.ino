@@ -98,11 +98,6 @@ static const uint8_t SECRET_KEY[16] = {
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
 static uint8_t nvs_shadow[8];
 
-static void nvs_load(void) {
-    volatile uint8_t *p = (volatile uint8_t *)NVS_PAGE_ADDR;
-    for (uint8_t i = 0; i < 8; i++) nvs_shadow[i] = p[i];
-}
-
 static void nvs_flush(void) {
     if (READ_BIT(FLASH->CR, FLASH_CR_LOCK)) {
         WRITE_REG(FLASH->KEYR, 0x45670123UL);
@@ -152,7 +147,7 @@ static void usart1_init(void) {
     USART1->CR2  = 0;
     USART1->CR3  = 0;
     USART1->PRESC = 0;
-    USART1->BRR  = SystemCoreClock / UART_BAUD;
+    USART1->BRR  = (64000000UL / 250000UL);
     USART1->CR1  = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
     uint32_t t   = millis();
     while (!(USART1->ISR & USART_ISR_TEACK) && (millis()-t) < 100);
@@ -331,7 +326,8 @@ static void breath_tick(void) {
  * PERSISTENCE
  * ================================================================ */
 static void load_state(void) {
-    nvs_load();
+    { volatile uint8_t *p=(volatile uint8_t*)NVS_PAGE_ADDR;
+      for(uint8_t i=0;i<8;i++) nvs_shadow[i]=p[i]; }
     if (nvs_shadow[NVS_MAGIC] == NVS_MAGIC_VAL) {
         /* Fully registered to a master */
         slot_address  = nvs_shadow[NVS_ADDR];
@@ -415,14 +411,14 @@ static void send_frame(uint8_t dst, uint8_t cmd,
  * ================================================================ */
 static void set_relay1(bool s) {
     relay1_state = s;
-    if (s) { PIN_CLR(PIN_RELAY1); PIN_SET(PIN_LED1); }  /* active LOW relay ON,  LED ON  */
-    else   { PIN_SET(PIN_RELAY1); PIN_CLR(PIN_LED1); }  /* active LOW relay OFF, LED OFF */
+    if (s) { PIN_CLR(PIN_RELAY1); PIN_SET(PIN_LED1); }
+    else   { PIN_SET(PIN_RELAY1); PIN_CLR(PIN_LED1); }
 }
 
 static void set_relay2(bool s) {
     relay2_state = s;
-    if (s) { PIN_CLR(PIN_RELAY2); PIN_SET(PIN_LED2); }  /* active LOW relay ON,  LED ON  */
-    else   { PIN_SET(PIN_RELAY2); PIN_CLR(PIN_LED2); }  /* active LOW relay OFF, LED OFF */
+    if (s) { PIN_CLR(PIN_RELAY2); PIN_SET(PIN_LED2); }
+    else   { PIN_SET(PIN_RELAY2); PIN_CLR(PIN_LED2); }
 }
 
 /* ================================================================
@@ -444,14 +440,14 @@ static void self_unregister(void) {
 static void push_event(uint8_t ch, uint8_t s) {
     event_buf[event_head].channel = ch;
     event_buf[event_head].state   = s;
-    event_head = (event_head + 1) % EVENT_BUF_SIZE;
+    event_head = (event_head + 1) & 7;
     if (event_count < EVENT_BUF_SIZE) event_count++;
-    else event_tail = (event_tail + 1) % EVENT_BUF_SIZE;
+    else event_tail = (event_tail + 1) & 7;
 }
 
 static void drain_events(uint8_t count) {
     for (uint8_t i = 0; i < count && event_count > 0; i++) {
-        event_tail = (event_tail + 1) % EVENT_BUF_SIZE;
+        event_tail = (event_tail + 1) & 7;
         event_count--;
     }
 }
@@ -514,7 +510,7 @@ static void send_state_resp(void) {
     for (uint8_t ei = 0; ei < cnt; ei++) {
         payload[plen++] = event_buf[tail].channel;
         payload[plen++] = event_buf[tail].state;
-        tail = (tail + 1) % EVENT_BUF_SIZE;
+        tail = (tail + 1) & 7;
     }
     send_frame(ADDR_MASTER, CMD_STATE_RESP, payload, plen);
 }
@@ -529,7 +525,6 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     uint8_t *p    = &frame[5];
     uint8_t *uid = device_uid;
     uint8_t  buf[8];
-    uint32_t uptime_s;
 
     if (frame[5 + plen] != crc8(&frame[1], 4 + plen)) return;
 
@@ -559,10 +554,9 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         mode = MODE_REGISTERED;
         set_relay1(new_r1);
         set_relay2(new_r2);
-        uptime_s = millis() / 1000;
-        buf[0]=1; buf[1]=0;
-        buf[2]=(uptime_s>>24)&0xFF; buf[3]=(uptime_s>>16)&0xFF;
-        buf[4]=(uptime_s>> 8)&0xFF; buf[5]=(uptime_s)    &0xFF;
+        { uint32_t u=millis()/1000; buf[0]=1;buf[1]=0;
+          buf[2]=(u>>24)&0xFF;buf[3]=(u>>16)&0xFF;
+          buf[4]=(u>>8)&0xFF;buf[5]=u&0xFF; }
         send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
         last_poll_ms      = millis();
             last_announce_ms  = millis() + 30000UL;
@@ -602,11 +596,10 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     switch (cmd) {
 
     case CMD_PING:
-        uptime_s = millis() / 1000;
-        buf[0]=1; buf[1]=0;
-        buf[2]=(uptime_s>>24)&0xFF; buf[3]=(uptime_s>>16)&0xFF;
-        buf[4]=(uptime_s>> 8)&0xFF; buf[5]=(uptime_s)    &0xFF;
-        send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
+        { uint32_t u=millis()/1000; buf[0]=1;buf[1]=0;
+          buf[2]=(u>>24)&0xFF;buf[3]=(u>>16)&0xFF;
+          buf[4]=(u>>8)&0xFF;buf[5]=u&0xFF;
+          send_frame(ADDR_MASTER,CMD_PONG,buf,6); }
         break;
 
     case CMD_GET_STATE:
