@@ -204,14 +204,10 @@ static void uid_init(void) {
 /* ================================================================
  * CRC-8
  * ================================================================ */
-static uint8_t crc8(uint8_t *data, uint8_t len) {
-    uint8_t crc = 0x00;
-    while (len--) {
-        crc ^= *data++;
-        for (uint8_t i = 0; i < 8; i++)
-            crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1;
-    }
-    return crc;
+static uint8_t crc8(uint8_t *d, uint8_t n) {
+    uint8_t c=0;
+    while(n--){c^=*d++;for(uint8_t i=8;i--;)c=c&0x80?(c<<1)^7:c<<1;}
+    return c;
 }
 
 /* ================================================================
@@ -219,23 +215,17 @@ static uint8_t crc8(uint8_t *data, uint8_t len) {
  * Reset unit, feed data word by word, read result.
  * Saves ~200 bytes vs software loop.
  * ================================================================ */
-static uint32_t crc32_compute(const uint8_t *data, uint8_t len) {
-    /* SW CRC32/ISO-HDLC -- matches master firmware exactly */
-    uint32_t crc = 0xFFFFFFFF;
-    while (len--) {
-        crc ^= *data++;
-        for (uint8_t i = 0; i < 8; i++)
-            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
-    }
-    return crc ^ 0xFFFFFFFF;
+static uint32_t crc32_compute(const uint8_t *d, uint8_t n) {
+    uint32_t c=0xFFFFFFFF;
+    while(n--){c^=*d++;for(uint8_t i=8;i--;)c=c&1?(c>>1)^0xEDB88320UL:c>>1;}
+    return c^0xFFFFFFFF;
 }
 
-static uint32_t compute_response(const uint8_t *challenge) {
-    uint8_t buf[24];
-    for (uint8_t i = 0; i < 16; i++) buf[i]    = SECRET_KEY[i];
-    for (uint8_t i = 0; i < 4;  i++) buf[16+i] = challenge[i];
-    for (uint8_t i = 0; i < 4;  i++) buf[20+i] = device_uid[i];
-    return crc32_compute(buf, 24);
+static uint32_t compute_response(const uint8_t *ch) {
+    uint8_t b[24];
+    for(uint8_t i=0;i<16;i++) b[i]=SECRET_KEY[i];
+    for(uint8_t i=0;i<4;i++){b[16+i]=ch[i];b[20+i]=device_uid[i];}
+    return crc32_compute(b,24);
 }
 
 /* ================================================================
@@ -321,28 +311,17 @@ static void breath_tick(void) {
  * PERSISTENCE
  * ================================================================ */
 static void load_state(void) {
-    { volatile uint8_t *p=(volatile uint8_t*)NVS_PAGE_ADDR;
-      for(uint8_t i=0;i<8;i++) nvs_shadow[i]=p[i]; }
-    if (nvs_shadow[NVS_MAGIC] == NVS_MAGIC_VAL) {
-        /* Fully registered to a master */
-        slot_address  = nvs_shadow[NVS_ADDR];
-        master_uid[0] = nvs_shadow[NVS_MUID0];
-        master_uid[1] = nvs_shadow[NVS_MUID1];
-        master_uid[2] = nvs_shadow[NVS_MUID2];
-        master_uid[3] = nvs_shadow[NVS_MUID3];
-        relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
-        relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
-        mode          = MODE_REGISTERED;
-    } else if (nvs_shadow[NVS_MAGIC] == NVS_RELAY_MAGIC) {
-        /* Standalone -- relay state only, no master */
-        relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
-        relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
-        mode          = MODE_UNREGISTERED;
-        slot_address  = ADDR_UNASSIGNED;
+    volatile uint8_t *p=(volatile uint8_t*)NVS_PAGE_ADDR;
+    for(uint8_t i=0;i<8;i++) nvs_shadow[i]=p[i];
+    relay1_state=(nvs_shadow[NVS_RELAY]&0x01)!=0;
+    relay2_state=(nvs_shadow[NVS_RELAY]&0x02)!=0;
+    if (nvs_shadow[NVS_MAGIC]==NVS_MAGIC_VAL) {
+        slot_address=nvs_shadow[NVS_ADDR];
+        master_uid[0]=nvs_shadow[NVS_MUID0]; master_uid[1]=nvs_shadow[NVS_MUID1];
+        master_uid[2]=nvs_shadow[NVS_MUID2]; master_uid[3]=nvs_shadow[NVS_MUID3];
+        mode=MODE_REGISTERED;
     } else {
-        /* No valid NVS */
-        mode          = MODE_UNREGISTERED;
-        slot_address  = ADDR_UNASSIGNED;
+        mode=MODE_UNREGISTERED; slot_address=ADDR_UNASSIGNED;
     }
 }
 
