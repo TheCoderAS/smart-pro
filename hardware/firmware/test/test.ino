@@ -22,8 +22,6 @@
  */
 
 #include "Arduino.h"   /* millis(), delay() only */
-#include <stm32g0xx_ll_gpio.h>
-#include <stm32g0xx_ll_bus.h>
 
 /* ================================================================
  * GPIO BIT-BANG MACROS (replaces digitalWrite/pinMode)
@@ -184,28 +182,15 @@ static uint8_t usart1_read_byte(void) {
  * GPIO INIT (replaces pinMode/digitalWrite)
  * ================================================================ */
 static void gpio_init(void) {
-    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
-
-    /* Output pins: RS485_DE, RELAY1, RELAY2, LED1, LED2, LED3 */
-    uint32_t out_pins = LL_GPIO_PIN_0|LL_GPIO_PIN_1|LL_GPIO_PIN_2|
-                        LL_GPIO_PIN_5|LL_GPIO_PIN_6|LL_GPIO_PIN_7;
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_1, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_2, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_5, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_6, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_7, LL_GPIO_MODE_OUTPUT);
-
-    /* Input pins: TOUCH1 (PA3), TOUCH2 (PA4) -- no pull, TTP223 drives actively */
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_3, LL_GPIO_MODE_INPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_4, LL_GPIO_MODE_INPUT);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_3, LL_GPIO_PULL_NO);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_4, LL_GPIO_PULL_NO);
-
-    /* Set relay pins HIGH before driving as output (active LOW = OFF at boot) */
-    GPIOA->BSRR = LL_GPIO_PIN_1 | LL_GPIO_PIN_2;
-    /* All other outputs LOW */
-    GPIOA->BRR  = LL_GPIO_PIN_0 | LL_GPIO_PIN_5 | LL_GPIO_PIN_6 | LL_GPIO_PIN_7;
+    RCC->IOPENR |= RCC_IOPENR_GPIOAEN;
+    /* Relay HIGH before output (active LOW = OFF) */
+    GPIOA->BSRR = (1u<<1)|(1u<<2);
+    GPIOA->BRR  = (1u<<0)|(1u<<5)|(1u<<6)|(1u<<7);
+    /* PA0,1,2,5,6,7=output PA3,4=input no-pull */
+    GPIOA->MODER = (GPIOA->MODER
+        & ~((3u<<0)|(3u<<2)|(3u<<4)|(3u<<6)|(3u<<8)|(3u<<10)|(3u<<12)|(3u<<14)))
+        |  ((1u<<0)|(1u<<2)|(1u<<4)|(1u<<10)|(1u<<12)|(1u<<14));
+    GPIOA->PUPDR = (GPIOA->PUPDR & ~((3u<<6)|(3u<<8)));
 }
 
 /* ================================================================
@@ -286,11 +271,10 @@ static uint8_t    master_uid[4] = {0};
 static bool       relay1_state  = false;
 static bool       relay2_state  = false;
 
-#define EVENT_BUF_SIZE 16
+#define EVENT_BUF_SIZE 8
 typedef struct {
-    uint8_t  channel;
-    uint8_t  state;
-    uint32_t ts_ms;
+    uint8_t channel;
+    uint8_t state;
 } touch_event_t;
 
 static touch_event_t event_buf[EVENT_BUF_SIZE];
@@ -315,20 +299,13 @@ static uint32_t announce_interval = 2000;
  * Registered: 32 * 125ms = 4s cycle
  * Unregistered: 32 * 31ms = ~1s cycle
  * ================================================================ */
-static const uint8_t BREATH_TABLE[32] = {
-      2,   4,  10,  20,  34,  51,  71,  93,
-    115, 137, 157, 175, 190, 202, 210, 215,
-    217, 215, 210, 202, 190, 175, 157, 137,
-    115,  93,  71,  51,  34,  20,  10,   4
-};
+/* breath computed inline */
 
 static void tim17_pwm_init(void) {
-    SET_BIT(RCC->APBENR2, RCC_APBENR2_TIM17EN);
-    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
-    LL_GPIO_SetPinMode(GPIOA,      LL_GPIO_PIN_7, LL_GPIO_MODE_ALTERNATE);
-    LL_GPIO_SetAFPin_0_7(GPIOA,    LL_GPIO_PIN_7, LL_GPIO_AF_5);
-    LL_GPIO_SetPinSpeed(GPIOA,     LL_GPIO_PIN_7, LL_GPIO_SPEED_FREQ_LOW);
-    LL_GPIO_SetPinOutputType(GPIOA,LL_GPIO_PIN_7, LL_GPIO_OUTPUT_PUSHPULL);
+    RCC->APBENR2 |= RCC_APBENR2_TIM17EN;
+    /* PA7 = AF5 (TIM17_CH1) push-pull */
+    GPIOA->MODER  = (GPIOA->MODER  & ~(3u<<14)) | (2u<<14);
+    GPIOA->AFR[0] = (GPIOA->AFR[0] & ~(15u<<28)) | (5u<<28);
     TIM17->PSC   = 0;
     TIM17->ARR   = 255;
     TIM17->CCR1  = 0;
@@ -344,7 +321,8 @@ static void breath_tick(void) {
     uint32_t interval = (mode == MODE_REGISTERED) ? 125 : 31;
     if ((millis() - last_ms) < interval) return;
     last_ms = millis();
-    TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
+    uint8_t s = step & 0x1F;
+    TIM17->CCR1 = (s < 16) ? (uint32_t)(s << 4) : (uint32_t)((31 - s) << 4);
     step++;
 }
 
@@ -470,7 +448,6 @@ static void self_unregister(void) {
 static void push_event(uint8_t ch, uint8_t s) {
     event_buf[event_head].channel = ch;
     event_buf[event_head].state   = s;
-    event_buf[event_head].ts_ms   = millis();
     event_head = (event_head + 1) % EVENT_BUF_SIZE;
     if (event_count < EVENT_BUF_SIZE) event_count++;
     else event_tail = (event_tail + 1) % EVENT_BUF_SIZE;
@@ -527,7 +504,7 @@ static void send_announce(void) {
  * STATE RESPONSE
  * ================================================================ */
 static void send_state_resp(void) {
-    uint8_t payload[3 + 5*5];
+    uint8_t payload[3 + 5*2];
     uint8_t plen = 0;
     uint8_t flags = 0;
     if (relay1_state)  flags |= 0x01;
@@ -539,12 +516,8 @@ static void send_state_resp(void) {
     uint8_t tail = event_tail;
     uint8_t cnt  = event_count < 5 ? event_count : 5;
     for (uint8_t ei = 0; ei < cnt; ei++) {
-        uint32_t ts  = event_buf[tail].ts_ms;
         payload[plen++] = event_buf[tail].channel;
         payload[plen++] = event_buf[tail].state;
-        payload[plen++] = (ts >> 16) & 0xFF;
-        payload[plen++] = (ts >>  8) & 0xFF;
-        payload[plen++] = (ts)       & 0xFF;
         tail = (tail + 1) % EVENT_BUF_SIZE;
     }
     send_frame(ADDR_MASTER, CMD_STATE_RESP, payload, plen);
