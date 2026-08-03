@@ -57,7 +57,6 @@
 #define CMD_GET_STATE     0x21
 #define CMD_STATE_RESP    0x22
 #define CMD_DRAIN_EVENTS  0x23
-#define CMD_IDENTIFY      0x30
 #define CMD_OTA_BEGIN     0x40
 #define CMD_OTA_CHUNK     0x41
 #define CMD_OTA_END       0x42
@@ -285,7 +284,6 @@ static uint8_t       event_count = 0;
 static bool     last_t1         = false;
 static bool     last_t2         = false;
 static uint32_t last_poll_ms    = 0;
-static bool     poll_received   = false;
 
 static uint8_t  rx_buf[40];
 static uint8_t  rx_pos          = 0;
@@ -436,10 +434,9 @@ static void self_unregister(void) {
     wipe_registration();
     slot_address      = ADDR_UNASSIGNED;
     mode              = MODE_UNREGISTERED;
-    poll_received     = false;
     announce_interval = 2000;
     last_announce_ms  = 0;
-    blink_led3(5, 100);
+    for(uint8_t _i=0;_i<5;_i++){PIN_SET(PIN_LED3);delay(100);PIN_CLR(PIN_LED3);delay(100);}
 }
 
 /* ================================================================
@@ -569,10 +566,9 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         buf[4]=(uptime_s>> 8)&0xFF; buf[5]=(uptime_s)    &0xFF;
         send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
         last_poll_ms      = millis();
-        poll_received     = false;
-        last_announce_ms  = millis() + 30000UL;
+            last_announce_ms  = millis() + 30000UL;
         announce_interval = 2000;
-        blink_led3(2, 100);
+        for(uint8_t _i=0;_i<2;_i++){PIN_SET(PIN_LED3);delay(100);PIN_CLR(PIN_LED3);delay(100);}
         return;
     }
 
@@ -617,8 +613,7 @@ static void process_frame(uint8_t *frame, uint8_t len) {
 
     case CMD_GET_STATE:
         last_poll_ms  = millis();
-        poll_received = true;
-        send_state_resp();
+            send_state_resp();
         break;
 
     case CMD_SET_RELAY:
@@ -631,12 +626,6 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     case CMD_DRAIN_EVENTS:
         if (plen < 1) break;
         drain_events(p[0]);
-        break;
-
-    case CMD_IDENTIFY:
-        { uint8_t bmax = (plen > 0 ? p[0] : 3) * 4;
-          blink_led3(bmax, 125);
-        }
         break;
 
     case CMD_BUS_QUIET:
@@ -685,16 +674,7 @@ static void bus_rx_tick(void) {
 /* ================================================================
  * LED BLINK HELPER + STARTUP BLINK
  * ================================================================ */
-static void blink_led3(uint8_t count, uint16_t ms) {
-    for (uint8_t i = 0; i < count; i++) {
-        PIN_SET(PIN_LED3); delay(ms);
-        PIN_CLR(PIN_LED3); delay(ms);
-    }
-}
 
-static void startup_blink(void) {
-    blink_led3((mode == MODE_UNREGISTERED) ? 5 : 2, 200);
-}
 
 /* ================================================================
  * SETUP
@@ -722,7 +702,6 @@ void setup() {
       }
     }
     last_poll_ms = millis();
-    startup_blink();
 }
 
 /* ================================================================
