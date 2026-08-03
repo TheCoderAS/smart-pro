@@ -436,7 +436,6 @@ static void self_unregister(void) {
     mode              = MODE_UNREGISTERED;
     announce_interval = 2000;
     last_announce_ms  = 0;
-    for(uint8_t _i=0;_i<5;_i++){PIN_SET(PIN_LED3);delay(100);PIN_CLR(PIN_LED3);delay(100);}
 }
 
 /* ================================================================
@@ -568,7 +567,6 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         last_poll_ms      = millis();
             last_announce_ms  = millis() + 30000UL;
         announce_interval = 2000;
-        for(uint8_t _i=0;_i<2;_i++){PIN_SET(PIN_LED3);delay(100);PIN_CLR(PIN_LED3);delay(100);}
         return;
     }
 
