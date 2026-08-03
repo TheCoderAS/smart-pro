@@ -241,11 +241,6 @@ static uint32_t compute_response(const uint8_t *challenge) {
 /* ================================================================
  * PSEUDO-RANDOM
  * ================================================================ */
-static uint32_t rand_seed = 0;
-static uint16_t pseudo_rand(uint16_t max) {
-    rand_seed = rand_seed * 1664525UL + 1013904223UL;
-    return (uint16_t)((rand_seed >> 16) % max);
-}
 
 /* ================================================================
  * STATE
@@ -676,8 +671,6 @@ void setup() {
     usart1_init();
     /* Seed random from UID */
     uid_init();
-    rand_seed = ((uint32_t)device_uid[0]<<24)|((uint32_t)device_uid[1]<<16)|
-                ((uint32_t)device_uid[2]<< 8)|(uint32_t)device_uid[3];
     load_state();
     /* Boot relay state:
      * Registered to a real master --> boot OFF, master restores on first poll
@@ -708,7 +701,7 @@ void loop() {
     case MODE_UNREGISTERED:
         if ((millis() - last_announce_ms) >= announce_interval) {
             last_announce_ms  = millis();
-            announce_interval = 2000 + pseudo_rand(500);
+            announce_interval = 2000 + (device_uid[3] & 0xFF);
             send_announce();
         }
         break;
