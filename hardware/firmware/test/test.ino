@@ -440,12 +440,6 @@ static void push_event(uint8_t ch, uint8_t s) {
     else event_tail = (event_tail + 1) & 7;
 }
 
-static void drain_events(uint8_t count) {
-    for (uint8_t i = 0; i < count && event_count > 0; i++) {
-        event_tail = (event_tail + 1) & 7;
-        event_count--;
-    }
-}
 
 /* ================================================================
  * TOUCH HANDLER
@@ -521,17 +515,11 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     if (cmd == CMD_WELCOME) {
         if (plen < 10) return;
         if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
-        if (mode == MODE_REGISTERED) {
-            bool stored_valid =
-                (master_uid[0]!=0xA5||master_uid[1]!=0xA5||
-                 master_uid[2]!=0xA5||master_uid[3]!=0xA5) &&
-                (master_uid[0]!=0x00||master_uid[1]!=0x00||
-                 master_uid[2]!=0x00||master_uid[3]!=0x00);
-            if (stored_valid) {
-                bool same = (p[6]==master_uid[0]&&p[7]==master_uid[1]&&
-                             p[8]==master_uid[2]&&p[9]==master_uid[3]);
-                if (!same) { send_frame(ADDR_MASTER,CMD_ERROR,uid,4); return; }
-            }
+        if (mode==MODE_REGISTERED &&
+            (master_uid[0]||master_uid[1]||master_uid[2]||master_uid[3])) {
+            if (p[6]!=master_uid[0]||p[7]!=master_uid[1]||
+                p[8]!=master_uid[2]||p[9]!=master_uid[3])
+                { send_frame(ADDR_MASTER,CMD_ERROR,uid,4); return; }
         }
         uint8_t new_addr = p[4];
         bool    new_r1   = (p[5] & 0x01) != 0;
@@ -595,8 +583,8 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         break;
 
     case CMD_DRAIN_EVENTS:
-        if (plen < 1) break;
-        drain_events(p[0]);
+        if (plen>=1) { uint8_t _n=p[0];
+          while(_n-->0&&event_count>0){event_tail=(event_tail+1)&7;event_count--;} }
         break;
 
     case CMD_BUS_QUIET:
