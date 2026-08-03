@@ -275,7 +275,7 @@ static bool     last_t1         = false;
 static bool     last_t2         = false;
 static uint32_t last_poll_ms    = 0;
 
-static uint8_t  rx_buf[40];
+static uint8_t  rx_buf[25];
 static uint8_t  rx_pos          = 0;
 static uint8_t  rx_elen         = 0;
 
@@ -390,13 +390,13 @@ static void rs485_send(uint8_t *frame, uint8_t len) {
 
 static void send_frame(uint8_t dst, uint8_t cmd,
                        uint8_t *payload, uint8_t plen) {
-    uint8_t frame[40];
+    uint8_t frame[30];
     frame[0] = SOF;
     frame[1] = dst;
     frame[2] = slot_address;
     frame[3] = cmd;
     frame[4] = plen;
-    memcpy(&frame[5], payload, plen);
+    for(uint8_t _i=0;_i<plen;_i++) frame[5+_i]=payload[_i];
     frame[5 + plen] = crc8(&frame[1], 4 + plen);
     rs485_send(frame, 6 + plen);
 }
@@ -563,17 +563,11 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         if (plen < 8) return;
         if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
         uint32_t resp = compute_response(&p[4]);
-        uint8_t payload[8];
-        payload[0]=uid[0]; payload[1]=uid[1];
-        payload[2]=uid[2]; payload[3]=uid[3];
-        payload[4]=(resp>>24)&0xFF; payload[5]=(resp>>16)&0xFF;
-        payload[6]=(resp>> 8)&0xFF; payload[7]=(resp)    &0xFF;
-        uint8_t fr[14];
-        fr[0]=SOF; fr[1]=ADDR_MASTER; fr[2]=ADDR_UNASSIGNED;
-        fr[3]=CMD_RESPONSE; fr[4]=8;
-        for(uint8_t _i=0;_i<8;_i++) fr[5+_i]=payload[_i];
-        fr[13]=crc8(&fr[1],12);
-        rs485_send(fr,14);
+        uint8_t pl[8] = {uid[0],uid[1],uid[2],uid[3],
+            (resp>>24)&0xFF,(resp>>16)&0xFF,(resp>>8)&0xFF,resp&0xFF};
+        uint8_t saved=slot_address; slot_address=ADDR_UNASSIGNED;
+        send_frame(ADDR_MASTER, CMD_RESPONSE, pl, 8);
+        slot_address=saved;
         return;
     }
 
@@ -637,7 +631,7 @@ static void bus_rx_tick(void) {
         if (rx_pos == 0) {
             if (b == SOF) rx_buf[rx_pos++] = b;
         } else {
-            if (rx_pos >= sizeof(rx_buf)) { rx_pos=0; rx_elen=0; return; }
+            if (rx_pos >= 25) { rx_pos=0; rx_elen=0; return; }
             rx_buf[rx_pos++] = b;
             if (rx_pos == 5) rx_elen = 6 + rx_buf[4];
             if (rx_elen > 0 && rx_pos >= rx_elen) {
