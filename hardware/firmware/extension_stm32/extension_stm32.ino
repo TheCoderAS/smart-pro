@@ -22,9 +22,6 @@
  */
 
 #include "Arduino.h"   /* millis(), delay() only */
-#include <stm32g0xx_ll_usart.h>
-#include <stm32g0xx_ll_gpio.h>
-#include <stm32g0xx_ll_bus.h>
 
 /* ================================================================
  * GPIO BIT-BANG MACROS (replaces digitalWrite/pinMode)
@@ -60,7 +57,6 @@
 #define CMD_GET_STATE     0x21
 #define CMD_STATE_RESP    0x22
 #define CMD_DRAIN_EVENTS  0x23
-#define CMD_IDENTIFY      0x30
 #define CMD_OTA_BEGIN     0x40
 #define CMD_OTA_CHUNK     0x41
 #define CMD_OTA_END       0x42
@@ -102,11 +98,6 @@ static const uint8_t SECRET_KEY[16] = {
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
 static uint8_t nvs_shadow[8];
 
-static void nvs_load(void) {
-    volatile uint8_t *p = (volatile uint8_t *)NVS_PAGE_ADDR;
-    for (uint8_t i = 0; i < 8; i++) nvs_shadow[i] = p[i];
-}
-
 static void nvs_flush(void) {
     if (READ_BIT(FLASH->CR, FLASH_CR_LOCK)) {
         WRITE_REG(FLASH->KEYR, 0x45670123UL);
@@ -123,8 +114,8 @@ static void nvs_flush(void) {
     SET_BIT(FLASH->CR, FLASH_CR_PG);
     volatile uint32_t *dst = (volatile uint32_t *)NVS_PAGE_ADDR;
     uint32_t w0, w1;
-    memcpy(&w0, &nvs_shadow[0], 4);
-    memcpy(&w1, &nvs_shadow[4], 4);
+    w0 = *(uint32_t*)&nvs_shadow[0];
+    w1 = *(uint32_t*)&nvs_shadow[4];
     dst[0] = w0; __ISB(); dst[1] = w1;
     t = millis();
     while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t) < 500);
@@ -137,79 +128,63 @@ static void nvs_flush(void) {
  * USART1 LL DRIVER (PA_9=TX, PA_10=RX, 250000 baud)
  * ================================================================ */
 static void usart1_init(void) {
-    /* Enable clocks */
-    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
-    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);  
-    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
-
+    /* Enable USART1, SYSCFG, GPIOA clocks */
+    RCC->APBENR2 |= RCC_APBENR2_USART1EN | RCC_APBENR2_SYSCFGEN;
+    RCC->IOPENR  |= RCC_IOPENR_GPIOAEN;
+    /* SYSCFG remap -- required for USART1 on G030 */
     SYSCFG->CFGR1 |= SYSCFG_CFGR1_PA11_RMP | SYSCFG_CFGR1_PA12_RMP;
-    
-    /* PA9 = TX (AF1), PA10 = RX (AF1) */
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_9,  LL_GPIO_MODE_ALTERNATE);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_10, LL_GPIO_MODE_ALTERNATE);
-    LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_9,  LL_GPIO_AF_1);
-    LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_10, LL_GPIO_AF_1);
-    LL_GPIO_SetPinSpeed(GPIOA, LL_GPIO_PIN_9,  LL_GPIO_SPEED_FREQ_HIGH);
-    LL_GPIO_SetPinOutputType(GPIOA, LL_GPIO_PIN_9, LL_GPIO_OUTPUT_PUSHPULL);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_10, LL_GPIO_PULL_UP);
-
-    /* Configure USART1 */
-    LL_USART_SetBaudRate(USART1, SystemCoreClock, LL_USART_PRESCALER_DIV1,
-                         LL_USART_OVERSAMPLING_16, UART_BAUD);
-    LL_USART_SetDataWidth(USART1,    LL_USART_DATAWIDTH_8B);
-    LL_USART_SetStopBitsLength(USART1, LL_USART_STOPBITS_1);
-    LL_USART_SetParity(USART1,       LL_USART_PARITY_NONE);
-    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX_RX);
-    LL_USART_Enable(USART1);
-    while (!LL_USART_IsActiveFlag_TEACK(USART1) ||
-           !LL_USART_IsActiveFlag_REACK(USART1));
+    /* PA9 = AF1 TX: high speed, push-pull */
+    GPIOA->MODER   = (GPIOA->MODER   & ~(3u<<18)) | (2u<<18);
+    GPIOA->AFR[1]  = (GPIOA->AFR[1]  & ~(15u<<4)) | (1u<<4);
+    GPIOA->OSPEEDR = (GPIOA->OSPEEDR & ~(3u<<18)) | (3u<<18);
+    GPIOA->OTYPER &= ~(1u<<9);
+    /* PA10 = AF1 RX: pull-up */
+    GPIOA->MODER  = (GPIOA->MODER  & ~(3u<<20)) | (2u<<20);
+    GPIOA->AFR[1] = (GPIOA->AFR[1] & ~(15u<<8)) | (1u<<8);
+    GPIOA->PUPDR  = (GPIOA->PUPDR  & ~(3u<<20)) | (1u<<20);
+    /* USART1: 8N1, 250000 baud, TX+RX enabled */
+    USART1->CR1  = 0;
+    USART1->CR2  = 0;
+    USART1->CR3  = 0;
+    USART1->PRESC = 0;
+    USART1->BRR  = (64000000UL / 250000UL);
+    USART1->CR1  = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
+    uint32_t t   = millis();
+    while (!(USART1->ISR & USART_ISR_TEACK) && (millis()-t) < 100);
+    while (!(USART1->ISR & USART_ISR_REACK) && (millis()-t) < 100);
 }
 
 static void usart1_write_byte(uint8_t b) {
-    while (!LL_USART_IsActiveFlag_TXE(USART1));
-    LL_USART_TransmitData8(USART1, b);
+    while (!(USART1->ISR & USART_ISR_TXE_TXFNF));
+    USART1->TDR = b;
 }
 
 static void usart1_wait_tc(void) {
-    while (!LL_USART_IsActiveFlag_TC(USART1));
+    while (!(USART1->ISR & USART_ISR_TC));
 }
 
 static bool usart1_available(void) {
-    if (LL_USART_IsActiveFlag_ORE(USART1))
-        LL_USART_ClearFlag_ORE(USART1);
-    return LL_USART_IsActiveFlag_RXNE(USART1);
+    if (USART1->ISR & USART_ISR_ORE) USART1->ICR = USART_ICR_ORECF;
+    return (USART1->ISR & USART_ISR_RXNE_RXFNE) != 0;
 }
 
 static uint8_t usart1_read_byte(void) {
-    return LL_USART_ReceiveData8(USART1);
+    return USART1->RDR & 0xFF;
 }
 
 /* ================================================================
  * GPIO INIT (replaces pinMode/digitalWrite)
  * ================================================================ */
 static void gpio_init(void) {
-    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
-
-    /* Output pins: RS485_DE, RELAY1, RELAY2, LED1, LED2, LED3 */
-    uint32_t out_pins = LL_GPIO_PIN_0|LL_GPIO_PIN_1|LL_GPIO_PIN_2|
-                        LL_GPIO_PIN_5|LL_GPIO_PIN_6|LL_GPIO_PIN_7;
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_1, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_2, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_5, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_6, LL_GPIO_MODE_OUTPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_7, LL_GPIO_MODE_OUTPUT);
-
-    /* Input pins: TOUCH1 (PA3), TOUCH2 (PA4) -- no pull, TTP223 drives actively */
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_3, LL_GPIO_MODE_INPUT);
-    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_4, LL_GPIO_MODE_INPUT);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_3, LL_GPIO_PULL_NO);
-    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_4, LL_GPIO_PULL_NO);
-
-    /* Set relay pins HIGH before driving as output (active LOW = OFF at boot) */
-    GPIOA->BSRR = LL_GPIO_PIN_1 | LL_GPIO_PIN_2;
-    /* All other outputs LOW */
-    GPIOA->BRR  = LL_GPIO_PIN_0 | LL_GPIO_PIN_5 | LL_GPIO_PIN_6 | LL_GPIO_PIN_7;
+    RCC->IOPENR |= RCC_IOPENR_GPIOAEN;
+    /* Relay HIGH before output (active LOW = OFF) */
+    GPIOA->BSRR = (1u<<1)|(1u<<2);
+    GPIOA->BRR  = (1u<<0)|(1u<<5)|(1u<<6)|(1u<<7);
+    /* PA0,1,2,5,6,7=output PA3,4=input no-pull */
+    GPIOA->MODER = (GPIOA->MODER
+        & ~((3u<<0)|(3u<<2)|(3u<<4)|(3u<<6)|(3u<<8)|(3u<<10)|(3u<<12)|(3u<<14)))
+        |  ((1u<<0)|(1u<<2)|(1u<<4)|(1u<<10)|(1u<<12)|(1u<<14));
+    GPIOA->PUPDR = (GPIOA->PUPDR & ~((3u<<6)|(3u<<8)));
 }
 
 /* ================================================================
@@ -229,14 +204,10 @@ static void uid_init(void) {
 /* ================================================================
  * CRC-8
  * ================================================================ */
-static uint8_t crc8(uint8_t *data, uint8_t len) {
-    uint8_t crc = 0x00;
-    while (len--) {
-        crc ^= *data++;
-        for (uint8_t i = 0; i < 8; i++)
-            crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1;
-    }
-    return crc;
+static uint8_t crc8(uint8_t *d, uint8_t n) {
+    uint8_t c=0;
+    while(n--){c^=*d++;for(uint8_t i=8;i--;)c=c&0x80?(c<<1)^7:c<<1;}
+    return c;
 }
 
 /* ================================================================
@@ -244,33 +215,22 @@ static uint8_t crc8(uint8_t *data, uint8_t len) {
  * Reset unit, feed data word by word, read result.
  * Saves ~200 bytes vs software loop.
  * ================================================================ */
-static uint32_t crc32_compute(const uint8_t *data, uint8_t len) {
-    /* SW CRC32/ISO-HDLC -- matches master firmware exactly */
-    uint32_t crc = 0xFFFFFFFF;
-    while (len--) {
-        crc ^= *data++;
-        for (uint8_t i = 0; i < 8; i++)
-            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
-    }
-    return crc ^ 0xFFFFFFFF;
+static uint32_t crc32_compute(const uint8_t *d, uint8_t n) {
+    uint32_t c=0xFFFFFFFF;
+    while(n--){c^=*d++;for(uint8_t i=8;i--;)c=c&1?(c>>1)^0xEDB88320UL:c>>1;}
+    return c^0xFFFFFFFF;
 }
 
-static uint32_t compute_response(const uint8_t *challenge) {
-    uint8_t buf[24];
-    for (uint8_t i = 0; i < 16; i++) buf[i]    = SECRET_KEY[i];
-    for (uint8_t i = 0; i < 4;  i++) buf[16+i] = challenge[i];
-    for (uint8_t i = 0; i < 4;  i++) buf[20+i] = device_uid[i];
-    return crc32_compute(buf, 24);
+static uint32_t compute_response(const uint8_t *ch) {
+    uint8_t b[24];
+    for(uint8_t i=0;i<16;i++) b[i]=SECRET_KEY[i];
+    for(uint8_t i=0;i<4;i++){b[16+i]=ch[i];b[20+i]=device_uid[i];}
+    return crc32_compute(b,24);
 }
 
 /* ================================================================
  * PSEUDO-RANDOM
  * ================================================================ */
-static uint32_t rand_seed = 0;
-static uint16_t pseudo_rand(uint16_t max) {
-    rand_seed = rand_seed * 1664525UL + 1013904223UL;
-    return (uint16_t)((rand_seed >> 16) % max);
-}
 
 /* ================================================================
  * STATE
@@ -290,11 +250,10 @@ static uint8_t    master_uid[4] = {0};
 static bool       relay1_state  = false;
 static bool       relay2_state  = false;
 
-#define EVENT_BUF_SIZE 16
+#define EVENT_BUF_SIZE 8
 typedef struct {
-    uint8_t  channel;
-    uint8_t  state;
-    uint32_t ts_ms;
+    uint8_t channel;
+    uint8_t state;
 } touch_event_t;
 
 static touch_event_t event_buf[EVENT_BUF_SIZE];
@@ -305,9 +264,8 @@ static uint8_t       event_count = 0;
 static bool     last_t1         = false;
 static bool     last_t2         = false;
 static uint32_t last_poll_ms    = 0;
-static bool     poll_received   = false;
 
-static uint8_t  rx_buf[40];
+static uint8_t  rx_buf[25];
 static uint8_t  rx_pos          = 0;
 static uint8_t  rx_elen         = 0;
 
@@ -319,20 +277,13 @@ static uint32_t announce_interval = 2000;
  * Registered: 32 * 125ms = 4s cycle
  * Unregistered: 32 * 31ms = ~1s cycle
  * ================================================================ */
-static const uint8_t BREATH_TABLE[32] = {
-      2,   4,  10,  20,  34,  51,  71,  93,
-    115, 137, 157, 175, 190, 202, 210, 215,
-    217, 215, 210, 202, 190, 175, 157, 137,
-    115,  93,  71,  51,  34,  20,  10,   4
-};
+/* breath computed inline */
 
 static void tim17_pwm_init(void) {
-    SET_BIT(RCC->APBENR2, RCC_APBENR2_TIM17EN);
-    LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
-    LL_GPIO_SetPinMode(GPIOA,      LL_GPIO_PIN_7, LL_GPIO_MODE_ALTERNATE);
-    LL_GPIO_SetAFPin_0_7(GPIOA,    LL_GPIO_PIN_7, LL_GPIO_AF_5);
-    LL_GPIO_SetPinSpeed(GPIOA,     LL_GPIO_PIN_7, LL_GPIO_SPEED_FREQ_LOW);
-    LL_GPIO_SetPinOutputType(GPIOA,LL_GPIO_PIN_7, LL_GPIO_OUTPUT_PUSHPULL);
+    RCC->APBENR2 |= RCC_APBENR2_TIM17EN;
+    /* PA7 = AF5 (TIM17_CH1) push-pull */
+    GPIOA->MODER  = (GPIOA->MODER  & ~(3u<<14)) | (2u<<14);
+    GPIOA->AFR[0] = (GPIOA->AFR[0] & ~(15u<<28)) | (5u<<28);
     TIM17->PSC   = 0;
     TIM17->ARR   = 255;
     TIM17->CCR1  = 0;
@@ -348,7 +299,8 @@ static void breath_tick(void) {
     uint32_t interval = (mode == MODE_REGISTERED) ? 125 : 31;
     if ((millis() - last_ms) < interval) return;
     last_ms = millis();
-    TIM17->CCR1 = BREATH_TABLE[step & 0x1F];
+    uint8_t s = step & 0x1F;
+    TIM17->CCR1 = (s < 16) ? (uint32_t)(s << 4) : (uint32_t)((31 - s) << 4);
     step++;
 }
 
@@ -359,27 +311,17 @@ static void breath_tick(void) {
  * PERSISTENCE
  * ================================================================ */
 static void load_state(void) {
-    nvs_load();
-    if (nvs_shadow[NVS_MAGIC] == NVS_MAGIC_VAL) {
-        /* Fully registered to a master */
-        slot_address  = nvs_shadow[NVS_ADDR];
-        master_uid[0] = nvs_shadow[NVS_MUID0];
-        master_uid[1] = nvs_shadow[NVS_MUID1];
-        master_uid[2] = nvs_shadow[NVS_MUID2];
-        master_uid[3] = nvs_shadow[NVS_MUID3];
-        relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
-        relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
-        mode          = MODE_REGISTERED;
-    } else if (nvs_shadow[NVS_MAGIC] == NVS_RELAY_MAGIC) {
-        /* Standalone -- relay state only, no master */
-        relay1_state  = (nvs_shadow[NVS_RELAY] & 0x01) != 0;
-        relay2_state  = (nvs_shadow[NVS_RELAY] & 0x02) != 0;
-        mode          = MODE_UNREGISTERED;
-        slot_address  = ADDR_UNASSIGNED;
+    volatile uint8_t *p=(volatile uint8_t*)NVS_PAGE_ADDR;
+    for(uint8_t i=0;i<8;i++) nvs_shadow[i]=p[i];
+    relay1_state=(nvs_shadow[NVS_RELAY]&0x01)!=0;
+    relay2_state=(nvs_shadow[NVS_RELAY]&0x02)!=0;
+    if (nvs_shadow[NVS_MAGIC]==NVS_MAGIC_VAL) {
+        slot_address=nvs_shadow[NVS_ADDR];
+        master_uid[0]=nvs_shadow[NVS_MUID0]; master_uid[1]=nvs_shadow[NVS_MUID1];
+        master_uid[2]=nvs_shadow[NVS_MUID2]; master_uid[3]=nvs_shadow[NVS_MUID3];
+        mode=MODE_REGISTERED;
     } else {
-        /* No valid NVS */
-        mode          = MODE_UNREGISTERED;
-        slot_address  = ADDR_UNASSIGNED;
+        mode=MODE_UNREGISTERED; slot_address=ADDR_UNASSIGNED;
     }
 }
 
@@ -404,7 +346,7 @@ static void save_relay_state(void) {
 }
 
 static void wipe_registration(void) {
-    memset(nvs_shadow, 0, sizeof(nvs_shadow));
+    for(uint8_t i=0;i<8;i++) nvs_shadow[i]=0;
     nvs_flush();
 }
 
@@ -420,20 +362,20 @@ static void rs485_send(uint8_t *frame, uint8_t len) {
     PIN_CLR(PIN_RS485_DE);
     /* MAX3485 RX enable guard + flush echo bytes */
     __NOP(); __NOP(); __NOP(); __NOP();
-    if (LL_USART_IsActiveFlag_ORE(USART1)) LL_USART_ClearFlag_ORE(USART1);
-    if (LL_USART_IsActiveFlag_RXNE(USART1)) LL_USART_ReceiveData8(USART1);
+    if (USART1->ISR & USART_ISR_ORE) USART1->ICR = USART_ICR_ORECF;
+    if (USART1->ISR & USART_ISR_RXNE_RXFNE) (void)USART1->RDR;
     rx_pos = 0; rx_elen = 0;
 }
 
 static void send_frame(uint8_t dst, uint8_t cmd,
                        uint8_t *payload, uint8_t plen) {
-    uint8_t frame[40];
+    uint8_t frame[30];
     frame[0] = SOF;
     frame[1] = dst;
     frame[2] = slot_address;
     frame[3] = cmd;
     frame[4] = plen;
-    memcpy(&frame[5], payload, plen);
+    for(uint8_t _i=0;_i<plen;_i++) frame[5+_i]=payload[_i];
     frame[5 + plen] = crc8(&frame[1], 4 + plen);
     rs485_send(frame, 6 + plen);
 }
@@ -443,14 +385,14 @@ static void send_frame(uint8_t dst, uint8_t cmd,
  * ================================================================ */
 static void set_relay1(bool s) {
     relay1_state = s;
-    if (s) { PIN_CLR(PIN_RELAY1); PIN_SET(PIN_LED1); }  /* active LOW relay ON,  LED ON  */
-    else   { PIN_SET(PIN_RELAY1); PIN_CLR(PIN_LED1); }  /* active LOW relay OFF, LED OFF */
+    if (s) { PIN_CLR(PIN_RELAY1); PIN_SET(PIN_LED1); }
+    else   { PIN_SET(PIN_RELAY1); PIN_CLR(PIN_LED1); }
 }
 
 static void set_relay2(bool s) {
     relay2_state = s;
-    if (s) { PIN_CLR(PIN_RELAY2); PIN_SET(PIN_LED2); }  /* active LOW relay ON,  LED ON  */
-    else   { PIN_SET(PIN_RELAY2); PIN_CLR(PIN_LED2); }  /* active LOW relay OFF, LED OFF */
+    if (s) { PIN_CLR(PIN_RELAY2); PIN_SET(PIN_LED2); }
+    else   { PIN_SET(PIN_RELAY2); PIN_CLR(PIN_LED2); }
 }
 
 /* ================================================================
@@ -462,10 +404,8 @@ static void self_unregister(void) {
     wipe_registration();
     slot_address      = ADDR_UNASSIGNED;
     mode              = MODE_UNREGISTERED;
-    poll_received     = false;
     announce_interval = 2000;
     last_announce_ms  = 0;
-    blink_led3(5, 100);
 }
 
 /* ================================================================
@@ -474,18 +414,11 @@ static void self_unregister(void) {
 static void push_event(uint8_t ch, uint8_t s) {
     event_buf[event_head].channel = ch;
     event_buf[event_head].state   = s;
-    event_buf[event_head].ts_ms   = millis();
-    event_head = (event_head + 1) % EVENT_BUF_SIZE;
+    event_head = (event_head + 1) & 7;
     if (event_count < EVENT_BUF_SIZE) event_count++;
-    else event_tail = (event_tail + 1) % EVENT_BUF_SIZE;
+    else event_tail = (event_tail + 1) & 7;
 }
 
-static void drain_events(uint8_t count) {
-    for (uint8_t i = 0; i < count && event_count > 0; i++) {
-        event_tail = (event_tail + 1) % EVENT_BUF_SIZE;
-        event_count--;
-    }
-}
 
 /* ================================================================
  * TOUCH HANDLER
@@ -511,27 +444,21 @@ static void handle_touch(void) {
  * ANNOUNCE
  * ================================================================ */
 static void send_announce(void) {
-    uint8_t *uid = device_uid;
-    uint8_t frame[11];
-    frame[0]  = SOF;
-    frame[1]  = ADDR_MASTER;
-    frame[2]  = ADDR_UNASSIGNED;
-    frame[3]  = CMD_ANNOUNCE;
-    frame[4]  = 5;
-    frame[5]  = uid[0]; frame[6] = uid[1];
-    frame[7]  = uid[2]; frame[8] = uid[3];
-    frame[9]  = (relay1_state ? 0x01 : 0x00) |
-                (relay2_state ? 0x02 : 0x00) |
-                (event_count  ? 0x04 : 0x00);
-    frame[10] = crc8(&frame[1], 9);
-    rs485_send(frame, 11);
+    uint8_t payload[5];
+    payload[0]=device_uid[0]; payload[1]=device_uid[1];
+    payload[2]=device_uid[2]; payload[3]=device_uid[3];
+    payload[4]=(relay1_state?0x01:0x00)|(relay2_state?0x02:0x00)|(event_count?0x04:0x00);
+    /* send with src=ADDR_UNASSIGNED */
+    uint8_t saved=slot_address; slot_address=ADDR_UNASSIGNED;
+    send_frame(ADDR_MASTER, CMD_ANNOUNCE, payload, 5);
+    slot_address=saved;
 }
 
 /* ================================================================
  * STATE RESPONSE
  * ================================================================ */
 static void send_state_resp(void) {
-    uint8_t payload[3 + 5*5];
+    uint8_t payload[3 + 5*2];
     uint8_t plen = 0;
     uint8_t flags = 0;
     if (relay1_state)  flags |= 0x01;
@@ -543,13 +470,9 @@ static void send_state_resp(void) {
     uint8_t tail = event_tail;
     uint8_t cnt  = event_count < 5 ? event_count : 5;
     for (uint8_t ei = 0; ei < cnt; ei++) {
-        uint32_t ts  = event_buf[tail].ts_ms;
         payload[plen++] = event_buf[tail].channel;
         payload[plen++] = event_buf[tail].state;
-        payload[plen++] = (ts >> 16) & 0xFF;
-        payload[plen++] = (ts >>  8) & 0xFF;
-        payload[plen++] = (ts)       & 0xFF;
-        tail = (tail + 1) % EVENT_BUF_SIZE;
+        tail = (tail + 1) & 7;
     }
     send_frame(ADDR_MASTER, CMD_STATE_RESP, payload, plen);
 }
@@ -564,7 +487,6 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     uint8_t *p    = &frame[5];
     uint8_t *uid = device_uid;
     uint8_t  buf[8];
-    uint32_t uptime_s;
 
     if (frame[5 + plen] != crc8(&frame[1], 4 + plen)) return;
 
@@ -572,17 +494,11 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     if (cmd == CMD_WELCOME) {
         if (plen < 10) return;
         if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
-        if (mode == MODE_REGISTERED) {
-            bool stored_valid =
-                (master_uid[0]!=0xA5||master_uid[1]!=0xA5||
-                 master_uid[2]!=0xA5||master_uid[3]!=0xA5) &&
-                (master_uid[0]!=0x00||master_uid[1]!=0x00||
-                 master_uid[2]!=0x00||master_uid[3]!=0x00);
-            if (stored_valid) {
-                bool same = (p[6]==master_uid[0]&&p[7]==master_uid[1]&&
-                             p[8]==master_uid[2]&&p[9]==master_uid[3]);
-                if (!same) { send_frame(ADDR_MASTER,CMD_ERROR,uid,4); return; }
-            }
+        if (mode==MODE_REGISTERED &&
+            (master_uid[0]||master_uid[1]||master_uid[2]||master_uid[3])) {
+            if (p[6]!=master_uid[0]||p[7]!=master_uid[1]||
+                p[8]!=master_uid[2]||p[9]!=master_uid[3])
+                { send_frame(ADDR_MASTER,CMD_ERROR,uid,4); return; }
         }
         uint8_t new_addr = p[4];
         bool    new_r1   = (p[5] & 0x01) != 0;
@@ -590,20 +506,16 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         uint8_t m_uid[4] = {p[6],p[7],p[8],p[9]};
         save_registration(new_addr, m_uid);
         slot_address = new_addr;
-        memcpy(master_uid, m_uid, 4);
+        master_uid[0]=m_uid[0];master_uid[1]=m_uid[1];
+        master_uid[2]=m_uid[2];master_uid[3]=m_uid[3];
         mode = MODE_REGISTERED;
         set_relay1(new_r1);
         set_relay2(new_r2);
-        uptime_s = millis() / 1000;
         buf[0]=1; buf[1]=0;
-        buf[2]=(uptime_s>>24)&0xFF; buf[3]=(uptime_s>>16)&0xFF;
-        buf[4]=(uptime_s>> 8)&0xFF; buf[5]=(uptime_s)    &0xFF;
-        send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
+        send_frame(ADDR_MASTER, CMD_PONG, buf, 2);
         last_poll_ms      = millis();
-        poll_received     = false;
-        last_announce_ms  = millis() + 30000UL;
+            last_announce_ms  = millis() + 30000UL;
         announce_interval = 2000;
-        blink_led3(2, 100);
         return;
     }
 
@@ -618,17 +530,11 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         if (plen < 8) return;
         if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
         uint32_t resp = compute_response(&p[4]);
-        uint8_t payload[8];
-        payload[0]=uid[0]; payload[1]=uid[1];
-        payload[2]=uid[2]; payload[3]=uid[3];
-        payload[4]=(resp>>24)&0xFF; payload[5]=(resp>>16)&0xFF;
-        payload[6]=(resp>> 8)&0xFF; payload[7]=(resp)    &0xFF;
-        uint8_t fr[14];
-        fr[0]=SOF; fr[1]=ADDR_MASTER; fr[2]=ADDR_UNASSIGNED;
-        fr[3]=CMD_RESPONSE; fr[4]=8;
-        memcpy(&fr[5], payload, 8);
-        fr[13]=crc8(&fr[1],12);
-        rs485_send(fr,14);
+        uint8_t pl[8] = {uid[0],uid[1],uid[2],uid[3],
+            (resp>>24)&0xFF,(resp>>16)&0xFF,(resp>>8)&0xFF,resp&0xFF};
+        uint8_t saved=slot_address; slot_address=ADDR_UNASSIGNED;
+        send_frame(ADDR_MASTER, CMD_RESPONSE, pl, 8);
+        slot_address=saved;
         return;
     }
 
@@ -639,17 +545,13 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     switch (cmd) {
 
     case CMD_PING:
-        uptime_s = millis() / 1000;
         buf[0]=1; buf[1]=0;
-        buf[2]=(uptime_s>>24)&0xFF; buf[3]=(uptime_s>>16)&0xFF;
-        buf[4]=(uptime_s>> 8)&0xFF; buf[5]=(uptime_s)    &0xFF;
-        send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
+        send_frame(ADDR_MASTER,CMD_PONG,buf,2);
         break;
 
     case CMD_GET_STATE:
         last_poll_ms  = millis();
-        poll_received = true;
-        send_state_resp();
+            send_state_resp();
         break;
 
     case CMD_SET_RELAY:
@@ -660,14 +562,8 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         break;
 
     case CMD_DRAIN_EVENTS:
-        if (plen < 1) break;
-        drain_events(p[0]);
-        break;
-
-    case CMD_IDENTIFY:
-        { uint8_t bmax = (plen > 0 ? p[0] : 3) * 4;
-          blink_led3(bmax, 125);
-        }
+        if (plen>=1) { uint8_t _n=p[0];
+          while(_n-->0&&event_count>0){event_tail=(event_tail+1)&7;event_count--;} }
         break;
 
     case CMD_BUS_QUIET:
@@ -702,7 +598,7 @@ static void bus_rx_tick(void) {
         if (rx_pos == 0) {
             if (b == SOF) rx_buf[rx_pos++] = b;
         } else {
-            if (rx_pos >= sizeof(rx_buf)) { rx_pos=0; rx_elen=0; return; }
+            if (rx_pos >= 25) { rx_pos=0; rx_elen=0; return; }
             rx_buf[rx_pos++] = b;
             if (rx_pos == 5) rx_elen = 6 + rx_buf[4];
             if (rx_elen > 0 && rx_pos >= rx_elen) {
@@ -716,16 +612,7 @@ static void bus_rx_tick(void) {
 /* ================================================================
  * LED BLINK HELPER + STARTUP BLINK
  * ================================================================ */
-static void blink_led3(uint8_t count, uint16_t ms) {
-    for (uint8_t i = 0; i < count; i++) {
-        PIN_SET(PIN_LED3); delay(ms);
-        PIN_CLR(PIN_LED3); delay(ms);
-    }
-}
 
-static void startup_blink(void) {
-    blink_led3((mode == MODE_UNREGISTERED) ? 5 : 2, 200);
-}
 
 /* ================================================================
  * SETUP
@@ -736,8 +623,6 @@ void setup() {
     usart1_init();
     /* Seed random from UID */
     uid_init();
-    rand_seed = ((uint32_t)device_uid[0]<<24)|((uint32_t)device_uid[1]<<16)|
-                ((uint32_t)device_uid[2]<< 8)|(uint32_t)device_uid[3];
     load_state();
     /* Boot relay state:
      * Registered to a real master --> boot OFF, master restores on first poll
@@ -753,7 +638,6 @@ void setup() {
       }
     }
     last_poll_ms = millis();
-    startup_blink();
 }
 
 /* ================================================================
@@ -769,7 +653,7 @@ void loop() {
     case MODE_UNREGISTERED:
         if ((millis() - last_announce_ms) >= announce_interval) {
             last_announce_ms  = millis();
-            announce_interval = 2000 + pseudo_rand(500);
+            announce_interval = 2000 + (device_uid[3] & 0xFF);
             send_announce();
         }
         break;
