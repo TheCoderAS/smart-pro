@@ -114,8 +114,8 @@ static void nvs_flush(void) {
     SET_BIT(FLASH->CR, FLASH_CR_PG);
     volatile uint32_t *dst = (volatile uint32_t *)NVS_PAGE_ADDR;
     uint32_t w0, w1;
-    memcpy(&w0, &nvs_shadow[0], 4);
-    memcpy(&w1, &nvs_shadow[4], 4);
+    w0 = *(uint32_t*)&nvs_shadow[0];
+    w1 = *(uint32_t*)&nvs_shadow[4];
     dst[0] = w0; __ISB(); dst[1] = w1;
     t = millis();
     while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t) < 500);
@@ -367,7 +367,7 @@ static void save_relay_state(void) {
 }
 
 static void wipe_registration(void) {
-    memset(nvs_shadow, 0, sizeof(nvs_shadow));
+    for(uint8_t i=0;i<8;i++) nvs_shadow[i]=0;
     nvs_flush();
 }
 
@@ -471,20 +471,14 @@ static void handle_touch(void) {
  * ANNOUNCE
  * ================================================================ */
 static void send_announce(void) {
-    uint8_t *uid = device_uid;
-    uint8_t frame[11];
-    frame[0]  = SOF;
-    frame[1]  = ADDR_MASTER;
-    frame[2]  = ADDR_UNASSIGNED;
-    frame[3]  = CMD_ANNOUNCE;
-    frame[4]  = 5;
-    frame[5]  = uid[0]; frame[6] = uid[1];
-    frame[7]  = uid[2]; frame[8] = uid[3];
-    frame[9]  = (relay1_state ? 0x01 : 0x00) |
-                (relay2_state ? 0x02 : 0x00) |
-                (event_count  ? 0x04 : 0x00);
-    frame[10] = crc8(&frame[1], 9);
-    rs485_send(frame, 11);
+    uint8_t payload[5];
+    payload[0]=device_uid[0]; payload[1]=device_uid[1];
+    payload[2]=device_uid[2]; payload[3]=device_uid[3];
+    payload[4]=(relay1_state?0x01:0x00)|(relay2_state?0x02:0x00)|(event_count?0x04:0x00);
+    /* send with src=ADDR_UNASSIGNED */
+    uint8_t saved=slot_address; slot_address=ADDR_UNASSIGNED;
+    send_frame(ADDR_MASTER, CMD_ANNOUNCE, payload, 5);
+    slot_address=saved;
 }
 
 /* ================================================================
@@ -545,14 +539,13 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         uint8_t m_uid[4] = {p[6],p[7],p[8],p[9]};
         save_registration(new_addr, m_uid);
         slot_address = new_addr;
-        memcpy(master_uid, m_uid, 4);
+        master_uid[0]=m_uid[0];master_uid[1]=m_uid[1];
+        master_uid[2]=m_uid[2];master_uid[3]=m_uid[3];
         mode = MODE_REGISTERED;
         set_relay1(new_r1);
         set_relay2(new_r2);
-        { uint32_t u=millis()/1000; buf[0]=1;buf[1]=0;
-          buf[2]=(u>>24)&0xFF;buf[3]=(u>>16)&0xFF;
-          buf[4]=(u>>8)&0xFF;buf[5]=u&0xFF; }
-        send_frame(ADDR_MASTER, CMD_PONG, buf, 6);
+        buf[0]=1; buf[1]=0;
+        send_frame(ADDR_MASTER, CMD_PONG, buf, 2);
         last_poll_ms      = millis();
             last_announce_ms  = millis() + 30000UL;
         announce_interval = 2000;
@@ -578,7 +571,7 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         uint8_t fr[14];
         fr[0]=SOF; fr[1]=ADDR_MASTER; fr[2]=ADDR_UNASSIGNED;
         fr[3]=CMD_RESPONSE; fr[4]=8;
-        memcpy(&fr[5], payload, 8);
+        for(uint8_t _i=0;_i<8;_i++) fr[5+_i]=payload[_i];
         fr[13]=crc8(&fr[1],12);
         rs485_send(fr,14);
         return;
@@ -591,10 +584,8 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     switch (cmd) {
 
     case CMD_PING:
-        { uint32_t u=millis()/1000; buf[0]=1;buf[1]=0;
-          buf[2]=(u>>24)&0xFF;buf[3]=(u>>16)&0xFF;
-          buf[4]=(u>>8)&0xFF;buf[5]=u&0xFF;
-          send_frame(ADDR_MASTER,CMD_PONG,buf,6); }
+        buf[0]=1; buf[1]=0;
+        send_frame(ADDR_MASTER,CMD_PONG,buf,2);
         break;
 
     case CMD_GET_STATE:
