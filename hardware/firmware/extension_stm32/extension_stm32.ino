@@ -92,36 +92,51 @@ static const uint8_t SECRET_KEY[16] = {
 #define NVS_MUID1       4
 #define NVS_MUID2       5
 #define NVS_MUID3       6
+#define NVS_OTA_SLOT    7     /* 1 byte: 0x00=Slot A, 0x01=Slot B */
 #define NVS_MAGIC_VAL   0xA5  /* registered to master */
 #define NVS_RELAY_MAGIC 0x5A  /* standalone relay state only */
+#define OTA_SLOT_A      0x00
+#define OTA_SLOT_B      0x01
+
+/* Flash layout (with bootloader):
+ * 0x08000000 - 0x08000800  Bootloader (2KB)
+ * 0x08000800 - 0x08003FFF  Slot A -- active app (14KB)
+ * 0x08004000 - 0x08007800  Slot B -- OTA target (14KB)
+ * 0x08007800 - 0x08007FFF  NVS (2KB, page 15)
+ */
+#define SLOT_B_ADDR     0x08004000UL
+#define SLOT_SIZE       (14UL * 1024UL)
+#define OTA_CHUNK_SIZE  32
 
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
 static uint8_t nvs_shadow[8];
 
+/* Shared flash primitives */
+static void flash_unlock(void) {
+    if(FLASH->CR&FLASH_CR_LOCK){FLASH->KEYR=0x45670123UL;FLASH->KEYR=0xCDEF89ABUL;}
+}
+static void flash_wait(uint32_t ms) {
+    uint32_t t=millis();
+    while((FLASH->SR&FLASH_SR_BSY1)&&(millis()-t)<ms);
+    FLASH->SR=FLASH_SR_EOP;
+}
+static void flash_erase_page(uint32_t addr) {
+    FLASH->SR=0xFFFFFFFF;
+    FLASH->CR=((addr-FLASH_BASE)/NVS_PAGE_SIZE<<FLASH_CR_PNB_Pos)|FLASH_CR_PER|FLASH_CR_STRT;
+    flash_wait(500);
+    FLASH->CR&=~FLASH_CR_PER;
+}
+static void flash_write_dwords(volatile uint32_t *dst, const uint32_t *src, uint8_t n) {
+    FLASH->CR|=FLASH_CR_PG;
+    while(n--){*dst++=*src++;__ISB();*dst++=*src++;flash_wait(100);}
+    FLASH->CR&=~FLASH_CR_PG;
+}
+
 static void nvs_flush(void) {
-    if (READ_BIT(FLASH->CR, FLASH_CR_LOCK)) {
-        WRITE_REG(FLASH->KEYR, 0x45670123UL);
-        WRITE_REG(FLASH->KEYR, 0xCDEF89ABUL);
-    }
-    WRITE_REG(FLASH->SR, 0xFFFFFFFF);
-    MODIFY_REG(FLASH->CR, FLASH_CR_PNB, (15u << FLASH_CR_PNB_Pos));
-    SET_BIT(FLASH->CR, FLASH_CR_PER);
-    SET_BIT(FLASH->CR, FLASH_CR_STRT);
-    uint32_t t = millis();
-    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t) < 500);
-    CLEAR_BIT(FLASH->CR, FLASH_CR_PER);
-    WRITE_REG(FLASH->SR, FLASH_SR_EOP);
-    SET_BIT(FLASH->CR, FLASH_CR_PG);
-    volatile uint32_t *dst = (volatile uint32_t *)NVS_PAGE_ADDR;
-    uint32_t w0, w1;
-    w0 = *(uint32_t*)&nvs_shadow[0];
-    w1 = *(uint32_t*)&nvs_shadow[4];
-    dst[0] = w0; __ISB(); dst[1] = w1;
-    t = millis();
-    while (READ_BIT(FLASH->SR, FLASH_SR_BSY1) && (millis()-t) < 500);
-    CLEAR_BIT(FLASH->CR, FLASH_CR_PG);
-    WRITE_REG(FLASH->SR, FLASH_SR_EOP);
-    SET_BIT(FLASH->CR, FLASH_CR_LOCK);
+    flash_unlock();
+    flash_erase_page(NVS_PAGE_ADDR);
+    flash_write_dwords((volatile uint32_t*)NVS_PAGE_ADDR,(const uint32_t*)nvs_shadow,1);
+    FLASH->CR|=FLASH_CR_LOCK;
 }
 
 /* ================================================================
@@ -194,11 +209,9 @@ static void gpio_init(void) {
 static uint8_t device_uid[4] = {0};
 
 static void uid_init(void) {
-    uint32_t w = ((volatile uint32_t *)0x1FFF7590UL)[2];
-    device_uid[0] = (w >> 24) & 0xFF;
-    device_uid[1] = (w >> 16) & 0xFF;
-    device_uid[2] = (w >>  8) & 0xFF;
-    device_uid[3] = (w)       & 0xFF;
+    uint32_t w=((volatile uint32_t*)0x1FFF7590UL)[2];
+    device_uid[0]=(w>>24)&0xFF;device_uid[1]=(w>>16)&0xFF;
+    device_uid[2]=(w>>8)&0xFF; device_uid[3]=w&0xFF;
 }
 
 /* ================================================================
@@ -411,29 +424,28 @@ static void self_unregister(void) {
 /* ================================================================
  * TOUCH EVENT BUFFER
  * ================================================================ */
-static void push_event(uint8_t ch, uint8_t s) {
-    event_buf[event_head].channel = ch;
-    event_buf[event_head].state   = s;
-    event_head = (event_head + 1) & 7;
-    if (event_count < EVENT_BUF_SIZE) event_count++;
-    else event_tail = (event_tail + 1) & 7;
-}
 
 
 /* ================================================================
  * TOUCH HANDLER
  * ================================================================ */
+static void push_event(uint8_t ch, uint8_t s) {
+    event_buf[event_head].channel=ch; event_buf[event_head].state=s;
+    event_head=(event_head+1)&7;
+    if(event_count<8)event_count++;else event_tail=(event_tail+1)&7;
+}
+
 static void handle_touch(void) {
     bool t1 = PIN_READ(PIN_TOUCH1);
     bool t2 = PIN_READ(PIN_TOUCH2);
     if (t1 && !last_t1) {
         set_relay1(!relay1_state);
-        push_event(1, relay1_state ? 1 : 0);
+        push_event(1,relay1_state);
         if (mode != MODE_REGISTERED) save_relay_state();
     }
     if (t2 && !last_t2) {
         set_relay2(!relay2_state);
-        push_event(2, relay2_state ? 1 : 0);
+        push_event(2,relay2_state);
         if (mode != MODE_REGISTERED) save_relay_state();
     }
     last_t1 = t1;
@@ -444,14 +456,11 @@ static void handle_touch(void) {
  * ANNOUNCE
  * ================================================================ */
 static void send_announce(void) {
-    uint8_t payload[5];
-    payload[0]=device_uid[0]; payload[1]=device_uid[1];
-    payload[2]=device_uid[2]; payload[3]=device_uid[3];
-    payload[4]=(relay1_state?0x01:0x00)|(relay2_state?0x02:0x00)|(event_count?0x04:0x00);
-    /* send with src=ADDR_UNASSIGNED */
-    uint8_t saved=slot_address; slot_address=ADDR_UNASSIGNED;
-    send_frame(ADDR_MASTER, CMD_ANNOUNCE, payload, 5);
-    slot_address=saved;
+    uint8_t f[11]={SOF,ADDR_MASTER,ADDR_UNASSIGNED,CMD_ANNOUNCE,5,
+        device_uid[0],device_uid[1],device_uid[2],device_uid[3],
+        (relay1_state?1:0)|(relay2_state?2:0)|(event_count?4:0),0};
+    f[10]=crc8(&f[1],9);
+    rs485_send(f,11);
 }
 
 /* ================================================================
@@ -480,6 +489,28 @@ static void send_state_resp(void) {
 /* ================================================================
  * PROCESS FRAME
  * ================================================================ */
+static uint32_t ota_total=0,ota_crc_ex=0;
+static void ota_set_slot(uint8_t s){nvs_shadow[NVS_OTA_SLOT]=s;nvs_flush();}
+
+static void ota_write_chunk(uint32_t off, const uint8_t *d, uint8_t len) {
+    uint32_t addr=SLOT_B_ADDR+off;
+    if(!(addr&(NVS_PAGE_SIZE-1))) flash_erase_page(addr);
+    FLASH->CR|=FLASH_CR_PG;
+    volatile uint32_t *dst=(volatile uint32_t*)addr;
+    while(len>=8){
+        uint32_t w0=*(uint32_t*)d,w1=*(uint32_t*)(d+4);
+        *dst++=w0;__ISB();*dst++=w1;
+        flash_wait(100);d+=8;len-=8;
+    }
+    if(len){
+        uint8_t b[8]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        for(uint8_t i=0;i<len;i++)b[i]=*d++;
+        *dst++=*(uint32_t*)&b[0];__ISB();*dst++=*(uint32_t*)&b[4];
+        flash_wait(100);
+    }
+    FLASH->CR&=~FLASH_CR_PG;
+}
+
 static void process_frame(uint8_t *frame, uint8_t len) {
     uint8_t  dst  = frame[1];
     uint8_t  cmd  = frame[3];
@@ -527,15 +558,13 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     }
 
     if (cmd == CMD_CHALLENGE) {
-        if (plen < 8) return;
-        if (p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
-        uint32_t resp = compute_response(&p[4]);
-        uint8_t pl[8] = {uid[0],uid[1],uid[2],uid[3],
-            (resp>>24)&0xFF,(resp>>16)&0xFF,(resp>>8)&0xFF,resp&0xFF};
-        uint8_t saved=slot_address; slot_address=ADDR_UNASSIGNED;
-        send_frame(ADDR_MASTER, CMD_RESPONSE, pl, 8);
-        slot_address=saved;
-        return;
+        if (plen<8||p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
+        uint32_t r=compute_response(&p[4]);
+        uint8_t f[14]={SOF,ADDR_MASTER,ADDR_UNASSIGNED,CMD_RESPONSE,8,
+            uid[0],uid[1],uid[2],uid[3],
+            (r>>24)&0xFF,(r>>16)&0xFF,(r>>8)&0xFF,r&0xFF,0};
+        f[13]=crc8(&f[1],12);
+        rs485_send(f,14); return;
     }
 
     /* Bus-address commands */
@@ -571,15 +600,32 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         break;
 
     case CMD_OTA_BEGIN:
-        mode   = MODE_OTA;
-        buf[0] = 0x00;
-        send_frame(ADDR_MASTER, CMD_OTA_ACK, buf, 1);
+        if(plen<8){buf[0]=0xFF;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
+        ota_total =((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
+        ota_crc_ex=((uint32_t)p[4]<<24)|((uint32_t)p[5]<<16)|((uint32_t)p[6]<<8)|p[7];
+        flash_unlock();
+        mode=MODE_OTA; buf[0]=0;
+        send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1); break;
+
+    case CMD_OTA_CHUNK:
+        if(plen<3||mode!=MODE_OTA){buf[0]=0xFF;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
+        {uint16_t ci=((uint16_t)p[0]<<8)|p[1];
+         uint32_t off=(uint32_t)ci*OTA_CHUNK_SIZE;
+         if(off+plen-2<=SLOT_SIZE) ota_write_chunk(off,&p[2],plen-2);
+         buf[0]=0;buf[1]=p[0];buf[2]=p[1];
+         send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,3);}
         break;
 
     case CMD_OTA_END:
-        buf[0] = 0x00;
-        send_frame(ADDR_MASTER, CMD_OTA_ACK, buf, 1);
-        mode = MODE_REGISTERED;
+        {uint32_t crc=crc32_compute((const uint8_t*)SLOT_B_ADDR,ota_total);
+         if(crc==ota_crc_ex){
+             buf[0]=0;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
+             ota_set_slot(OTA_SLOT_B);delay(50);NVIC_SystemReset();
+         }else{
+             buf[0]=1;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
+             FLASH->CR|=FLASH_CR_LOCK;
+             mode=MODE_REGISTERED;
+         }}
         break;
 
     default:
