@@ -81,8 +81,8 @@ static const uint8_t SECRET_KEY[16] = {
  * Page must be erased before write (erase sets all bytes to 0xFF)
  * Write 8 bytes (double-word) at a time
  * ================================================================ */
-#define NVS_PAGE_ADDR   0x08007800UL  /* last 2KB page */
-#define NVS_PAGE_SIZE   2048
+#define NVS_PAGE_ADDR   0x08006000UL  /* NVS start (8KB) */
+#define NVS_PAGE_SIZE   2048  /* flash erase page size */
 
 /* NVS byte offsets */
 #define NVS_MAGIC       0   /* 1 byte: 0xA5 */
@@ -92,21 +92,20 @@ static const uint8_t SECRET_KEY[16] = {
 #define NVS_MUID1       4
 #define NVS_MUID2       5
 #define NVS_MUID3       6
-#define NVS_OTA_SLOT    7     /* 1 byte: 0x00=Slot A, 0x01=Slot B */
 #define NVS_MAGIC_VAL   0xA5  /* registered to master */
 #define NVS_RELAY_MAGIC 0x5A  /* standalone relay state only */
-#define OTA_SLOT_A      0x00
-#define OTA_SLOT_B      0x01
+#define NVS_OTA_FLAG    7     /* byte 7: UPDATE_PENDING flag */
+#define UPDATE_PENDING  0xAA  /* bootloader will copy Slot B to Slot A */
 
 /* Flash layout (with bootloader):
- * 0x08000000 - 0x08000800  Bootloader (2KB)
- * 0x08000800 - 0x08003FFF  Slot A -- active app (14KB)
- * 0x08004000 - 0x08007800  Slot B -- OTA target (14KB)
- * 0x08007800 - 0x08007FFF  NVS (2KB, page 15)
+ * 0x08000000 - 0x08001000  Bootloader (4KB)
+ * 0x08001000 - 0x08003800  Slot A -- always runs here (10KB)
+ * 0x08003800 - 0x08006000  Slot B -- OTA staging (10KB)
+ * 0x08006000 - 0x08008000  NVS (8KB)
  */
-#define SLOT_B_ADDR     0x08004000UL
-#define SLOT_SIZE       (14UL * 1024UL)
-#define OTA_CHUNK_SIZE  32
+#define SLOT_B_ADDR      0x08003800UL
+#define SLOT_SIZE        (10UL * 1024UL)
+#define OTA_CHUNK_SIZE   32
 
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
 static uint8_t nvs_shadow[8];
@@ -309,7 +308,7 @@ static void tim17_pwm_init(void) {
 static void breath_tick(void) {
     static uint32_t last_ms = 0;
     static uint8_t  step    = 0;
-    uint32_t interval = (mode == MODE_REGISTERED) ? 125 : 31;
+    uint32_t interval = (mode == MODE_REGISTERED) ? 62 : 31;
     if ((millis() - last_ms) < interval) return;
     last_ms = millis();
     uint8_t s = step & 0x1F;
@@ -490,7 +489,6 @@ static void send_state_resp(void) {
  * PROCESS FRAME
  * ================================================================ */
 static uint32_t ota_total=0,ota_crc_ex=0;
-static void ota_set_slot(uint8_t s){nvs_shadow[NVS_OTA_SLOT]=s;nvs_flush();}
 
 static void ota_write_chunk(uint32_t off, const uint8_t *d, uint8_t len) {
     uint32_t addr=SLOT_B_ADDR+off;
@@ -620,7 +618,10 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         {uint32_t crc=crc32_compute((const uint8_t*)SLOT_B_ADDR,ota_total);
          if(crc==ota_crc_ex){
              buf[0]=0;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
-             ota_set_slot(OTA_SLOT_B);delay(50);NVIC_SystemReset();
+             /* Set UPDATE_PENDING flag -- bootloader will copy Slot B to Slot A */
+             nvs_shadow[NVS_OTA_FLAG]=UPDATE_PENDING;
+             nvs_flush();
+             delay(50);NVIC_SystemReset();
          }else{
              buf[0]=1;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
              FLASH->CR|=FLASH_CR_LOCK;
