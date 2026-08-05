@@ -2411,6 +2411,15 @@ static void setup_web(void) {
                 } else {
                     Serial.printf("[OTA] End failed: %s\n", Update.errorString());
                 }
+
+            } else if (upload.status == UPLOAD_FILE_ABORTED) {
+                /* Client dropped mid-upload: the completion handler never runs.
+                 * Roll back the Update session, otherwise it stays open and the
+                 * next OTA attempt fails with "Update already running", and
+                 * ota_in_progress stays set which permanently pauses task_bus. */
+                Update.abort();
+                ota_in_progress = false;
+                Serial.println("[OTA] Upload aborted, update rolled back");
             }
         }
     );
@@ -2490,6 +2499,14 @@ static void setup_web(void) {
 
             } else if (upload.status == UPLOAD_FILE_END) {
                 Serial.printf("[EXT-OTA] Received %u bytes\n", ext_ota_total);
+
+            } else if (upload.status == UPLOAD_FILE_ABORTED) {
+                /* Client dropped mid-upload: the completion handler never runs,
+                 * so release the buffer here or we leak 10KB per abort. */
+                if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
+                ext_ota_total   = 0;
+                ota_in_progress = false;
+                Serial.println("[EXT-OTA] Upload aborted, buffer released");
             }
         }
     );
