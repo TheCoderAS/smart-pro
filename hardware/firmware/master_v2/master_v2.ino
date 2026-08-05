@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.9.2
+ * Unisync - Master Firmware v11.9.5
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -25,10 +25,13 @@
 #include "Preferences.h"
 #include "Update.h"
 #include <LittleFS.h>
+#include <HTTPClient.h>
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.9.3"
+#define MASTER_FW_VERSION  "11.9.5"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -108,7 +111,9 @@ static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63,
 /* ================================================================
  * MESH CONFIG
  * ================================================================ */
-#define MAX_MESH_MASTERS   8     /* OTA-updatable */
+/* 16 supports a 10-master mesh (9 peers each) with headroom. Costs about
+ * 10 KB of SRAM; raise together with the mesh-status JSON buffer below. */
+#define MAX_MESH_MASTERS   16     /* OTA-updatable */
 #define MESH_GOSSIP_MS     500   /* state broadcast interval */
 #define MESH_PEER_TIMEOUT  10000 /* ms before peer marked offline */
 #define MESH_PIN_VALID_MS  300000 /* PIN expires after 5 minutes */
@@ -167,6 +172,9 @@ typedef struct {
     uint32_t      last_seen_ms;
     mesh_switch_t switches[12];
     uint8_t       switch_count;
+    uint8_t       fw[3];          /* peer's master firmware version */
+    int8_t        rssi;           /* how well we hear it -- pull proximity */
+    uint32_t      fw_fail_until;  /* per-peer cooldown after a failed pull */
 } mesh_peer_t;
 
 /* ESP-NOW packet header */
@@ -303,6 +311,22 @@ typedef struct {
     uint32_t crc;
 } fw_entry_t;
 
+/* ---- master firmware convergence ----
+ * Every master advertises its version. A master running an older build
+ * pulls the image straight off the highest-versioned peer over HTTP and
+ * applies it. 1.1 MB is far too large for ESP-NOW, but the peer is already
+ * an access point on our channel, so a plain HTTP GET moves it reliably
+ * and resumably. Runs forever until the whole mesh agrees. */
+#define MASTER_SYNC_MS      60000UL
+#define MASTER_PULL_BACKOFF 300000UL
+#define MASTER_PULL_JITTER  20000UL
+#define MASTER_PEER_COOLDOWN 600000UL  /* per-source penalty after a failure */
+
+static bool     master_pull_active = false;   /* this node is downloading  */
+static bool     master_serve_busy  = false;   /* this node is uploading    */
+static uint32_t master_pull_gate   = 0;       /* backoff after a failure   */
+static uint8_t  master_fw[3]       = {0,0,0}; /* our own version, parsed   */
+
 static bool     fs_ready       = false;
 static uint32_t last_reconcile = 0;
 
@@ -334,6 +358,10 @@ static uint32_t fwrx_last_ms = 0;
  * callback and the bus task far above; Arduino's auto-prototype pass is
  * not reliable enough to depend on here. */
 static void     ext_reset_identity(extension_t *e);
+static void     master_ver_parse(const char *s, uint8_t *v);
+static void     task_fwsync(void *arg);
+static uint32_t master_image_size(void);
+static void     master_fw_sync(void);
 static uint32_t fw_crc32(const uint8_t *d, uint32_t n);
 static bool     fw_ver_newer(const uint8_t *a, const uint8_t *b);
 static bool     fw_parse_desc(const uint8_t *img, uint32_t len,
@@ -499,7 +527,26 @@ static int mesh_alloc_peer(const uint8_t *uid, const uint8_t *mac) {
             return i;
         }
     }
-    return -1; /* mesh full */
+    /* Table full: reclaim whichever peer has been offline longest. Slots
+     * were previously held for ever -- a peer that was decommissioned kept
+     * its entry, and a neighbour we genuinely needed as an update source
+     * could never be admitted. */
+    int      victim = -1;
+    uint32_t oldest = 0;
+    for (int i=0; i<MAX_MESH_MASTERS; i++) {
+        if (mesh_peers[i].online) continue;
+        uint32_t age = millis() - mesh_peers[i].last_seen_ms;
+        if (age >= oldest) { oldest = age; victim = i; }
+    }
+    if (victim >= 0) {
+        Serial.printf("[MESH] table full, reclaiming slot %d (%s, offline %us)\n",
+                      victim, mesh_peers[victim].name, oldest/1000);
+        memset(&mesh_peers[victim], 0, sizeof(mesh_peer_t));
+        memcpy(mesh_peers[victim].uid, uid, 4);
+        memcpy(mesh_peers[victim].mac, mac, 6);
+        return victim;
+    }
+    return -1; /* every slot is an online peer */
 }
 
 /* Send ESP-NOW packet to a peer MAC */
@@ -519,11 +566,15 @@ static void mesh_broadcast(const void *data, size_t len) {
 /* Build and broadcast local state to all peers */
 static void mesh_gossip(void) {
     if (!mesh_active) return;
+    /* The radio is torn down during a firmware pull; transmitting into a
+     * de-initialised ESP-NOW just logs "esp now not init!" every cycle. */
+    if (master_pull_active) return;
 
     /* Build state packet */
     StaticJsonDocument<1024> doc;
     doc["type"]         = MESH_PKT_STATE;
     doc["name"]         = master_name;
+    doc["fw"]           = MASTER_FW_VERSION;
     doc["master_order"] = master_order_str;
 
     xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -650,7 +701,8 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         /* Ensure this peer is registered as ESP-NOW peer with AP MAC.
          * Re-register on every gossip in case peer rebooted or was lost.
          * mesh_active checked at top of recv_cb so we never reach here if left. */
-        if (!esp_now_is_peer_exist(info->src_addr)) {
+        if (master_pull_active) return;   /* ESP-NOW is down during a pull */
+    if (!esp_now_is_peer_exist(info->src_addr)) {
             esp_now_peer_info_t gpi={};
             memcpy(gpi.peer_addr, info->src_addr, 6);
             gpi.channel=AP_CHANNEL; gpi.encrypt=false;
@@ -664,6 +716,11 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         mesh_peers[idx].online       = true;
         mesh_peers[idx].last_seen_ms = millis();
+        master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
+        /* ESP-NOW carries far further than a usable TCP association, so a
+         * peer we can hear is not necessarily a peer we can download 1.1 MB
+         * from. Keep the signal level and prefer close peers when pulling. */
+        if (info->rx_ctrl) mesh_peers[idx].rssi = info->rx_ctrl->rssi;
         const char *pname = doc["name"] | "Master";
         strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
         memcpy(mesh_peers[idx].mac, info->src_addr, 6);
@@ -2623,6 +2680,41 @@ static void setup_web(void) {
         server.send(200, "application/json", out);
     });
 
+    /* Serve the image this master is running, so a peer on an older
+     * version can pull it. Only ever our own running partition, which is
+     * by definition an image that booted successfully on real hardware. */
+    server.on("/api/ota/image", HTTP_GET, [](){
+        if (master_serve_busy || master_pull_active) {
+            server.send(503, "text/plain", "busy");
+            return;
+        }
+        const esp_partition_t *part = esp_ota_get_running_partition();
+        uint32_t size = master_image_size();
+        if (!part || size == 0) {
+            server.send(500, "text/plain", "no image");
+            return;
+        }
+        master_serve_busy = true;
+        Serial.printf("[MFW] serving %u bytes to %s\n",
+                      size, server.client().remoteIP().toString().c_str());
+
+        server.setContentLength(size);
+        server.send(200, "application/octet-stream", "");
+
+        static uint8_t buf[1024];
+        uint32_t sent = 0;
+        while (sent < size && server.client().connected()) {
+            uint32_t n = size - sent;
+            if (n > sizeof(buf)) n = sizeof(buf);
+            if (esp_partition_read(part, sent, buf, n) != ESP_OK) break;
+            if (server.client().write(buf, n) != n) break;
+            sent += n;
+        }
+        server.client().stop();
+        master_serve_busy = false;
+        Serial.printf("[MFW] sent %u/%u bytes\n", sent, size);
+    });
+
         /* -- Firmware library -- */
     server.on("/api/fw/list", HTTP_GET, [](){
         StaticJsonDocument<1024> doc;
@@ -3203,7 +3295,7 @@ static void setup_web(void) {
 
     /* Mesh status */
     server.on("/api/mesh/status", HTTP_GET, [](){
-        StaticJsonDocument<512> doc;
+        StaticJsonDocument<3072> doc;   /* holds MAX_MESH_MASTERS peer entries */
         doc["active"]    = mesh_active;
         doc["mesh_name"] = mesh_name;
         doc["pin_valid"] = mesh_pin_valid;
@@ -3212,6 +3304,19 @@ static void setup_web(void) {
         for (int i=0;i<MAX_MESH_MASTERS;i++)
             if (mesh_peers[i].online) online_count++;
         doc["peer_count"] = online_count;
+        /* Version of every node, so convergence is visible in the UI. */
+        doc["fw"] = MASTER_FW_VERSION;
+        doc["syncing"] = master_pull_active || master_serve_busy;
+        JsonArray pv = doc.createNestedArray("peers");
+        for (int i=0;i<MAX_MESH_MASTERS;i++) {
+            if (!mesh_peers[i].online) continue;
+            JsonObject o = pv.createNestedObject();
+            o["name"] = mesh_peers[i].name;
+            char vb[16];
+            snprintf(vb,sizeof(vb),"%u.%u.%u",
+                     mesh_peers[i].fw[0],mesh_peers[i].fw[1],mesh_peers[i].fw[2]);
+            o["fw"] = vb;
+        }
         String out; serializeJson(doc,out);
         server.send(200,"application/json",out);
     });
@@ -3368,6 +3473,46 @@ static bool fw_store(uint8_t type, const uint8_t *ver,
     return true;
 }
 
+/* "11.9.2" -> {11,9,2} */
+static void master_ver_parse(const char *s, uint8_t *v) {
+    v[0] = v[1] = v[2] = 0;
+    if (!s) return;
+    int a = 0, b = 0, d = 0;
+    if (sscanf(s, "%d.%d.%d", &a, &b, &d) >= 2) {
+        v[0] = (uint8_t)a; v[1] = (uint8_t)b; v[2] = (uint8_t)d;
+    }
+}
+
+/* Length of the application image actually running, walked out of the ESP
+ * image header. The partition is far larger than the image, and serving
+ * the trailing erased space would fail validation on the receiver. */
+static uint32_t master_image_size(void) {
+    const esp_partition_t *p = esp_ota_get_running_partition();
+    if (!p) return 0;
+
+    uint8_t hdr[24];
+    if (esp_partition_read(p, 0, hdr, sizeof(hdr)) != ESP_OK) return 0;
+    if (hdr[0] != 0xE9) return 0;                 /* not an ESP image */
+
+    uint8_t  segments     = hdr[1];
+    uint8_t  hash_present = hdr[23];
+    uint32_t off          = sizeof(hdr);
+
+    for (uint8_t i = 0; i < segments; i++) {
+        uint8_t sh[8];
+        if (esp_partition_read(p, off, sh, sizeof(sh)) != ESP_OK) return 0;
+        uint32_t seg_len = (uint32_t)sh[4]        | ((uint32_t)sh[5] << 8)
+                         | ((uint32_t)sh[6] << 16) | ((uint32_t)sh[7] << 24);
+        if (seg_len > p->size) return 0;          /* corrupt header */
+        off += 8 + seg_len;
+        if (off > p->size) return 0;
+    }
+    off += 1;                    /* checksum byte */
+    off  = (off + 15) & ~15u;    /* padded to 16 bytes */
+    if (hash_present) off += 32; /* SHA-256 */
+    return (off <= p->size) ? off : 0;
+}
+
 /* Read an image back into a caller-supplied buffer. */
 static uint32_t fw_load(uint8_t type, uint8_t *buf, uint32_t max) {
     if (!fs_ready) return 0;
@@ -3462,6 +3607,159 @@ static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
 }
 
 /* ================================================================
+ * MASTER FIRMWARE CONVERGENCE
+ * Pull the running image off whichever online peer reports the highest
+ * version, apply it, reboot. Retried on a backoff until the mesh agrees,
+ * so it converges regardless of which masters were reachable when.
+ * ================================================================ */
+/* Bring our own access point back after a pull. Re-issuing softAP() is
+ * required: setting the mode alone does not restart it with our SSID. */
+static void master_restore_ap(void) {
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_AP);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    /* WiFi.disconnect(true,true) resets the driver, which takes ESP-NOW
+     * with it. On the success path we reboot immediately so it hardly
+     * matters, but after a FAILED pull this node keeps running -- without
+     * this it would stay silently outside the mesh until someone power
+     * cycled it, and would never retry the update. */
+    if (mesh_active) {
+        esp_now_deinit();
+        mesh_init();
+        Serial.println("[MFW] mesh radio reinitialised");
+    }
+    Serial.printf("[MFW] access point restored: %s\n", mesh_name);
+}
+
+static void master_fw_sync(void) {
+    if (!mesh_active || master_pull_active || master_serve_busy) return;
+    if (ota_in_progress) return;                      /* bus OTA running   */
+    if (master_pull_gate && (int32_t)(millis() - master_pull_gate) < 0) return;
+
+    /* Highest version wins; among equals, the one we hear best wins.
+     * A distant master holding the newest build may be perfectly audible
+     * over ESP-NOW yet impossible to download from, so once a nearer peer
+     * has caught up we must prefer it -- otherwise the update never
+     * propagates past the edge of the mesh. Peers that just failed are
+     * skipped so a bad link cannot monopolise every attempt. */
+    int      best = -1;
+    uint8_t  best_ver[3] = { master_fw[0], master_fw[1], master_fw[2] };
+    int8_t   best_rssi = -128;
+    uint8_t  mac[6];
+    uint32_t now_ms = millis();
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_MESH_MASTERS; i++) {
+        if (!mesh_peers[i].online) continue;
+        if (mesh_peers[i].fw_fail_until &&
+            (int32_t)(now_ms - mesh_peers[i].fw_fail_until) < 0) continue;
+        bool newer = fw_ver_newer(mesh_peers[i].fw, best_ver);
+        bool equal = (best >= 0) &&
+                     mesh_peers[i].fw[0] == best_ver[0] &&
+                     mesh_peers[i].fw[1] == best_ver[1] &&
+                     mesh_peers[i].fw[2] == best_ver[2];
+        if (!newer && !(equal && mesh_peers[i].rssi > best_rssi)) continue;
+        best = i;
+        best_ver[0] = mesh_peers[i].fw[0];
+        best_ver[1] = mesh_peers[i].fw[1];
+        best_ver[2] = mesh_peers[i].fw[2];
+        best_rssi   = mesh_peers[i].rssi;
+        memcpy(mac, mesh_peers[i].mac, 6);
+    }
+    xSemaphoreGive(state_mutex);
+    if (best < 0) return;                             /* already newest    */
+
+    Serial.printf("[MFW] peer v%u.%u.%u rssi=%d, we run v%u.%u.%u -- pulling\n",
+                  best_ver[0], best_ver[1], best_ver[2], best_rssi,
+                  master_fw[0], master_fw[1], master_fw[2]);
+
+    /* Spread the herd: several masters will spot the same peer at once and
+     * it can only serve one at a time. */
+    vTaskDelay(pdMS_TO_TICKS(esp_random() % MASTER_PULL_JITTER));
+
+    master_pull_active = true;
+    master_pull_gate   = millis() + MASTER_PULL_BACKOFF;
+
+    /* Drop our own AP for the duration of the pull.
+     *
+     * Every master serves its SoftAP on 192.168.4.1/24, so in AP_STA mode
+     * the STA interface lands on the same subnet as our own AP and lwIP
+     * resolves the peer's gateway -- also 192.168.4.1 -- to our local AP
+     * interface. The request never leaves the device and HTTPClient
+     * returns -1. Running STA-only removes the collision.
+     *
+     * Our clients drop for the duration; on success we reboot into the new
+     * image anyway, and on failure the AP is restored below. */
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    /* All masters in a mesh share one SSID, so the BSSID selects the peer. */
+    WiFi.begin(mesh_name, mesh_pass, AP_CHANNEL, mac);
+
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - t0) < 20000)
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[MFW] could not join peer AP -- trying another next time");
+        master_restore_ap();
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        mesh_peers[best].fw_fail_until = millis() + MASTER_PEER_COOLDOWN;
+        xSemaphoreGive(state_mutex);
+        /* Association failed, not a download failure: come back quickly and
+         * pick a different source rather than idling the full backoff. */
+        master_pull_gate   = millis() + MASTER_SYNC_MS;
+        master_pull_active = false;
+        return;
+    }
+    Serial.printf("[MFW] joined peer, gateway %s\n",
+                  WiFi.gatewayIP().toString().c_str());
+
+    bool ok = false;
+    {
+        HTTPClient http;
+        String url = "http://" + WiFi.gatewayIP().toString() + "/api/ota/image";
+        http.setTimeout(20000);
+        if (http.begin(url)) {
+            int code = http.GET();
+            int len  = http.getSize();
+            if (code == 200 && len > 0) {
+                Serial.printf("[MFW] downloading %d bytes\n", len);
+                if (Update.begin((size_t)len)) {
+                    size_t written = Update.writeStream(http.getStream());
+                    if (written == (size_t)len && Update.end(true)) {
+                        ok = true;
+                    } else {
+                        Serial.printf("[MFW] apply failed: %s\n",
+                                      Update.errorString());
+                        Update.abort();
+                    }
+                } else {
+                    Serial.printf("[MFW] no space: %s\n", Update.errorString());
+                }
+            } else {
+                Serial.printf("[MFW] GET failed code=%d len=%d\n", code, len);
+            }
+            http.end();
+        }
+    }
+
+    master_restore_ap();
+    master_pull_active = false;
+
+    if (ok) {
+        Serial.println("[MFW] image applied -- restarting");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        ESP.restart();
+    }
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    mesh_peers[best].fw_fail_until = millis() + MASTER_PEER_COOLDOWN;
+    xSemaphoreGive(state_mutex);
+    Serial.println("[MFW] pull failed, will try another source");
+}
+
+/* ================================================================
  * RECONCILIATION
  * Converge every online extension toward the manifest. Runs from the bus
  * task so it can never overlap a poll, one extension at a time because
@@ -3469,6 +3767,7 @@ static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
  * ================================================================ */
 static void fw_reconcile(void) {
     if (!fs_ready || ota_in_progress) return;
+    if (master_pull_active || master_serve_busy) return;  /* radio/CPU busy */
 
     for (int i = 0; i < MAX_EXTENSIONS; i++) {
         xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -3681,6 +3980,17 @@ static void fw_mesh_tick(void) {
     fwrx_last_ms = millis();
 }
 
+/* Master firmware convergence runs on its own task: a pull holds the CPU
+ * for up to a minute while WiFi associates and 1.1 MB transfers, and doing
+ * that inside the bus task would drop every extension offline. */
+static void task_fwsync(void *arg) {
+    vTaskDelay(pdMS_TO_TICKS(20000));      /* let the mesh settle first */
+    for (;;) {
+        master_fw_sync();
+        vTaskDelay(pdMS_TO_TICKS(MASTER_SYNC_MS));
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
@@ -3826,6 +4136,7 @@ void setup() {
     /* Init mesh ESP-NOW - must be after WiFi */
     mesh_init();
 
+    xTaskCreate(task_fwsync,"fwsync",8192,NULL,1,NULL);
     xTaskCreate(task_touch,"touch",2048,NULL,3,NULL);
     xTaskCreate(task_bus,  "bus",  4096,NULL,2,NULL);
     xTaskCreate(task_web,  "web",  8192,NULL,1,NULL);
@@ -3834,6 +4145,10 @@ void setup() {
      * broken partition produce different messages. The esp_littlefs
      * component logs its own errors on a failed mount; those are
      * expected once, on a partition that has never been formatted. */
+    master_ver_parse(MASTER_FW_VERSION, master_fw);
+    Serial.printf("[MFW] running image v%u.%u.%u, %u bytes\n",
+                  master_fw[0], master_fw[1], master_fw[2], master_image_size());
+
     if (LittleFS.begin(false)) {
         fs_ready = true;
     } else {

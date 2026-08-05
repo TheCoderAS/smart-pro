@@ -98,6 +98,18 @@ h1{font-size:22px;font-weight:600;margin-bottom:4px}
   </div>
 
   <div class="card">
+    <div class="card-label">Mesh firmware</div>
+    <div id="mesh-versions" style="font-size:13px;color:var(--text3)">
+      Not in a mesh.
+    </div>
+    <p style="font-size:12px;color:var(--text3);margin-top:12px;line-height:1.6">
+      Update any one master here and the rest copy it from whichever peer
+      has the newest version. It keeps retrying until they all agree, so
+      nothing needs to be online at the same time.
+    </p>
+  </div>
+
+  <div class="card">
     <div class="card-label">Extension firmware</div>
     <p style="font-size:13px;color:var(--text3);margin-bottom:16px;line-height:1.6">
       Upload a compiled .bin. The device type and version are read from the
@@ -387,6 +399,16 @@ function loadMesh(){
       as.style.display='block';
       is.style.display='none';
       if(ni&&d.mesh_name) ni.value=d.mesh_name;
+      var mv=document.getElementById('mesh-versions');
+      if(mv){
+        var h2='<b style="color:var(--text1)">Firmware across the mesh</b><br/>';
+        h2+='This master &mdash; v'+(d.fw||'?')+(d.syncing?' <span class="ok">(syncing)</span>':'')+'<br/>';
+        (d.peers||[]).forEach(function(p){
+          var older=d.fw&&p.fw&&p.fw!==d.fw;
+          h2+=p.name+' &mdash; v'+p.fw+(older?' <span style="color:var(--text3)">(will converge)</span>':'')+'<br/>';
+        });
+        mv.innerHTML=h2;
+      }
     } else {
       ms.className='mesh-status inactive';
       ms.textContent='Not in any mesh';
