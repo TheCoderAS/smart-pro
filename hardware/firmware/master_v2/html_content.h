@@ -98,6 +98,35 @@ h1{font-size:22px;font-weight:600;margin-bottom:4px}
   </div>
 
   <div class="card">
+    <div class="card-label">Extension firmware update</div>
+    <p style="font-size:13px;color:var(--text3);margin-bottom:16px;line-height:1.6">
+      Upload a compiled .bin file to update a connected extension over RS-485.
+      Extension restarts automatically after a successful update.
+    </p>
+    <div style="margin-bottom:12px">
+      <label style="font-size:13px;color:var(--text3)">Target extension</label>
+      <select id="ext-addr" style="width:100%;margin-top:6px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text1);font-size:14px" onchange="">
+        <option value="">Select extension address...</option>
+        <option value="1">Extension 0x01</option>
+        <option value="2">Extension 0x02</option>
+        <option value="3">Extension 0x03</option>
+        <option value="4">Extension 0x04</option>
+        <option value="5">Extension 0x05</option>
+      </select>
+    </div>
+    <div class="file-zone" id="ext-drop-zone" onclick="document.getElementById('ext-fw').click()">
+      Tap to select extension firmware .bin
+      <div class="fname" id="ext-fname">No file selected</div>
+    </div>
+    <input type="file" id="ext-fw" accept=".bin" style="display:none" onchange="extFilePicked(this)"/>
+    <button class="btn primary" id="ext-ubtn" disabled onclick="startExtOTA()">Upload extension firmware</button>
+    <div class="prog-wrap" id="ext-pwrap">
+      <div class="prog-bar"><div class="prog-fill" id="ext-pfill"></div></div>
+      <div class="status" id="ext-ostatus">Preparing...</div>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-label">Mesh network</div>
     <div class="mesh-status inactive" id="mesh-status">Not in any mesh</div>
 
@@ -234,6 +263,81 @@ function startOTA(){
   xhr.send(fd);
 }
 
+var extSelFile=null;
+
+function extFilePicked(input){
+  if(input.files.length===0)return;
+  extSelFile=input.files[0];
+  document.getElementById('ext-fname').textContent=extSelFile.name;
+  document.getElementById('ext-ubtn').disabled=false;
+}
+
+function loadExtensions(){
+  var sel=document.getElementById('ext-addr');
+  sel.innerHTML='<option value="">Loading...</option>';
+  fetch('/api/extensions').then(function(r){return r.json();}).then(function(d){
+    sel.innerHTML='<option value="">Select extension...</option>';
+    if(!d.extensions||d.extensions.length===0){
+      sel.innerHTML='<option value="">No extensions registered</option>';
+      return;
+    }
+    d.extensions.forEach(function(e){
+      var opt=document.createElement('option');
+      opt.value=e.addr;
+      var label=e.name;
+      if(e.sw1&&e.sw2) label+=' \u2014 '+e.sw1+' / '+e.sw2;
+      else if(e.sw1)   label+=' \u2014 '+e.sw1;
+      label+=e.online?' (online)':' (offline)';
+      opt.textContent=label;
+      if(!e.online) opt.style.color='var(--text3)';
+      sel.appendChild(opt);
+    });
+  }).catch(function(){
+    sel.innerHTML='<option value="">Failed to load</option>';
+  });
+}
+
+function startExtOTA(){
+  if(!extSelFile)return;
+  var addr=document.getElementById('ext-addr').value;
+  if(!addr){alert('Please select an extension');return;}
+  var btn=document.getElementById('ext-ubtn');
+  btn.disabled=true;btn.textContent='Uploading...';
+  document.getElementById('ext-pwrap').style.display='block';
+  document.getElementById('ext-pfill').style.width='0%';
+  document.getElementById('ext-ostatus').textContent='Sending to extension...';
+  var xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/ota/extension?addr='+addr,true);
+  xhr.upload.onprogress=function(e){
+    if(e.lengthComputable){
+      var p=Math.round(e.loaded/e.total*100);
+      document.getElementById('ext-pfill').style.width=p+'%';
+      document.getElementById('ext-ostatus').textContent='Uploading '+p+'%';
+    }
+  };
+  xhr.onload=function(){
+    if(xhr.status===200){
+      document.getElementById('ext-pfill').style.width='100%';
+      document.getElementById('ext-ostatus').innerHTML=
+        '<span class="ok">Done! Extension restarting...</span>';
+      btn.textContent='Upload extension firmware';
+      btn.disabled=false;
+    } else {
+      document.getElementById('ext-ostatus').innerHTML=
+        '<span class="err">Failed: '+xhr.responseText+'</span>';
+      btn.disabled=false;btn.textContent='Upload extension firmware';
+    }
+  };
+  xhr.onerror=function(){
+    document.getElementById('ext-ostatus').innerHTML=
+      '<span class="err">Connection error</span>';
+    btn.disabled=false;btn.textContent='Upload extension firmware';
+  };
+  var fd=new FormData();
+  fd.append('firmware',extSelFile);
+  xhr.send(fd);
+}
+
 function loadMesh(){
   fetch('/api/mesh/status').then(function(r){return r.json();}).then(function(d){
     var ms=document.getElementById('mesh-status');
@@ -300,6 +404,7 @@ function leaveMesh(){
 
 loadInfo();
 loadMesh();
+loadExtensions();
 
 
 </script>

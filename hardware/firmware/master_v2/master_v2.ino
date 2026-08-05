@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.9.2.1
+ * Unisync - Master Firmware v11.9.2
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -269,6 +269,13 @@ static bool         ota_in_progress = false;
 static int          ota_progress    = 0;
 static String       ota_status      = "";
 
+/* Extension OTA -- buffer entire firmware in heap before sending */
+#define EXT_OTA_CHUNK_SIZE   32
+#define EXT_OTA_MAX_SIZE     (10 * 1024)
+static uint8_t     *ext_ota_buf     = nullptr;
+static uint32_t     ext_ota_total   = 0;
+static uint8_t      ext_ota_addr    = 0;
+
 /* Mesh state */
 static mesh_peer_t  mesh_peers[MAX_MESH_MASTERS];
 static uint8_t      mesh_id[16]    = {0};  /* shared mesh secret */
@@ -345,7 +352,7 @@ static uint32_t compute_expected_response(const uint8_t *challenge,
  * ================================================================ */
 static void bus_send(uint8_t dst, uint8_t cmd,
                      const uint8_t *payload, uint8_t len) {
-    uint8_t frame[40];
+    uint8_t frame[48];
     frame[0]=SOF; frame[1]=dst; frame[2]=ADDR_MASTER;
     frame[3]=cmd; frame[4]=len;
     for (int i=0; i<len; i++) frame[5+i]=payload[i];
@@ -1740,8 +1747,9 @@ static void task_bus(void *arg) {
     for (;;) {
         uint32_t now=millis();
 
-        /* Immediate extension relay commands */
+        /* Immediate extension relay commands -- skip during OTA */
         relay_cmd_t cmd;
+        if (!ota_in_progress)
         while (xQueueReceive(ext_relay_queue,&cmd,0)==pdTRUE) {
             if (cmd.target>=0&&cmd.target<MAX_EXTENSIONS) {
                 xSemaphoreTake(state_mutex,portMAX_DELAY);
@@ -1766,16 +1774,17 @@ static void task_bus(void *arg) {
             }
         }
 
-        /* Poll registered extensions */
+        /* Poll registered extensions -- skip during OTA */
         if ((now-last_poll)>=POLL_MS) {
             last_poll=now;
-            for (int i=0;i<MAX_EXTENSIONS;i++) poll_extension(i);
-            check_boot_complete();
+            if (!ota_in_progress) {
+                for (int i=0;i<MAX_EXTENSIONS;i++) poll_extension(i);
+                check_boot_complete();
+            }
         }
 
-        /* Listen window for ANNOUNCE frames
-         * Drain relay commands first so UI stays responsive */
-        if ((now-last_listen)>=LISTEN_INTERVAL_MS) {
+        /* Listen window for ANNOUNCE frames -- skip during OTA */
+        if (!ota_in_progress && (now-last_listen)>=LISTEN_INTERVAL_MS) {
             last_listen=now;
             /* Process any pending relay commands before blocking on listen */
             relay_cmd_t pre_cmd;
@@ -2406,6 +2415,85 @@ static void setup_web(void) {
         }
     );
 
+        /* -- Extensions API -- */
+    server.on("/api/extensions", HTTP_GET, [](){
+        StaticJsonDocument<1024> doc;
+        JsonArray arr = doc.createNestedArray("extensions");
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        for (int i=0; i<MAX_EXTENSIONS; i++) {
+            if (extensions[i].state == EXT_EMPTY) continue;
+            JsonObject e = arr.createNestedObject();
+            e["slot"]   = i;
+            e["addr"]   = extensions[i].address;
+            e["online"] = (extensions[i].state == EXT_ONLINE);
+            /* Load switch names from NVS -- same as UI uses */
+            char sw1[24], sw2[24];
+            char id1[16], id2[16];
+            snprintf(id1, sizeof(id1), "ext%d_1", i);
+            snprintf(id2, sizeof(id2), "ext%d_2", i);
+            nvs_load_switch_name(id1, sw1, sizeof(sw1));
+            nvs_load_switch_name(id2, sw2, sizeof(sw2));
+            /* Use extension device name + switch names */
+            e["name"]  = extensions[i].name;
+            e["sw1"]   = (String(sw1) == "Switch") ?
+                         ("Switch " + String(i*2+3)) : String(sw1);
+            e["sw2"]   = (String(sw2) == "Switch") ?
+                         ("Switch " + String(i*2+4)) : String(sw2);
+        }
+        xSemaphoreGive(state_mutex);
+        String out; serializeJson(doc, out);
+        server.send(200, "application/json", out);
+    });
+
+        /* -- Extension OTA -- */
+    server.on("/api/ota/extension", HTTP_POST,
+        [](){
+            if (ext_ota_buf == nullptr || ext_ota_total == 0) {
+                server.send(400, "application/json", "{\"error\":\"no data\"}");
+                return;
+            }
+            Serial.printf("[EXT-OTA] Sending %u bytes to addr=0x%02X\n",
+                          ext_ota_total, ext_ota_addr);
+            ota_in_progress = true;
+            vTaskDelay(pdMS_TO_TICKS(300));  /* let task_bus finish current poll */
+            bool ok = ext_ota_send(ext_ota_addr, ext_ota_buf, ext_ota_total);
+            free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
+            ota_in_progress = false;
+            if (ok) {
+                server.send(200, "application/json", "{\"ok\":true}");
+            } else {
+                server.send(500, "application/json", "{\"error\":\"OTA failed\"}");
+            }
+        },
+        [](){
+            HTTPUpload &upload = server.upload();
+            if (upload.status == UPLOAD_FILE_START) {
+                /* Get target address from ?addr=X */
+                ext_ota_addr  = (uint8_t)server.arg("addr").toInt();
+                ext_ota_total = 0;
+                if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
+                ext_ota_buf = (uint8_t*)malloc(EXT_OTA_MAX_SIZE);
+                if (!ext_ota_buf) {
+                    Serial.println("[EXT-OTA] malloc failed");
+                    return;
+                }
+                Serial.printf("[EXT-OTA] Receiving firmware for addr=0x%02X\n", ext_ota_addr);
+
+            } else if (upload.status == UPLOAD_FILE_WRITE) {
+                if (!ext_ota_buf) return;
+                if (ext_ota_total + upload.currentSize > EXT_OTA_MAX_SIZE) {
+                    Serial.println("[EXT-OTA] Firmware too large");
+                    free(ext_ota_buf); ext_ota_buf = nullptr; return;
+                }
+                memcpy(ext_ota_buf + ext_ota_total, upload.buf, upload.currentSize);
+                ext_ota_total += upload.currentSize;
+
+            } else if (upload.status == UPLOAD_FILE_END) {
+                Serial.printf("[EXT-OTA] Received %u bytes\n", ext_ota_total);
+            }
+        }
+    );
+
         /* -- Mesh API -- */
 
     /* Generate PIN to invite new master */
@@ -2879,6 +2967,87 @@ static void setup_web(void) {
 /* ================================================================
  * SETUP
  * ================================================================ */
+static bool ext_ota_cmd(uint8_t addr, uint8_t cmd,
+                         const uint8_t *payload, uint8_t plen,
+                         uint32_t timeout_ms) {
+    flush_rx();                       /* discard stale bytes before ACK read */
+    bus_send(addr, cmd, payload, plen);
+    uint8_t buf[16];
+    uint8_t n = bus_recv(buf, sizeof(buf), timeout_ms);
+    if (n < 6) {
+        Serial.printf("[EXT-OTA] No ACK (cmd=0x%02X, got %d bytes)\n", cmd, n);
+        if (n > 0) {
+            Serial.print("[EXT-OTA] Raw: ");
+            for (int i=0; i<n; i++) Serial.printf("%02X ", buf[i]);
+            Serial.println();
+        }
+        return false;
+    }
+    if (buf[3] != CMD_OTA_ACK) {
+        Serial.printf("[EXT-OTA] Wrong cmd: 0x%02X\n", buf[3]);
+        return false;
+    }
+    if (buf[5] != 0x00) {
+        Serial.printf("[EXT-OTA] ACK error: 0x%02X\n", buf[5]);
+        return false;
+    }
+    return true;
+}
+
+static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len) {
+    /* Compute CRC32 */
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i=0; i<fw_len; i++) {
+        crc ^= fw[i];
+        for (int b=0; b<8; b++) crc = (crc&1)?(crc>>1)^0xEDB88320UL:crc>>1;
+    }
+    crc ^= 0xFFFFFFFF;
+    Serial.printf("[EXT-OTA] Size=%u CRC=0x%08X\n", fw_len, crc);
+
+    /* OTA_BEGIN */
+    uint8_t payload[8];
+    payload[0]=(fw_len>>24)&0xFF; payload[1]=(fw_len>>16)&0xFF;
+    payload[2]=(fw_len>>8)&0xFF;  payload[3]=fw_len&0xFF;
+    payload[4]=(crc>>24)&0xFF;    payload[5]=(crc>>16)&0xFF;
+    payload[6]=(crc>>8)&0xFF;     payload[7]=crc&0xFF;
+    if (!ext_ota_cmd(addr, CMD_OTA_BEGIN, payload, 8, 1000)) return false;
+    Serial.println("[EXT-OTA] BEGIN ok");
+    vTaskDelay(pdMS_TO_TICKS(100)); /* give extension time to enter OTA mode */
+
+    /* Send chunks */
+    uint32_t offset = 0; uint16_t chunk_idx = 0;
+    while (offset < fw_len) {
+        uint8_t chunk[2 + EXT_OTA_CHUNK_SIZE];
+        uint8_t len = (fw_len - offset) >= EXT_OTA_CHUNK_SIZE ?
+                       EXT_OTA_CHUNK_SIZE : (fw_len - offset);
+        chunk[0] = (chunk_idx >> 8) & 0xFF;
+        chunk[1] = chunk_idx & 0xFF;
+        memcpy(&chunk[2], fw + offset, len);
+        bool acked = false;
+        for (int attempt = 0; attempt < 3 && !acked; attempt++) {
+            acked = ext_ota_cmd(addr, CMD_OTA_CHUNK, chunk, 2+len, 1000);
+            if (!acked) {
+                Serial.printf("[EXT-OTA] CHUNK %u retry %d\n", chunk_idx, attempt+1);
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+        if (!acked) {
+            Serial.printf("[EXT-OTA] CHUNK %u failed after 3 tries\n", chunk_idx);
+            return false;
+        }
+        offset += len; chunk_idx++;
+        if (chunk_idx % 10 == 0)
+            Serial.printf("[EXT-OTA] %u/%u bytes\n", offset, fw_len);
+        vTaskDelay(pdMS_TO_TICKS(5));  /* yield; ACK already gates us */
+    }
+    Serial.println("[EXT-OTA] All chunks sent");
+
+    /* OTA_END */
+    if (!ext_ota_cmd(addr, CMD_OTA_END, nullptr, 0, 3000)) return false;
+    Serial.println("[EXT-OTA] END ok -- extension rebooting");
+    return true;
+}
+
 void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);

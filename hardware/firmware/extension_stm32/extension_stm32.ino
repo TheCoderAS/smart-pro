@@ -108,7 +108,7 @@ static const uint8_t SECRET_KEY[16] = {
 #define OTA_CHUNK_SIZE   32
 
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
-static uint8_t nvs_shadow[8];
+static uint8_t nvs_shadow[8] __attribute__((aligned(4)));
 
 /* Shared flash primitives */
 static void flash_unlock(void) {
@@ -162,7 +162,14 @@ static void usart1_init(void) {
     USART1->CR3  = 0;
     USART1->PRESC = 0;
     USART1->BRR  = (64000000UL / 250000UL);
+    /* Enable FIFO mode: RX holding register becomes an 8-byte FIFO, so a
+     * polled receiver tolerates 320us of loop jitter instead of 40us.
+     * Without this a single late poll drops a byte and kills the frame. */
+#ifdef USART_CR1_FIFOEN
+    USART1->CR1  = USART_CR1_FIFOEN | USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
+#else
     USART1->CR1  = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
+#endif
     uint32_t t   = millis();
     while (!(USART1->ISR & USART_ISR_TEACK) && (millis()-t) < 100);
     while (!(USART1->ISR & USART_ISR_REACK) && (millis()-t) < 100);
@@ -227,7 +234,7 @@ static uint8_t crc8(uint8_t *d, uint8_t n) {
  * Reset unit, feed data word by word, read result.
  * Saves ~200 bytes vs software loop.
  * ================================================================ */
-static uint32_t crc32_compute(const uint8_t *d, uint8_t n) {
+static uint32_t crc32_compute(const uint8_t *d, uint32_t n) {
     uint32_t c=0xFFFFFFFF;
     while(n--){c^=*d++;for(uint8_t i=8;i--;)c=c&1?(c>>1)^0xEDB88320UL:c>>1;}
     return c^0xFFFFFFFF;
@@ -277,7 +284,7 @@ static bool     last_t1         = false;
 static bool     last_t2         = false;
 static uint32_t last_poll_ms    = 0;
 
-static uint8_t  rx_buf[25];
+static uint8_t  rx_buf[42] __attribute__((aligned(4)));
 static uint8_t  rx_pos          = 0;
 static uint8_t  rx_elen         = 0;
 
@@ -308,7 +315,7 @@ static void tim17_pwm_init(void) {
 static void breath_tick(void) {
     static uint32_t last_ms = 0;
     static uint8_t  step    = 0;
-    uint32_t interval = (mode == MODE_REGISTERED) ? 62 : 31;
+    uint32_t interval = (mode == MODE_REGISTERED) ? 50 : 10;
     if ((millis() - last_ms) < interval) return;
     last_ms = millis();
     uint8_t s = step & 0x1F;
@@ -381,7 +388,7 @@ static void rs485_send(uint8_t *frame, uint8_t len) {
 
 static void send_frame(uint8_t dst, uint8_t cmd,
                        uint8_t *payload, uint8_t plen) {
-    uint8_t frame[30];
+    uint8_t frame[44];
     frame[0] = SOF;
     frame[1] = dst;
     frame[2] = slot_address;
@@ -435,6 +442,7 @@ static void push_event(uint8_t ch, uint8_t s) {
 }
 
 static void handle_touch(void) {
+    if (mode == MODE_OTA) return;   /* no relay or NVS activity during OTA */
     bool t1 = PIN_READ(PIN_TOUCH1);
     bool t2 = PIN_READ(PIN_TOUCH2);
     if (t1 && !last_t1) {
@@ -489,24 +497,31 @@ static void send_state_resp(void) {
  * PROCESS FRAME
  * ================================================================ */
 static uint32_t ota_total=0,ota_crc_ex=0;
+static uint16_t ota_last_idx=0xFFFF;  /* de-dupe retried chunks */
 
 static void ota_write_chunk(uint32_t off, const uint8_t *d, uint8_t len) {
-    uint32_t addr=SLOT_B_ADDR+off;
-    if(!(addr&(NVS_PAGE_SIZE-1))) flash_erase_page(addr);
-    FLASH->CR|=FLASH_CR_PG;
-    volatile uint32_t *dst=(volatile uint32_t*)addr;
-    while(len>=8){
-        uint32_t w0=*(uint32_t*)d,w1=*(uint32_t*)(d+4);
-        *dst++=w0;__ISB();*dst++=w1;
-        flash_wait(100);d+=8;len-=8;
-    }
-    if(len){
-        uint8_t b[8]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-        for(uint8_t i=0;i<len;i++)b[i]=*d++;
-        *dst++=*(uint32_t*)&b[0];__ISB();*dst++=*(uint32_t*)&b[4];
+    uint32_t addr = SLOT_B_ADDR + off;
+    flash_unlock();
+    if (!(addr & (NVS_PAGE_SIZE - 1))) flash_erase_page(addr);
+    FLASH->SR = 0xFFFFFFFF;          /* clear stale PROGERR/PGSERR/WRPERR */
+    FLASH->CR |= FLASH_CR_PG;
+    volatile uint32_t *dst = (volatile uint32_t *)addr;
+    while (len) {
+        uint8_t b[8] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        uint8_t n = (len >= 8) ? 8 : len;
+        for (uint8_t i = 0; i < n; i++) b[i] = *d++;
+        /* Cortex-M0+ traps unaligned 32-bit loads -- build words by shifts.
+         * The RS-485 payload sits at an odd offset inside rx_buf, so a
+         * *(uint32_t*)ptr cast here HardFaults the MCU. */
+        uint32_t w0 = (uint32_t)b[0]       | ((uint32_t)b[1] << 8)
+                    | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+        uint32_t w1 = (uint32_t)b[4]       | ((uint32_t)b[5] << 8)
+                    | ((uint32_t)b[6] << 16) | ((uint32_t)b[7] << 24);
+        *dst++ = w0; __ISB(); *dst++ = w1;
         flash_wait(100);
+        len -= n;
     }
-    FLASH->CR&=~FLASH_CR_PG;
+    FLASH->CR &= ~FLASH_CR_PG;
 }
 
 static void process_frame(uint8_t *frame, uint8_t len) {
@@ -601,7 +616,7 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         if(plen<8){buf[0]=0xFF;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
         ota_total =((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
         ota_crc_ex=((uint32_t)p[4]<<24)|((uint32_t)p[5]<<16)|((uint32_t)p[6]<<8)|p[7];
-        flash_unlock();
+        ota_last_idx=0xFFFF;
         mode=MODE_OTA; buf[0]=0;
         send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1); break;
 
@@ -609,7 +624,12 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         if(plen<3||mode!=MODE_OTA){buf[0]=0xFF;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
         {uint16_t ci=((uint16_t)p[0]<<8)|p[1];
          uint32_t off=(uint32_t)ci*OTA_CHUNK_SIZE;
-         if(off+plen-2<=SLOT_SIZE) ota_write_chunk(off,&p[2],plen-2);
+         /* A retry re-sends a chunk we may already have programmed. Re-writing
+          * un-erased flash raises PROGERR, so ACK duplicates without writing. */
+         if(ci!=ota_last_idx && off+plen-2<=SLOT_SIZE){
+             ota_write_chunk(off,&p[2],plen-2);
+             ota_last_idx=ci;
+         }
          buf[0]=0;buf[1]=p[0];buf[2]=p[1];
          send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,3);}
         break;
@@ -645,7 +665,7 @@ static void bus_rx_tick(void) {
         if (rx_pos == 0) {
             if (b == SOF) rx_buf[rx_pos++] = b;
         } else {
-            if (rx_pos >= 25) { rx_pos=0; rx_elen=0; return; }
+            if (rx_pos >= 42) { rx_pos=0; rx_elen=0; return; }
             rx_buf[rx_pos++] = b;
             if (rx_pos == 5) rx_elen = 6 + rx_buf[4];
             if (rx_elen > 0 && rx_pos >= rx_elen) {
@@ -693,7 +713,7 @@ void setup() {
 void loop() {
     handle_touch();
 
-    if (mode != MODE_OTA) bus_rx_tick();
+    bus_rx_tick(); /* always process bus including during OTA */
 
     switch (mode) {
 

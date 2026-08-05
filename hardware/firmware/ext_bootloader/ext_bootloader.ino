@@ -91,8 +91,19 @@ static void copy_slot_b_to_a(void) {
         }
     }
 
-    /* Clear UPDATE_PENDING flag -- erase NVS page */
+    /* Clear UPDATE_PENDING flag WITHOUT destroying registration.
+     * Flash erases page-wise, so a bare erase of the NVS page would wipe
+     * bytes 0-6 (magic, bus address, relay state, master UID) and leave the
+     * extension unpaired after every update. Read, erase, write back. */
+    uint8_t nvs[8];
+    for (uint8_t i = 0; i < 8; i++) nvs[i] = ((volatile uint8_t*)NVS_BASE)[i];
+    nvs[7] = 0xFF;                       /* only the OTA flag is cleared */
     flash_erase_page(NVS_BASE);
+    flash_write_dword(NVS_BASE,
+        (uint32_t)nvs[0]        | ((uint32_t)nvs[1] << 8) |
+        ((uint32_t)nvs[2] << 16) | ((uint32_t)nvs[3] << 24),
+        (uint32_t)nvs[4]        | ((uint32_t)nvs[5] << 8) |
+        ((uint32_t)nvs[6] << 16) | ((uint32_t)nvs[7] << 24));
     flash_lock();
 }
 
