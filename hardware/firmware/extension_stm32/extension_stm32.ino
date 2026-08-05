@@ -45,6 +45,36 @@
 /* ================================================================
  * PROTOCOL
  * ================================================================ */
+/* ================================================================
+ * DEVICE IDENTITY
+ * FW_DESC is a locatable blob inside the .bin. The master scans an
+ * uploaded image for FW_DESC_MAGIC and reads the target type/version
+ * straight out of it, so the operator never types a version by hand
+ * and a wrong-type image is rejected before it is ever transmitted.
+ * hw_type is NOT here -- it lives in NVS, written at manufacture, and
+ * is the one fact an update must never be able to change.
+ * ================================================================ */
+#define FW_VER_MAJOR   1
+#define FW_VER_MINOR   0
+#define FW_VER_PATCH   0
+#define FW_TARGET_TYPE 0x02          /* image is built for this hw_type */
+
+/* No custom section: an orphan section is placed at the linker's
+ * discretion and can disturb the .data load region. Ordinary .rodata,
+ * kept alive by being read at run time below. */
+/* volatile is load-bearing, not decoration: without it the compiler
+ * constant-folds every FW_DESC[n] read into a literal, nothing references
+ * the array any more, and -Os with LTO discards it -- leaving an image the
+ * master cannot identify. volatile forces a real memory load, which forces
+ * the array to exist in .rodata. External linkage for the same reason. */
+__attribute__((used))
+const volatile uint8_t FW_DESC[16] = {
+    'U','N','I','S','Y','N','C','1',            /* magic, 8 bytes  */
+    FW_TARGET_TYPE, 0x00,                       /* type, hw_rev_min */
+    FW_VER_MAJOR, FW_VER_MINOR, FW_VER_PATCH,   /* version          */
+    0x00, 0x00, 0x00                            /* reserved         */
+};
+
 #define UART_BAUD         250000
 #define SOF               0xAA
 #define ADDR_MASTER       0x00
@@ -57,6 +87,8 @@
 #define CMD_GET_STATE     0x21
 #define CMD_STATE_RESP    0x22
 #define CMD_DRAIN_EVENTS  0x23
+#define CMD_GET_INFO      0x24
+#define CMD_INFO_RESP     0x25
 #define CMD_OTA_BEGIN     0x40
 #define CMD_OTA_CHUNK     0x41
 #define CMD_OTA_END       0x42
@@ -85,10 +117,24 @@ static const uint8_t SECRET_KEY[16] = {
 #define NVS_PAGE_SIZE   2048  /* flash erase page size */
 
 /* NVS byte offsets */
-#define NVS_MAGIC       0   /* 1 byte: 0xA5 */
+/* NVS v2 -- 32 bytes / 4 doublewords. FROZEN: the bootloader depends on
+ * this layout and the bootloader cannot be updated in the field. */
+#define NVS_SIZE        32
+#define NVS_MAGIC       0   /* 1 byte: 0xA5 registered / 0x5A standalone */
 #define NVS_ADDR        1   /* 1 byte: bus address */
 #define NVS_RELAY       2   /* 1 byte: bit0=relay1, bit1=relay2 */
 #define NVS_MUID0       3   /* 4 bytes: master UID */
+/* byte 7 = NVS_OTA_FLAG (below) */
+#define NVS_HW_TYPE     8   /* provisioned at manufacture, 0xFF = unprovisioned */
+#define NVS_HW_REV      9
+#define NVS_BOOT_CNT   10
+/* bytes 16..31 = OTA staging metadata, read by the bootloader */
+#define NVS_META_MAGIC 16   /* 0x5A when a staged image is present */
+#define NVS_META_TYPE  17   /* target hw_type of the staged image */
+#define NVS_META_VER   18   /* 3 bytes: major, minor, patch */
+#define NVS_META_SIZE  22   /* 2 bytes LE: staged image length */
+#define NVS_META_CRC   24   /* 4 bytes LE: CRC32 of the staged image */
+#define META_MAGIC_VAL 0x5A
 #define NVS_MUID1       4
 #define NVS_MUID2       5
 #define NVS_MUID3       6
@@ -108,7 +154,7 @@ static const uint8_t SECRET_KEY[16] = {
 #define OTA_CHUNK_SIZE   32
 
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
-static uint8_t nvs_shadow[8] __attribute__((aligned(4)));
+static uint8_t nvs_shadow[NVS_SIZE] __attribute__((aligned(4)));
 
 /* Shared flash primitives */
 static void flash_unlock(void) {
@@ -134,7 +180,7 @@ static void flash_write_dwords(volatile uint32_t *dst, const uint32_t *src, uint
 static void nvs_flush(void) {
     flash_unlock();
     flash_erase_page(NVS_PAGE_ADDR);
-    flash_write_dwords((volatile uint32_t*)NVS_PAGE_ADDR,(const uint32_t*)nvs_shadow,1);
+    flash_write_dwords((volatile uint32_t*)NVS_PAGE_ADDR,(const uint32_t*)nvs_shadow,NVS_SIZE/8);
     FLASH->CR|=FLASH_CR_LOCK;
 }
 
@@ -315,7 +361,7 @@ static void tim17_pwm_init(void) {
 static void breath_tick(void) {
     static uint32_t last_ms = 0;
     static uint8_t  step    = 0;
-    uint32_t interval = (mode == MODE_REGISTERED) ? 50 : 10;
+    uint32_t interval = (mode == MODE_REGISTERED) ? 125 : 31;
     if ((millis() - last_ms) < interval) return;
     last_ms = millis();
     uint8_t s = step & 0x1F;
@@ -331,7 +377,7 @@ static void breath_tick(void) {
  * ================================================================ */
 static void load_state(void) {
     volatile uint8_t *p=(volatile uint8_t*)NVS_PAGE_ADDR;
-    for(uint8_t i=0;i<8;i++) nvs_shadow[i]=p[i];
+    for(uint8_t i=0;i<NVS_SIZE;i++) nvs_shadow[i]=p[i];
     relay1_state=(nvs_shadow[NVS_RELAY]&0x01)!=0;
     relay2_state=(nvs_shadow[NVS_RELAY]&0x02)!=0;
     if (nvs_shadow[NVS_MAGIC]==NVS_MAGIC_VAL) {
@@ -365,7 +411,9 @@ static void save_relay_state(void) {
 }
 
 static void wipe_registration(void) {
+    /* Preserve manufacturing data (hw_type/hw_rev) across an unregister */
     for(uint8_t i=0;i<8;i++) nvs_shadow[i]=0;
+    for(uint8_t i=NVS_META_MAGIC;i<NVS_SIZE;i++) nvs_shadow[i]=0xFF;
     nvs_flush();
 }
 
@@ -463,11 +511,13 @@ static void handle_touch(void) {
  * ANNOUNCE
  * ================================================================ */
 static void send_announce(void) {
-    uint8_t f[11]={SOF,ADDR_MASTER,ADDR_UNASSIGNED,CMD_ANNOUNCE,5,
+    uint8_t f[15]={SOF,ADDR_MASTER,ADDR_UNASSIGNED,CMD_ANNOUNCE,9,
         device_uid[0],device_uid[1],device_uid[2],device_uid[3],
-        (relay1_state?1:0)|(relay2_state?2:0)|(event_count?4:0),0};
-    f[10]=crc8(&f[1],9);
-    rs485_send(f,11);
+        (uint8_t)((relay1_state?1:0)|(relay2_state?2:0)|(event_count?4:0)),
+        nvs_shadow[NVS_HW_TYPE],
+        FW_DESC[10],FW_DESC[11],FW_DESC[12],0};
+    f[14]=crc8(&f[1],13);
+    rs485_send(f,15);
 }
 
 /* ================================================================
@@ -498,6 +548,7 @@ static void send_state_resp(void) {
  * ================================================================ */
 static uint32_t ota_total=0,ota_crc_ex=0;
 static uint16_t ota_last_idx=0xFFFF;  /* de-dupe retried chunks */
+static uint8_t  ota_ver[3]={0,0,0};   /* version of the staged image */
 
 static void ota_write_chunk(uint32_t off, const uint8_t *d, uint8_t len) {
     uint32_t addr = SLOT_B_ADDR + off;
@@ -603,6 +654,14 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         send_state_resp();
         break;
 
+    case CMD_GET_INFO:
+        buf[0]=nvs_shadow[NVS_HW_TYPE];
+        buf[1]=nvs_shadow[NVS_HW_REV];
+        buf[2]=FW_DESC[10]; buf[3]=FW_DESC[11]; buf[4]=FW_DESC[12];
+        buf[5]=0; buf[6]=0; buf[7]=0;
+        send_frame(ADDR_MASTER,CMD_INFO_RESP,buf,8);
+        break;
+
     case CMD_DRAIN_EVENTS:
         if (plen>=1) { uint8_t _n=p[0];
           while(_n-->0&&event_count>0){event_tail=(event_tail+1)&7;event_count--;} }
@@ -613,9 +672,20 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         break;
 
     case CMD_OTA_BEGIN:
-        if(plen<8){buf[0]=0xFF;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
+        /* payload: size[4] crc32[4] type[1] ver[3] */
+        if(plen<12){buf[0]=0xFE;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
+        /* Refuse an image built for different hardware, and refuse to run at
+         * all if this unit was never provisioned. Checked before a single
+         * byte is written, so a wrong image costs nothing. */
+        if(nvs_shadow[NVS_HW_TYPE]==0xFF){
+            buf[0]=0xFD;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
+        if(p[8]!=nvs_shadow[NVS_HW_TYPE]){
+            buf[0]=0xFC;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
         ota_total =((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
         ota_crc_ex=((uint32_t)p[4]<<24)|((uint32_t)p[5]<<16)|((uint32_t)p[6]<<8)|p[7];
+        if(ota_total==0||ota_total>SLOT_SIZE){
+            buf[0]=0xFB;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
+        ota_ver[0]=p[9]; ota_ver[1]=p[10]; ota_ver[2]=p[11];
         ota_last_idx=0xFFFF;
         mode=MODE_OTA; buf[0]=0;
         send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1); break;
@@ -638,8 +708,21 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         {uint32_t crc=crc32_compute((const uint8_t*)SLOT_B_ADDR,ota_total);
          if(crc==ota_crc_ex){
              buf[0]=0;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
-             /* Set UPDATE_PENDING flag -- bootloader will copy Slot B to Slot A */
-             nvs_shadow[NVS_OTA_FLAG]=UPDATE_PENDING;
+             /* Publish staging metadata, then raise the pending flag. The
+              * bootloader re-validates type and CRC from this before it
+              * overwrites the running image. */
+             nvs_shadow[NVS_META_MAGIC]  = META_MAGIC_VAL;
+             nvs_shadow[NVS_META_TYPE]   = nvs_shadow[NVS_HW_TYPE];
+             nvs_shadow[NVS_META_VER+0]  = ota_ver[0];
+             nvs_shadow[NVS_META_VER+1]  = ota_ver[1];
+             nvs_shadow[NVS_META_VER+2]  = ota_ver[2];
+             nvs_shadow[NVS_META_SIZE+0] = (uint8_t)(ota_total & 0xFF);
+             nvs_shadow[NVS_META_SIZE+1] = (uint8_t)((ota_total >> 8) & 0xFF);
+             nvs_shadow[NVS_META_CRC+0]  = (uint8_t)(ota_crc_ex & 0xFF);
+             nvs_shadow[NVS_META_CRC+1]  = (uint8_t)((ota_crc_ex >> 8) & 0xFF);
+             nvs_shadow[NVS_META_CRC+2]  = (uint8_t)((ota_crc_ex >> 16) & 0xFF);
+             nvs_shadow[NVS_META_CRC+3]  = (uint8_t)((ota_crc_ex >> 24) & 0xFF);
+             nvs_shadow[NVS_OTA_FLAG]    = UPDATE_PENDING;
              nvs_flush();
              delay(50);NVIC_SystemReset();
          }else{

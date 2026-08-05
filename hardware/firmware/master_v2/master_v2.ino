@@ -24,6 +24,11 @@
 #include "WebServer.h"
 #include "Preferences.h"
 #include "Update.h"
+#include <LittleFS.h>
+
+/* Single source of truth for the master version. Referenced by the boot
+ * banner and served over /api/info; never duplicate it in the UI. */
+#define MASTER_FW_VERSION  "11.9.3"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -81,6 +86,8 @@
 #define CMD_GET_STATE     0x21
 #define CMD_STATE_RESP    0x22
 #define CMD_DRAIN_EVENTS  0x23
+#define CMD_GET_INFO      0x24
+#define CMD_INFO_RESP     0x25
 #define CMD_IDENTIFY      0x30
 #define CMD_OTA_BEGIN     0x40
 #define CMD_OTA_CHUNK     0x41
@@ -218,6 +225,11 @@ typedef struct {
     uint32_t    last_relay1_cmd_ms;  /* rate limiting */
     uint32_t    last_relay2_cmd_ms;
     bool        polled_once;         /* for boot overlay */
+    uint8_t     hw_type;             /* 0 = not learned yet, 0xFF = unprovisioned */
+    uint8_t     hw_rev;
+    uint8_t     fw_ver[3];           /* major, minor, patch */
+    uint8_t     ota_fails;           /* consecutive failed update attempts */
+    uint32_t    ota_next_try_ms;     /* backoff gate */
 } extension_t;
 
 /* Pending challenge tracking */
@@ -268,6 +280,75 @@ static String       switch_order   = "";  /* comma-separated switch IDs */
 static bool         ota_in_progress = false;
 static int          ota_progress    = 0;
 static String       ota_status      = "";
+
+/* ================================================================
+ * FIRMWARE LIBRARY
+ * Each master keeps the newest image it has seen for every extension
+ * type on LittleFS plus a manifest describing them, then reconciles its
+ * extensions toward that manifest at its own pace. A unit plugged in
+ * months later converges on the next pass with no operator action.
+ * ================================================================ */
+#define FW_DESC_MAGIC     "UNISYNC1"
+#define FW_MANIFEST_PATH  "/fw/manifest.json"
+#define FW_MAX_TYPES      8
+#define FW_MAX_IMAGE      (10 * 1024)
+#define RECONCILE_MS      30000UL
+#define OTA_MAX_FAILS     3
+#define OTA_BACKOFF_MS    120000UL
+
+typedef struct {
+    uint8_t  type;
+    uint8_t  ver[3];
+    uint32_t size;
+    uint32_t crc;
+} fw_entry_t;
+
+static bool     fs_ready       = false;
+static uint32_t last_reconcile = 0;
+
+/* ---- mesh firmware distribution: binary channel, not JSON ----
+ * JSON packets always begin with '{' (0x7B), so a 0xFB first byte is an
+ * unambiguous discriminator and the existing JSON path is untouched. */
+#define FWPKT_MAGIC     0xFB
+#define FWPKT_OFFER     0x01
+#define FWPKT_REQ       0x02
+#define FWPKT_CHUNK     0x03
+#define FWPKT_DONE      0x04
+#define FWPKT_HDR       16
+#define FWPKT_DATA      192          /* 16 + 192 = 208, under the 250 cap */
+#define FWRX_TIMEOUT_MS 800
+
+static bool     fwrx_active  = false;
+static uint8_t  fwrx_type    = 0;
+static uint8_t  fwrx_ver[3]  = {0,0,0};
+static uint32_t fwrx_size    = 0;
+static uint32_t fwrx_crc     = 0;
+static uint16_t fwrx_total   = 0;
+static uint16_t fwrx_next    = 0;
+static uint8_t *fwrx_buf     = nullptr;
+static uint8_t  fwrx_src[6]  = {0};
+static uint32_t fwrx_last_ms = 0;
+
+/* Forward declarations. The firmware-library and mesh-distribution
+ * routines are defined near the bottom but referenced from the ESP-NOW
+ * callback and the bus task far above; Arduino's auto-prototype pass is
+ * not reliable enough to depend on here. */
+static void     ext_reset_identity(extension_t *e);
+static uint32_t fw_crc32(const uint8_t *d, uint32_t n);
+static bool     fw_ver_newer(const uint8_t *a, const uint8_t *b);
+static bool     fw_parse_desc(const uint8_t *img, uint32_t len,
+                              uint8_t *type, uint8_t *ver);
+static bool     fw_lookup(uint8_t type, fw_entry_t *out);
+static bool     fw_store(uint8_t type, const uint8_t *ver,
+                         const uint8_t *img, uint32_t len);
+static uint32_t fw_load(uint8_t type, uint8_t *buf, uint32_t max);
+static void     fw_reconcile(void);
+static void     fw_mesh_offer(uint8_t type, const uint8_t *ver,
+                              uint32_t size, uint32_t crc);
+static void     fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len);
+static void     fw_mesh_tick(void);
+static bool     ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
+                             uint8_t type, const uint8_t *ver);
 
 /* Extension OTA -- buffer entire firmware in heap before sending */
 #define EXT_OTA_CHUNK_SIZE   32
@@ -530,6 +611,11 @@ static bool mesh_verify_pin(const char *pin) {
 static void mesh_recv_cb(const esp_now_recv_info_t *info,
                          const uint8_t *data, int len) {
     if (len < 2) return;
+    /* Binary firmware packets share the ESP-NOW channel with the JSON
+     * protocol. JSON always starts with '{' (0x7B), so a 0xFB first byte
+     * is unambiguous and the JSON path below is untouched. */
+    if (data[0] == FWPKT_MAGIC) { fw_mesh_rx(info->src_addr, data, len); return; }
+
     /* Parse packet to get type */
     StaticJsonDocument<1024> doc;
     if (deserializeJson(doc, data, len) != DeserializationError::Ok) return;
@@ -1087,6 +1173,7 @@ static void nvs_restore_all(void) {
         char name[24]; nvs_load_name(uid,name,sizeof(name));
         extension_t *e=&extensions[slot];
         memcpy(e->uid,uid,4);
+        ext_reset_identity(e);
         e->address=(uint8_t)(slot+1);
         e->state=EXT_OFFLINE;
         e->missed=0; e->relay1=false; e->relay2=false;
@@ -1529,6 +1616,7 @@ static void handle_response(const uint8_t *frame) {
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         extension_t *e=&extensions[saved_slot];
         memcpy(e->uid,uid,4);
+        ext_reset_identity(e);
         e->address=new_addr;
         e->state=EXT_ONLINE;
         e->missed=0;
@@ -1587,6 +1675,51 @@ static void run_listen_window(void) {
 /* ================================================================
  * POLL ONE EXTENSION
  * ================================================================ */
+/* Ask an extension what it is. Runs once after it comes online, and
+ * again after an update so the new version is picked up. Cheap: one
+ * frame, and only while hw_type is unknown. */
+static void ext_query_info(int i) {
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    bool need = (extensions[i].state == EXT_ONLINE) &&
+                (extensions[i].hw_type == 0);
+    uint8_t addr = extensions[i].address;
+    xSemaphoreGive(state_mutex);
+    if (!need || addr == ADDR_UNASSIGNED) return;
+
+    flush_rx();
+    bus_send(addr, CMD_GET_INFO, NULL, 0);
+    uint8_t resp[40];
+    uint8_t n = bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+    if (n < 6) return;
+    uint8_t plen = resp[4];
+    if (resp[3] != CMD_INFO_RESP || plen < 5) return;
+    if (resp[5 + plen] != crc8(&resp[1], 4 + plen)) return;
+
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    extensions[i].hw_type   = resp[5];
+    extensions[i].hw_rev    = resp[6];
+    extensions[i].fw_ver[0] = resp[7];
+    extensions[i].fw_ver[1] = resp[8];
+    extensions[i].fw_ver[2] = resp[9];
+    xSemaphoreGive(state_mutex);
+    Serial.printf("[EXT] 0x%02X type=%u rev=%u fw=v%u.%u.%u\n",
+                  addr, resp[5], resp[6], resp[7], resp[8], resp[9]);
+    notify_ui();
+}
+
+/* Wipe everything learned about whatever used to occupy a slot.
+ * Identity is a property of the device, not the slot: if a different
+ * extension is paired into a slot, a stale hw_type/fw_ver would make the
+ * master believe the newcomer is already up to date and it would never be
+ * offered an update. A stale ota_fails would blacklist it outright. */
+static void ext_reset_identity(extension_t *e) {
+    e->hw_type = 0;
+    e->hw_rev  = 0;
+    e->fw_ver[0] = e->fw_ver[1] = e->fw_ver[2] = 0;
+    e->ota_fails = 0;
+    e->ota_next_try_ms = 0;
+}
+
 static void poll_extension(int i) {
     xSemaphoreTake(state_mutex,portMAX_DELAY);
     if (extensions[i].state==EXT_EMPTY) { xSemaphoreGive(state_mutex); return; }
@@ -1624,6 +1757,9 @@ static void poll_extension(int i) {
     }
 
     bool was_first_poll=!extensions[i].polled_once;
+    /* Coming back from OFFLINE may mean it rebooted into new firmware,
+     * so drop the cached identity and re-learn it. */
+    if (extensions[i].state==EXT_OFFLINE) extensions[i].hw_type=0;
     extensions[i].missed=0;
     extensions[i].last_seen_ms=millis();
     extensions[i].polled_once=true;
@@ -1778,7 +1914,10 @@ static void task_bus(void *arg) {
         if ((now-last_poll)>=POLL_MS) {
             last_poll=now;
             if (!ota_in_progress) {
-                for (int i=0;i<MAX_EXTENSIONS;i++) poll_extension(i);
+                for (int i=0;i<MAX_EXTENSIONS;i++) {
+                    poll_extension(i);
+                    ext_query_info(i);
+                }
                 check_boot_complete();
             }
         }
@@ -1819,6 +1958,14 @@ static void task_bus(void *arg) {
                 scan_active=false;
                 if (pending_count()>0) notify_ui();
             }
+        }
+
+        /* Firmware: keep a stalled mesh transfer moving, then converge
+         * extensions toward the manifest. Never while an OTA is running. */
+        fw_mesh_tick();
+        if (!ota_in_progress && (now - last_reconcile) >= RECONCILE_MS) {
+            last_reconcile = now;
+            fw_reconcile();
         }
 
         /* Expire old pending and stale challenges */
@@ -2202,6 +2349,7 @@ static void setup_web(void) {
         uint8_t new_addr=next_free_addr();
         extension_t *e=&extensions[slot];
         memcpy(e->uid,uid,4);
+        ext_reset_identity(e);
         e->address=new_addr; e->state=EXT_ONLINE; e->missed=0;
         e->relay1=false; e->relay2=false;
         e->last_seen_ms=millis(); e->polled_once=true;
@@ -2245,6 +2393,7 @@ static void setup_web(void) {
         uint8_t new_addr=(uint8_t)(slot+1);
         extension_t *e=&extensions[slot];
         memcpy(e->uid,new_uid,4);
+        ext_reset_identity(e);
         e->address=new_addr; e->state=EXT_ONLINE; e->missed=0;
         e->relay1=false; e->relay2=false;
         e->last_seen_ms=millis(); e->polled_once=true;
@@ -2314,6 +2463,7 @@ static void setup_web(void) {
         extensions[slot].state=EXT_EMPTY;
         extensions[slot].address=ADDR_UNASSIGNED;
         memset(extensions[slot].uid,0,4);
+        ext_reset_identity(&extensions[slot]);
         xSemaphoreGive(state_mutex);
         nvs_remove(uid);
         notify_ui();
@@ -2375,6 +2525,7 @@ static void setup_web(void) {
         doc["uptime"]    = millis()/1000;
         doc["free_heap"] = ESP.getFreeHeap();
         doc["uid"]       = uid_str;
+        doc["fw"]        = MASTER_FW_VERSION;
         String out; serializeJson(doc, out);
         server.send(200, "application/json", out);
     });
@@ -2435,6 +2586,24 @@ static void setup_web(void) {
             e["slot"]   = i;
             e["addr"]   = extensions[i].address;
             e["online"] = (extensions[i].state == EXT_ONLINE);
+            e["type"]   = extensions[i].hw_type;
+            e["rev"]    = extensions[i].hw_rev;
+            char vbuf[16];
+            snprintf(vbuf, sizeof(vbuf), "%u.%u.%u",
+                     extensions[i].fw_ver[0], extensions[i].fw_ver[1],
+                     extensions[i].fw_ver[2]);
+            e["fw"]     = vbuf;
+            e["fails"]  = extensions[i].ota_fails;
+            e["stuck"]  = (extensions[i].ota_fails >= OTA_MAX_FAILS);
+            fw_entry_t av;
+            if (extensions[i].hw_type && extensions[i].hw_type != 0xFF &&
+                fw_lookup(extensions[i].hw_type, &av) &&
+                fw_ver_newer(av.ver, extensions[i].fw_ver)) {
+                char abuf[16];
+                snprintf(abuf, sizeof(abuf), "%u.%u.%u",
+                         av.ver[0], av.ver[1], av.ver[2]);
+                e["avail"] = abuf;
+            }
             /* Load switch names from NVS -- same as UI uses */
             char sw1[24], sw2[24];
             char id1[16], id2[16];
@@ -2454,6 +2623,98 @@ static void setup_web(void) {
         server.send(200, "application/json", out);
     });
 
+        /* -- Firmware library -- */
+    server.on("/api/fw/list", HTTP_GET, [](){
+        StaticJsonDocument<1024> doc;
+        JsonArray arr = doc.createNestedArray("images");
+        doc["fs"] = fs_ready;
+        if (fs_ready) {
+            File f = LittleFS.open(FW_MANIFEST_PATH, "r");
+            if (f) {
+                StaticJsonDocument<1024> man;
+                if (deserializeJson(man, f) == DeserializationError::Ok) {
+                    for (JsonObject e : man["images"].as<JsonArray>()) {
+                        JsonObject o = arr.createNestedObject();
+                        o["type"] = e["type"];
+                        o["size"] = e["size"];
+                        char vb[16];
+                        snprintf(vb, sizeof(vb), "%u.%u.%u",
+                                 (uint8_t)(e["ver"][0] | 0),
+                                 (uint8_t)(e["ver"][1] | 0),
+                                 (uint8_t)(e["ver"][2] | 0));
+                        o["ver"] = vb;
+                    }
+                }
+                f.close();
+            }
+        }
+        String out; serializeJson(doc, out);
+        server.send(200, "application/json", out);
+    });
+
+    /* Upload an image into the library. Type and version are read from
+     * the descriptor inside the image, never typed by the operator.
+     * ?mesh=1 also offers it to every peer master. */
+    server.on("/api/fw/upload", HTTP_POST,
+        [](){
+            if (!fs_ready) {
+                server.send(500, "application/json",
+                            F("{\"error\":\"no filesystem\"}"));
+                return;
+            }
+            if (!ext_ota_buf || ext_ota_total == 0) {
+                server.send(400, "application/json", F("{\"error\":\"no data\"}"));
+                return;
+            }
+            uint8_t type = 0, ver[3] = {0,0,0};
+            if (!fw_parse_desc(ext_ota_buf, ext_ota_total, &type, ver)) {
+                free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
+                server.send(400, "application/json",
+                            F("{\"error\":\"not a Unisync extension image\"}"));
+                return;
+            }
+            bool ok = fw_store(type, ver, ext_ota_buf, ext_ota_total);
+            uint32_t crc  = fw_crc32(ext_ota_buf, ext_ota_total);
+            uint32_t size = ext_ota_total;
+            free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
+            if (!ok) {
+                server.send(500, "application/json",
+                            F("{\"error\":\"store failed\"}"));
+                return;
+            }
+            if (server.arg("mesh") == "1") fw_mesh_offer(type, ver, size, crc);
+            StaticJsonDocument<192> d;
+            d["ok"] = true; d["type"] = type; d["size"] = size;
+            char vb[16]; snprintf(vb, sizeof(vb), "%u.%u.%u", ver[0], ver[1], ver[2]);
+            d["ver"] = vb;
+            String out; serializeJson(d, out);
+            server.send(200, "application/json", out);
+            notify_ui();
+        },
+        [](){
+            HTTPUpload &upload = server.upload();
+            if (upload.status == UPLOAD_FILE_START) {
+                ext_ota_total = 0;
+                if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
+                ext_ota_buf = (uint8_t*)malloc(EXT_OTA_MAX_SIZE);
+                if (!ext_ota_buf) Serial.println("[FW] malloc failed");
+            } else if (upload.status == UPLOAD_FILE_WRITE) {
+                if (!ext_ota_buf) return;
+                if (ext_ota_total + upload.currentSize > EXT_OTA_MAX_SIZE) {
+                    free(ext_ota_buf); ext_ota_buf = nullptr;
+                    Serial.println("[FW] image too large");
+                    return;
+                }
+                memcpy(ext_ota_buf + ext_ota_total, upload.buf, upload.currentSize);
+                ext_ota_total += upload.currentSize;
+            } else if (upload.status == UPLOAD_FILE_ABORTED) {
+                if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
+                ext_ota_total = 0;
+                Serial.println("[FW] upload aborted, buffer released");
+            }
+        }
+    );
+
         /* -- Extension OTA -- */
     server.on("/api/ota/extension", HTTP_POST,
         [](){
@@ -2465,7 +2726,15 @@ static void setup_web(void) {
                           ext_ota_total, ext_ota_addr);
             ota_in_progress = true;
             vTaskDelay(pdMS_TO_TICKS(300));  /* let task_bus finish current poll */
-            bool ok = ext_ota_send(ext_ota_addr, ext_ota_buf, ext_ota_total);
+            uint8_t utype = 0, uver[3] = {0,0,0};
+            if (!fw_parse_desc(ext_ota_buf, ext_ota_total, &utype, uver)) {
+                free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
+                ota_in_progress = false;
+                server.send(400, "application/json",
+                            F("{\"error\":\"image has no Unisync descriptor\"}"));
+                return;
+            }
+            bool ok = ext_ota_send(ext_ota_addr, ext_ota_buf, ext_ota_total, utype, uver);
             free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
             ota_in_progress = false;
             if (ok) {
@@ -2984,6 +3253,133 @@ static void setup_web(void) {
 /* ================================================================
  * SETUP
  * ================================================================ */
+/* ================================================================
+ * FIRMWARE LIBRARY HELPERS
+ * ================================================================ */
+static uint32_t fw_crc32(const uint8_t *d, uint32_t n) {
+    uint32_t c = 0xFFFFFFFF;
+    while (n--) {
+        c ^= *d++;
+        for (int i = 0; i < 8; i++)
+            c = (c & 1) ? (c >> 1) ^ 0xEDB88320UL : c >> 1;
+    }
+    return c ^ 0xFFFFFFFF;
+}
+
+/* true if a is strictly newer than b. Never equal, never older -- an
+ * update must be an upgrade, or two masters holding different builds
+ * would push an extension back and forth forever. */
+static bool fw_ver_newer(const uint8_t *a, const uint8_t *b) {
+    if (a[0] != b[0]) return a[0] > b[0];
+    if (a[1] != b[1]) return a[1] > b[1];
+    return a[2] > b[2];
+}
+
+/* Locate the descriptor the extension firmware embeds in its own image
+ * and read the target type and version straight out of it, so the
+ * operator never has to declare them by hand. */
+static bool fw_parse_desc(const uint8_t *img, uint32_t len,
+                          uint8_t *type, uint8_t *ver) {
+    if (len < 16) return false;
+    for (uint32_t i = 0; i + 16 <= len; i++) {
+        if (memcmp(img + i, FW_DESC_MAGIC, 8) == 0) {
+            *type  = img[i + 8];
+            ver[0] = img[i + 10];
+            ver[1] = img[i + 11];
+            ver[2] = img[i + 12];
+            return true;
+        }
+    }
+    return false;
+}
+
+static String fw_path(uint8_t type) { return String("/fw/t") + String(type) + ".bin"; }
+
+static bool fw_lookup(uint8_t type, fw_entry_t *out) {
+    if (!fs_ready) return false;
+    File f = LittleFS.open(FW_MANIFEST_PATH, "r");
+    if (!f) return false;
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+    if (err) return false;
+    for (JsonObject e : doc["images"].as<JsonArray>()) {
+        if ((uint8_t)(e["type"] | 0) != type) continue;
+        out->type   = type;
+        out->ver[0] = e["ver"][0] | 0;
+        out->ver[1] = e["ver"][1] | 0;
+        out->ver[2] = e["ver"][2] | 0;
+        /* Read as uint32_t explicitly. The "| 0" default deduces int, and a
+         * CRC above 0x7FFFFFFF does not fit an int, so half of all images
+         * would read back as 0 and be judged corrupt. */
+        out->size   = e["size"].as<uint32_t>();
+        out->crc    = e["crc"].as<uint32_t>();
+        return out->size > 0;
+    }
+    return false;
+}
+
+/* Store an image and record it in the manifest. The manifest is only
+ * updated after the image file is fully written and read back clean, so
+ * a truncated write can never be handed to an extension. */
+static bool fw_store(uint8_t type, const uint8_t *ver,
+                     const uint8_t *img, uint32_t len) {
+    if (!fs_ready || len == 0 || len > FW_MAX_IMAGE) return false;
+
+    String path = fw_path(type);
+    File f = LittleFS.open(path, "w");
+    if (!f) { Serial.println("[FW] open for write failed"); return false; }
+    uint32_t written = f.write(img, len);
+    f.close();
+    if (written != len) { Serial.println("[FW] short write"); return false; }
+
+    uint32_t crc = fw_crc32(img, len);
+
+    StaticJsonDocument<1024> doc;
+    File m = LittleFS.open(FW_MANIFEST_PATH, "r");
+    if (m) { deserializeJson(doc, m); m.close(); }
+    if (!doc.containsKey("images")) doc.createNestedArray("images");
+
+    JsonArray arr = doc["images"].as<JsonArray>();
+    JsonObject tgt;
+    bool found = false;
+    for (JsonObject e : arr) {
+        if ((uint8_t)(e["type"] | 0) == type) { tgt = e; found = true; break; }
+    }
+    if (!found) {
+        if (arr.size() >= FW_MAX_TYPES) { Serial.println("[FW] manifest full"); return false; }
+        tgt = arr.createNestedObject();
+    }
+    tgt["type"] = type;
+    tgt["size"] = len;
+    tgt["crc"]  = crc;
+    JsonArray v = tgt.containsKey("ver") ? tgt["ver"].as<JsonArray>()
+                                         : tgt.createNestedArray("ver");
+    v.clear();
+    v.add(ver[0]); v.add(ver[1]); v.add(ver[2]);
+
+    m = LittleFS.open(FW_MANIFEST_PATH, "w");
+    if (!m) { Serial.println("[FW] manifest open failed"); return false; }
+    serializeJson(doc, m);
+    m.close();
+
+    Serial.printf("[FW] stored type=%u v%u.%u.%u %u bytes crc=0x%08X\n",
+                  type, ver[0], ver[1], ver[2], len, crc);
+    return true;
+}
+
+/* Read an image back into a caller-supplied buffer. */
+static uint32_t fw_load(uint8_t type, uint8_t *buf, uint32_t max) {
+    if (!fs_ready) return 0;
+    File f = LittleFS.open(fw_path(type), "r");
+    if (!f) return 0;
+    uint32_t n = f.size();
+    if (n == 0 || n > max) { f.close(); return 0; }
+    uint32_t got = f.read(buf, n);
+    f.close();
+    return (got == n) ? n : 0;
+}
+
 static bool ext_ota_cmd(uint8_t addr, uint8_t cmd,
                          const uint8_t *payload, uint8_t plen,
                          uint32_t timeout_ms) {
@@ -3011,23 +3407,23 @@ static bool ext_ota_cmd(uint8_t addr, uint8_t cmd,
     return true;
 }
 
-static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len) {
-    /* Compute CRC32 */
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint32_t i=0; i<fw_len; i++) {
-        crc ^= fw[i];
-        for (int b=0; b<8; b++) crc = (crc&1)?(crc>>1)^0xEDB88320UL:crc>>1;
-    }
-    crc ^= 0xFFFFFFFF;
-    Serial.printf("[EXT-OTA] Size=%u CRC=0x%08X\n", fw_len, crc);
+static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
+                         uint8_t type, const uint8_t *ver) {
+    uint32_t crc = fw_crc32(fw, fw_len);
+    Serial.printf("[EXT-OTA] type=%u v%u.%u.%u size=%u crc=0x%08X\n",
+                  type, ver[0], ver[1], ver[2], fw_len, crc);
 
-    /* OTA_BEGIN */
-    uint8_t payload[8];
+    /* OTA_BEGIN: size[4] crc[4] type[1] ver[3].
+     * The extension rejects a type mismatch here, before any flash is
+     * touched, so a wrong image costs one frame instead of a brick. */
+    uint8_t payload[12];
     payload[0]=(fw_len>>24)&0xFF; payload[1]=(fw_len>>16)&0xFF;
     payload[2]=(fw_len>>8)&0xFF;  payload[3]=fw_len&0xFF;
     payload[4]=(crc>>24)&0xFF;    payload[5]=(crc>>16)&0xFF;
     payload[6]=(crc>>8)&0xFF;     payload[7]=crc&0xFF;
-    if (!ext_ota_cmd(addr, CMD_OTA_BEGIN, payload, 8, 1000)) return false;
+    payload[8]=type;
+    payload[9]=ver[0]; payload[10]=ver[1]; payload[11]=ver[2];
+    if (!ext_ota_cmd(addr, CMD_OTA_BEGIN, payload, 12, 1000)) return false;
     Serial.println("[EXT-OTA] BEGIN ok");
     vTaskDelay(pdMS_TO_TICKS(100)); /* give extension time to enter OTA mode */
 
@@ -3065,11 +3461,231 @@ static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len) {
     return true;
 }
 
+/* ================================================================
+ * RECONCILIATION
+ * Converge every online extension toward the manifest. Runs from the bus
+ * task so it can never overlap a poll, one extension at a time because
+ * the RS-485 bus is shared and half duplex.
+ * ================================================================ */
+static void fw_reconcile(void) {
+    if (!fs_ready || ota_in_progress) return;
+
+    for (int i = 0; i < MAX_EXTENSIONS; i++) {
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool     ready = (extensions[i].state == EXT_ONLINE);
+        uint8_t  addr  = extensions[i].address;
+        uint8_t  type  = extensions[i].hw_type;
+        uint8_t  cur[3] = { extensions[i].fw_ver[0],
+                            extensions[i].fw_ver[1],
+                            extensions[i].fw_ver[2] };
+        uint8_t  fails = extensions[i].ota_fails;
+        uint32_t gate  = extensions[i].ota_next_try_ms;
+        xSemaphoreGive(state_mutex);
+
+        if (!ready) continue;
+        if (type == 0 || type == 0xFF) continue;      /* identity not known */
+        if (fails >= OTA_MAX_FAILS) continue;         /* given up, shown in UI */
+        if (gate && (int32_t)(millis() - gate) < 0) continue;
+
+        fw_entry_t e;
+        if (!fw_lookup(type, &e)) continue;
+        if (!fw_ver_newer(e.ver, cur)) continue;      /* upgrades only */
+
+        uint8_t *img = (uint8_t *)malloc(e.size);
+        if (!img) { Serial.println("[FW] reconcile: out of memory"); return; }
+        uint32_t n = fw_load(type, img, e.size);
+        if (n != e.size || fw_crc32(img, n) != e.crc) {
+            Serial.printf("[FW] stored image for type %u is corrupt, ignoring\n", type);
+            free(img);
+            continue;
+        }
+
+        Serial.printf("[FW] updating ext 0x%02X type=%u v%u.%u.%u -> v%u.%u.%u\n",
+                      addr, type, cur[0], cur[1], cur[2], e.ver[0], e.ver[1], e.ver[2]);
+
+        ota_in_progress = true;
+        vTaskDelay(pdMS_TO_TICKS(200));
+        bool ok = ext_ota_send(addr, img, n, type, e.ver);
+        ota_in_progress = false;
+        free(img);
+
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (ok) {
+            extensions[i].ota_fails       = 0;
+            extensions[i].ota_next_try_ms = 0;
+            /* Version is re-learned from CMD_GET_INFO once it re-registers. */
+            extensions[i].hw_type         = type;
+        } else {
+            extensions[i].ota_fails++;
+            extensions[i].ota_next_try_ms = millis() + OTA_BACKOFF_MS;
+            Serial.printf("[FW] ext 0x%02X update failed (%u/%u)\n",
+                          addr, extensions[i].ota_fails, OTA_MAX_FAILS);
+        }
+        xSemaphoreGive(state_mutex);
+        notify_ui();
+        return;   /* one extension per pass; bus stays responsive */
+    }
+}
+
+/* ================================================================
+ * MESH FIRMWARE DISTRIBUTION
+ * Stop-and-wait, receiver driven: the peer asks for the chunk it wants
+ * next, so delivery is inherently ordered and a lost packet costs one
+ * retry instead of the whole transfer.
+ * ================================================================ */
+static void fw_pkt_hdr(uint8_t *p, uint8_t sub, uint8_t type,
+                       const uint8_t *ver, uint16_t idx, uint16_t total,
+                       uint32_t size, uint32_t crc) {
+    p[0]=FWPKT_MAGIC; p[1]=sub; p[2]=type;
+    p[3]=ver[0]; p[4]=ver[1]; p[5]=ver[2];
+    p[6]=idx & 0xFF;    p[7]=(idx >> 8) & 0xFF;
+    p[8]=total & 0xFF;  p[9]=(total >> 8) & 0xFF;
+    p[10]=size & 0xFF;  p[11]=(size >> 8) & 0xFF;
+    p[12]=crc & 0xFF;        p[13]=(crc >> 8) & 0xFF;
+    p[14]=(crc >> 16) & 0xFF; p[15]=(crc >> 24) & 0xFF;
+}
+
+/* Offer an image to every known peer. They pull what they want. */
+static void fw_mesh_offer(uint8_t type, const uint8_t *ver,
+                          uint32_t size, uint32_t crc) {
+    if (!mesh_active) return;
+    uint16_t total = (size + FWPKT_DATA - 1) / FWPKT_DATA;
+    uint8_t pkt[FWPKT_HDR];
+    fw_pkt_hdr(pkt, FWPKT_OFFER, type, ver, 0, total, size, crc);
+    int sent = 0;
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_MESH_MASTERS; i++) {
+        if (!mesh_peers[i].online) continue;
+        uint8_t mac[6]; memcpy(mac, mesh_peers[i].mac, 6);
+        xSemaphoreGive(state_mutex);
+        mesh_send(mac, pkt, sizeof(pkt));
+        sent++;
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+    }
+    xSemaphoreGive(state_mutex);
+    Serial.printf("[FW-MESH] offered type=%u v%u.%u.%u to %d peer(s)\n",
+                  type, ver[0], ver[1], ver[2], sent);
+}
+
+static void fwrx_abort(const char *why) {
+    if (fwrx_buf) { free(fwrx_buf); fwrx_buf = nullptr; }
+    fwrx_active = false;
+    Serial.printf("[FW-MESH] receive aborted: %s\n", why);
+}
+
+static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
+    if (!mesh_active || len < FWPKT_HDR) return;
+
+    uint8_t  sub   = d[1];
+    uint8_t  type  = d[2];
+    uint8_t  ver[3]= { d[3], d[4], d[5] };
+    uint16_t idx   = (uint16_t)d[6] | ((uint16_t)d[7] << 8);
+    uint16_t total = (uint16_t)d[8] | ((uint16_t)d[9] << 8);
+    uint32_t size  = (uint32_t)d[10] | ((uint32_t)d[11] << 8);
+    uint32_t crc   = (uint32_t)d[12] | ((uint32_t)d[13] << 8)
+                   | ((uint32_t)d[14] << 16) | ((uint32_t)d[15] << 24);
+
+    if (sub == FWPKT_OFFER) {
+        if (fwrx_active) return;                       /* already busy */
+        if (size == 0 || size > FW_MAX_IMAGE) return;
+        fw_entry_t have;
+        if (fw_lookup(type, &have) && !fw_ver_newer(ver, have.ver)) return;
+        fwrx_buf = (uint8_t *)malloc(size);
+        if (!fwrx_buf) { Serial.println("[FW-MESH] no heap for offer"); return; }
+        fwrx_active = true; fwrx_type = type;
+        fwrx_ver[0]=ver[0]; fwrx_ver[1]=ver[1]; fwrx_ver[2]=ver[2];
+        fwrx_size = size; fwrx_crc = crc; fwrx_total = total; fwrx_next = 0;
+        memcpy(fwrx_src, src, 6);
+        fwrx_last_ms = millis();
+        Serial.printf("[FW-MESH] accepting type=%u v%u.%u.%u %u bytes\n",
+                      type, ver[0], ver[1], ver[2], size);
+        uint8_t req[FWPKT_HDR];
+        fw_pkt_hdr(req, FWPKT_REQ, type, ver, 0, total, size, crc);
+        mesh_send(fwrx_src, req, sizeof(req));
+        return;
+    }
+
+    if (sub == FWPKT_REQ) {
+        /* We are the origin: serve the requested chunk from our copy. */
+        fw_entry_t e;
+        if (!fw_lookup(type, &e)) return;
+        if (e.ver[0]!=ver[0] || e.ver[1]!=ver[1] || e.ver[2]!=ver[2]) return;
+        uint32_t off = (uint32_t)idx * FWPKT_DATA;
+        if (off >= e.size) return;
+        uint32_t n = e.size - off;
+        if (n > FWPKT_DATA) n = FWPKT_DATA;
+
+        File f = LittleFS.open(fw_path(type), "r");
+        if (!f) return;
+        if (!f.seek(off)) { f.close(); return; }
+        uint8_t pkt[FWPKT_HDR + FWPKT_DATA];
+        uint16_t tot = (e.size + FWPKT_DATA - 1) / FWPKT_DATA;
+        fw_pkt_hdr(pkt, FWPKT_CHUNK, type, e.ver, idx, tot, e.size, e.crc);
+        uint32_t got = f.read(pkt + FWPKT_HDR, n);
+        f.close();
+        if (got != n) return;
+        mesh_send(src, pkt, FWPKT_HDR + n);
+        return;
+    }
+
+    if (sub == FWPKT_CHUNK) {
+        if (!fwrx_active || memcmp(src, fwrx_src, 6) != 0) return;
+        if (type != fwrx_type || idx != fwrx_next) return;   /* out of order */
+        uint32_t off = (uint32_t)idx * FWPKT_DATA;
+        uint32_t n   = (uint32_t)len - FWPKT_HDR;
+        if (off + n > fwrx_size) { fwrx_abort("overrun"); return; }
+        memcpy(fwrx_buf + off, d + FWPKT_HDR, n);
+        fwrx_next++;
+        fwrx_last_ms = millis();
+
+        if (off + n >= fwrx_size) {
+            if (fw_crc32(fwrx_buf, fwrx_size) != fwrx_crc) {
+                fwrx_abort("CRC mismatch");
+                return;
+            }
+            bool ok = fw_store(fwrx_type, fwrx_ver, fwrx_buf, fwrx_size);
+            uint8_t done[FWPKT_HDR];
+            fw_pkt_hdr(done, FWPKT_DONE, fwrx_type, fwrx_ver, 0,
+                       fwrx_total, fwrx_size, fwrx_crc);
+            mesh_send(fwrx_src, done, sizeof(done));
+            free(fwrx_buf); fwrx_buf = nullptr; fwrx_active = false;
+            Serial.printf("[FW-MESH] image received and %s\n",
+                          ok ? "stored" : "REJECTED by storage");
+            notify_ui();
+            return;
+        }
+        uint8_t req[FWPKT_HDR];
+        fw_pkt_hdr(req, FWPKT_REQ, fwrx_type, fwrx_ver, fwrx_next,
+                   fwrx_total, fwrx_size, fwrx_crc);
+        mesh_send(fwrx_src, req, sizeof(req));
+        return;
+    }
+
+    if (sub == FWPKT_DONE) {
+        Serial.printf("[FW-MESH] peer confirmed type=%u v%u.%u.%u\n",
+                      type, ver[0], ver[1], ver[2]);
+        return;
+    }
+}
+
+/* Re-ask if a chunk goes missing; give up rather than hang forever. */
+static void fw_mesh_tick(void) {
+    if (!fwrx_active) return;
+    if ((millis() - fwrx_last_ms) < FWRX_TIMEOUT_MS) return;
+    static uint8_t stalls = 0;
+    if (++stalls > 10) { stalls = 0; fwrx_abort("peer stopped responding"); return; }
+    uint8_t req[FWPKT_HDR];
+    fw_pkt_hdr(req, FWPKT_REQ, fwrx_type, fwrx_ver, fwrx_next,
+               fwrx_total, fwrx_size, fwrx_crc);
+    mesh_send(fwrx_src, req, sizeof(req));
+    fwrx_last_ms = millis();
+}
+
 void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
     delay(500);
-    Serial.println("\n[MASTER] Unisync v11.9.2 - booting");
+    Serial.println("\n[MASTER] Unisync v" MASTER_FW_VERSION " - booting");
 
     /* Configure relay pins with pull-down before anything else
      * prevents GPIO float causing relay to fire during boot     */
@@ -3110,6 +3726,7 @@ void setup() {
         extensions[i].last_relay1_cmd_ms=0;
         extensions[i].last_relay2_cmd_ms=0;
         memset(extensions[i].uid,0,4);
+        ext_reset_identity(&extensions[i]);
         snprintf(extensions[i].name,sizeof(extensions[i].name),"Slot-%d",i+1);
     }
     for (int i=0;i<MAX_PENDING;i++)    pending_queue[i].active=false;
@@ -3213,6 +3830,23 @@ void setup() {
     xTaskCreate(task_bus,  "bus",  4096,NULL,2,NULL);
     xTaskCreate(task_web,  "web",  8192,NULL,1,NULL);
 
+    /* Mount without formatting first, so a first boot and a genuinely
+     * broken partition produce different messages. The esp_littlefs
+     * component logs its own errors on a failed mount; those are
+     * expected once, on a partition that has never been formatted. */
+    if (LittleFS.begin(false)) {
+        fs_ready = true;
+    } else {
+        Serial.println("[FW] no filesystem yet, formatting (normal on first boot)");
+        if (LittleFS.begin(true)) fs_ready = true;
+    }
+    if (fs_ready) {
+        if (!LittleFS.exists("/fw")) LittleFS.mkdir("/fw");
+        Serial.printf("[FW] filesystem ready (%u KB free)\n",
+                      (LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024);
+    } else {
+        Serial.println("[FW] filesystem UNUSABLE -- firmware library disabled");
+    }
     Serial.println("[MASTER] Ready - connect to Unisync -> 192.168.4.1");
 }
 
