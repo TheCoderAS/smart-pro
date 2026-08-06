@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.9.5
+ * Unisync - Master Firmware v11.11.2
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -28,10 +28,11 @@
 #include <HTTPClient.h>
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "mbedtls/sha256.h"
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.9.5"
+#define MASTER_FW_VERSION  "11.11.3"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -44,6 +45,118 @@
 #include "esp_wifi.h"
 #include "driver/gpio.h"
 #include "html_content.h"
+
+/* Placed directly after the includes on purpose: the Arduino build
+ * generates function prototypes and inserts them above the first
+ * function in the sketch. A type used in a prototype must therefore
+ * be declared before that point, or every SHA-256 function fails to
+ * compile with "sha256_t was not declared in this scope".
+ */
+/* ================================================================
+ * SHA-256 and HMAC-SHA-256
+ * Compact implementation shared byte-for-byte by the master and the
+ * extension so both sides can never disagree. Replaces CRC32, which is
+ * linear and therefore forgeable from a handful of observed pairs.
+ * ================================================================ */
+typedef struct {
+    uint32_t st[8];
+    uint32_t len;
+    uint8_t  buf[64];
+    uint8_t  n;
+} sha256_t;
+
+static const uint32_t SHA_K[64] = {
+0x428a2f98UL,0x71374491UL,0xb5c0fbcfUL,0xe9b5dba5UL,0x3956c25bUL,0x59f111f1UL,
+0x923f82a4UL,0xab1c5ed5UL,0xd807aa98UL,0x12835b01UL,0x243185beUL,0x550c7dc3UL,
+0x72be5d74UL,0x80deb1feUL,0x9bdc06a7UL,0xc19bf174UL,0xe49b69c1UL,0xefbe4786UL,
+0x0fc19dc6UL,0x240ca1ccUL,0x2de92c6fUL,0x4a7484aaUL,0x5cb0a9dcUL,0x76f988daUL,
+0x983e5152UL,0xa831c66dUL,0xb00327c8UL,0xbf597fc7UL,0xc6e00bf3UL,0xd5a79147UL,
+0x06ca6351UL,0x14292967UL,0x27b70a85UL,0x2e1b2138UL,0x4d2c6dfcUL,0x53380d13UL,
+0x650a7354UL,0x766a0abbUL,0x81c2c92eUL,0x92722c85UL,0xa2bfe8a1UL,0xa81a664bUL,
+0xc24b8b70UL,0xc76c51a3UL,0xd192e819UL,0xd6990624UL,0xf40e3585UL,0x106aa070UL,
+0x19a4c116UL,0x1e376c08UL,0x2748774cUL,0x34b0bcb5UL,0x391c0cb3UL,0x4ed8aa4aUL,
+0x5b9cca4fUL,0x682e6ff3UL,0x748f82eeUL,0x78a5636fUL,0x84c87814UL,0x8cc70208UL,
+0x90befffaUL,0xa4506cebUL,0xbef9a3f7UL,0xc67178f2UL };
+
+#define SHA_ROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+
+static void sha256_block(sha256_t *c, const uint8_t *p) {
+    uint32_t w[64], a,b,cc,d,e,f,g,h,t1,t2;
+    for (int i=0;i<16;i++)
+        w[i]=((uint32_t)p[i*4]<<24)|((uint32_t)p[i*4+1]<<16)|
+             ((uint32_t)p[i*4+2]<<8)|(uint32_t)p[i*4+3];
+    for (int i=16;i<64;i++) {
+        uint32_t s0=SHA_ROR(w[i-15],7)^SHA_ROR(w[i-15],18)^(w[i-15]>>3);
+        uint32_t s1=SHA_ROR(w[i-2],17)^SHA_ROR(w[i-2],19)^(w[i-2]>>10);
+        w[i]=w[i-16]+s0+w[i-7]+s1;
+    }
+    a=c->st[0];b=c->st[1];cc=c->st[2];d=c->st[3];
+    e=c->st[4];f=c->st[5];g=c->st[6];h=c->st[7];
+    for (int i=0;i<64;i++) {
+        uint32_t S1=SHA_ROR(e,6)^SHA_ROR(e,11)^SHA_ROR(e,25);
+        uint32_t ch=(e&f)^((~e)&g);
+        t1=h+S1+ch+SHA_K[i]+w[i];
+        uint32_t S0=SHA_ROR(a,2)^SHA_ROR(a,13)^SHA_ROR(a,22);
+        uint32_t mj=(a&b)^(a&cc)^(b&cc);
+        t2=S0+mj;
+        h=g;g=f;f=e;e=d+t1;d=cc;cc=b;b=a;a=t1+t2;
+    }
+    c->st[0]+=a;c->st[1]+=b;c->st[2]+=cc;c->st[3]+=d;
+    c->st[4]+=e;c->st[5]+=f;c->st[6]+=g;c->st[7]+=h;
+}
+
+static void sha256_init(sha256_t *c) {
+    c->st[0]=0x6a09e667UL;c->st[1]=0xbb67ae85UL;c->st[2]=0x3c6ef372UL;
+    c->st[3]=0xa54ff53aUL;c->st[4]=0x510e527fUL;c->st[5]=0x9b05688cUL;
+    c->st[6]=0x1f83d9abUL;c->st[7]=0x5be0cd19UL;
+    c->len=0;c->n=0;
+}
+
+static void sha256_update(sha256_t *c, const uint8_t *p, uint32_t n) {
+    c->len += n;
+    while (n--) {
+        c->buf[c->n++]=*p++;
+        if (c->n==64) { sha256_block(c,c->buf); c->n=0; }
+    }
+}
+
+static void sha256_final(sha256_t *c, uint8_t *out) {
+    uint32_t bits = c->len * 8;
+    c->buf[c->n++]=0x80;
+    if (c->n>56) { while(c->n<64) c->buf[c->n++]=0; sha256_block(c,c->buf); c->n=0; }
+    while (c->n<56) c->buf[c->n++]=0;
+    c->buf[56]=0;c->buf[57]=0;c->buf[58]=0;c->buf[59]=0;
+    c->buf[60]=(bits>>24)&0xFF;c->buf[61]=(bits>>16)&0xFF;
+    c->buf[62]=(bits>>8)&0xFF; c->buf[63]=bits&0xFF;
+    sha256_block(c,c->buf);
+    for (int i=0;i<8;i++) {
+        out[i*4]  =(c->st[i]>>24)&0xFF; out[i*4+1]=(c->st[i]>>16)&0xFF;
+        out[i*4+2]=(c->st[i]>>8)&0xFF;  out[i*4+3]=c->st[i]&0xFF;
+    }
+}
+
+/* HMAC-SHA-256 with a 16-byte key. */
+static void hmac_sha256(const uint8_t *key, const uint8_t *msg, uint32_t mlen,
+                        uint8_t *out32) {
+    uint8_t k_ipad[64], k_opad[64], inner[32];
+    sha256_t c;
+    for (int i=0;i<64;i++) {
+        uint8_t kb = (i<16) ? key[i] : 0;
+        k_ipad[i]=kb^0x36; k_opad[i]=kb^0x5c;
+    }
+    sha256_init(&c); sha256_update(&c,k_ipad,64);
+    sha256_update(&c,msg,mlen); sha256_final(&c,inner);
+    sha256_init(&c); sha256_update(&c,k_opad,64);
+    sha256_update(&c,inner,32); sha256_final(&c,out32);
+}
+
+/* Constant-time compare: an early exit leaks how many bytes matched. */
+static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
+    uint8_t d=0;
+    while (n--) d |= (uint8_t)(*a++ ^ *b++);
+    return d==0;
+}
+
 
 /* ================================================================
  * PINS
@@ -100,13 +213,12 @@
 #define CMD_ANNOUNCE      0x50
 #define CMD_WELCOME       0x51
 #define CMD_REJECT        0x52
-#define CMD_CHALLENGE     0x54  /* M->E: uid[4] + challenge[4] */
-#define CMD_RESPONSE      0x55  /* E->M: uid[4] + crc32[4] */
+#define CMD_CHALLENGE     0x54  /* M->E: uid[4] + nonce[8] */
+#define CMD_RESPONSE      0x55  /* E->M: uid[4] + hmac[8] */
 #define CMD_FACTORY_RESET 0x60
 #define CMD_ERROR         0xF0
 
 /* Secret key - must match extension firmware exactly */
-static const uint8_t SECRET_KEY[16] = {0x55, 0x6E, 0x69, 0x73, 0x79, 0x6E, 0x63, 0x53, 0x77, 0x69, 0x74, 0x63, 0x68, 0x4B, 0x65, 0x79};
 
 /* ================================================================
  * MESH CONFIG
@@ -237,6 +349,7 @@ typedef struct {
     uint8_t     hw_rev;
     uint8_t     fw_ver[3];           /* major, minor, patch */
     uint8_t     ota_fails;           /* consecutive failed update attempts */
+    uint8_t     ota_fail_ver[3];     /* which version those failures were for */
     uint32_t    ota_next_try_ms;     /* backoff gate */
 } extension_t;
 
@@ -244,7 +357,7 @@ typedef struct {
 #define MAX_CHALLENGES 5
 typedef struct {
     uint8_t  uid[4];
-    uint8_t  challenge[4];
+    uint8_t  nonce[8];
     uint32_t sent_ms;
     bool     active;
 } pending_challenge_t;
@@ -299,7 +412,7 @@ static String       ota_status      = "";
 #define FW_DESC_MAGIC     "UNISYNC1"
 #define FW_MANIFEST_PATH  "/fw/manifest.json"
 #define FW_MAX_TYPES      8
-#define FW_MAX_IMAGE      (10 * 1024)
+#define FW_MAX_IMAGE      (12 * 1024)
 #define RECONCILE_MS      30000UL
 #define OTA_MAX_FAILS     3
 #define OTA_BACKOFF_MS    120000UL
@@ -309,6 +422,8 @@ typedef struct {
     uint8_t  ver[3];
     uint32_t size;
     uint32_t crc;
+    uint8_t  secver;
+    uint8_t  sig[32];      /* HMAC-SHA256 over the image */
 } fw_entry_t;
 
 /* ---- master firmware convergence ----
@@ -327,6 +442,58 @@ static bool     master_serve_busy  = false;   /* this node is uploading    */
 static uint32_t master_pull_gate   = 0;       /* backoff after a failure   */
 static uint8_t  master_fw[3]       = {0,0,0}; /* our own version, parsed   */
 
+/* ================================================================
+ * ACCESS CONTROL
+ * Until now every endpoint was open: anyone who joined the WiFi could
+ * switch relays, unpair switches or push firmware. Sessions are held in
+ * RAM only, so a reboot logs everyone out, which is the safe default.
+ * ================================================================ */
+#define AUTH_SESSIONS      4
+#define AUTH_TOKEN_LEN     33          /* 32 hex chars + NUL */
+#define AUTH_SESSION_MS    3600000UL   /* 1 hour */
+#define AUTH_MAX_FAILS     5
+#define AUTH_LOCKOUT_MS    300000UL    /* 5 min after 5 bad passwords */
+#define RATE_WINDOW_MS     10000UL
+#define RATE_MAX_REQS      40          /* per client per window */
+#define AUDIT_ENTRIES      24
+
+typedef struct {
+    char     token[AUTH_TOKEN_LEN];
+    uint32_t expires_ms;
+    uint32_t ip;
+} auth_session_t;
+
+static auth_session_t auth_sessions[AUTH_SESSIONS];
+static uint8_t        auth_fails      = 0;
+static uint32_t       auth_lock_until = 0;
+static bool           owner_pw_set    = false;
+
+typedef struct {
+    uint32_t ip;
+    uint32_t window_start;
+    uint16_t count;
+} rate_bucket_t;
+static rate_bucket_t rate_buckets[AUTH_SESSIONS * 2];
+
+typedef struct {
+    uint32_t at_s;
+    uint32_t ip;
+    char     what[40];
+} audit_entry_t;
+static audit_entry_t audit_log[AUDIT_ENTRIES];
+static uint8_t       audit_head = 0;
+
+/* Root key for bus authentication. Each extension is provisioned with
+ * HMAC(root_key, its uid), so the master derives any device's key from
+ * its UID and needs no key database. Extracting one extension exposes
+ * only that extension. */
+static char     standalone_pass[64] = {0};  /* per-device, non-mesh AP */
+static uint8_t  root_key[16] = {0};
+static bool     root_key_set = false;
+static uint8_t  fw_key[16]   = {0};
+static bool     fw_key_set   = false;
+
+static bool     upload_authed  = false;   /* set at UPLOAD_FILE_START */
 static bool     fs_ready       = false;
 static uint32_t last_reconcile = 0;
 
@@ -338,8 +505,8 @@ static uint32_t last_reconcile = 0;
 #define FWPKT_REQ       0x02
 #define FWPKT_CHUNK     0x03
 #define FWPKT_DONE      0x04
-#define FWPKT_HDR       16
-#define FWPKT_DATA      192          /* 16 + 192 = 208, under the 250 cap */
+#define FWPKT_HDR       49   /* 16 + secver + 32-byte signature */
+#define FWPKT_DATA      192          /* 49 + 192 = 241, under the 250 cap */
 #define FWRX_TIMEOUT_MS 800
 
 static bool     fwrx_active  = false;
@@ -351,6 +518,8 @@ static uint16_t fwrx_total   = 0;
 static uint16_t fwrx_next    = 0;
 static uint8_t *fwrx_buf     = nullptr;
 static uint8_t  fwrx_src[6]  = {0};
+static uint8_t  fwrx_sec     = 0;
+static uint8_t  fwrx_sig[32] = {0};
 static uint32_t fwrx_last_ms = 0;
 
 /* Forward declarations. The firmware-library and mesh-distribution
@@ -360,6 +529,16 @@ static uint32_t fwrx_last_ms = 0;
 static void     ext_reset_identity(extension_t *e);
 static void     master_ver_parse(const char *s, uint8_t *v);
 static void     task_fwsync(void *arg);
+static void     hmac_sha256(const uint8_t *key, const uint8_t *msg,
+                            uint32_t mlen, uint8_t *out32);
+static bool     ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n);
+static void     sha256_hex(const char *in, const char *salt, char *out65);
+static void     rand_hex(char *out, int hex_chars);
+static bool     safe_equal(const char *a, const char *b, size_t n);
+static bool     rate_ok(void);
+static bool     auth_valid(void);
+static bool     auth_ok(void);
+static void     audit(const char *what);
 static uint32_t master_image_size(void);
 static void     master_fw_sync(void);
 static uint32_t fw_crc32(const uint8_t *d, uint32_t n);
@@ -368,19 +547,22 @@ static bool     fw_parse_desc(const uint8_t *img, uint32_t len,
                               uint8_t *type, uint8_t *ver);
 static bool     fw_lookup(uint8_t type, fw_entry_t *out);
 static bool     fw_store(uint8_t type, const uint8_t *ver,
-                         const uint8_t *img, uint32_t len);
+                         const uint8_t *img, uint32_t len,
+                         uint8_t secver, const uint8_t *sig);
 static uint32_t fw_load(uint8_t type, uint8_t *buf, uint32_t max);
 static void     fw_reconcile(void);
 static void     fw_mesh_offer(uint8_t type, const uint8_t *ver,
-                              uint32_t size, uint32_t crc);
+                              uint32_t size, uint32_t crc,
+                              uint8_t secver, const uint8_t *sig);
 static void     fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len);
 static void     fw_mesh_tick(void);
 static bool     ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
-                             uint8_t type, const uint8_t *ver);
+                             uint8_t type, const uint8_t *ver,
+                             uint8_t secver, const uint8_t *sig);
 
 /* Extension OTA -- buffer entire firmware in heap before sending */
 #define EXT_OTA_CHUNK_SIZE   32
-#define EXT_OTA_MAX_SIZE     (10 * 1024)
+#define EXT_OTA_MAX_SIZE     (12 * 1024)
 static uint8_t     *ext_ota_buf     = nullptr;
 static uint32_t     ext_ota_total   = 0;
 static uint8_t      ext_ota_addr    = 0;
@@ -447,21 +629,13 @@ static uint32_t crc32_compute(const uint8_t *data, uint8_t len) {
     return crc ^ 0xFFFFFFFF;
 }
 
-static uint32_t compute_expected_response(const uint8_t *challenge,
-                                          const uint8_t *uid) {
-    uint8_t buf[24];
-    for (int i=0; i<16; i++) buf[i]    = SECRET_KEY[i];
-    for (int i=0; i<4;  i++) buf[16+i] = challenge[i];
-    for (int i=0; i<4;  i++) buf[20+i] = uid[i];
-    return crc32_compute(buf, 24);
-}
 
 /* ================================================================
  * RS-485
  * ================================================================ */
 static void bus_send(uint8_t dst, uint8_t cmd,
                      const uint8_t *payload, uint8_t len) {
-    uint8_t frame[48];
+    uint8_t frame[56];
     frame[0]=SOF; frame[1]=dst; frame[2]=ADDR_MASTER;
     frame[3]=cmd; frame[4]=len;
     for (int i=0; i<len; i++) frame[5+i]=payload[i];
@@ -509,8 +683,15 @@ static void notify_ui(void) {
 
 /* Find or create peer slot by UID */
 static int mesh_find_peer(const uint8_t *uid) {
-    for (int i=0; i<MAX_MESH_MASTERS; i++)
+    /* An empty slot holds uid 00000000, so a sender claiming that UID
+     * would match one and be treated as enrolled. Skip empty slots. */
+    if (!uid[0] && !uid[1] && !uid[2] && !uid[3]) return -1;
+    for (int i=0; i<MAX_MESH_MASTERS; i++) {
+        if (mesh_peers[i].last_seen_ms == 0 &&
+            !mesh_peers[i].uid[0] && !mesh_peers[i].uid[1] &&
+            !mesh_peers[i].uid[2] && !mesh_peers[i].uid[3]) continue;
         if (memcmp(mesh_peers[i].uid, uid, 4)==0) return i;
+    }
     return -1;
 }
 
@@ -643,7 +824,9 @@ static void mesh_generate_pin(void) {
     snprintf(mesh_pin, sizeof(mesh_pin), "%06u", r % 1000000);
     mesh_pin_ms    = millis();
     mesh_pin_valid = true;
-    Serial.printf("[MESH] PIN generated: %s\n", mesh_pin);
+    /* Not logged: the serial console is not a trusted channel and the PIN
+     * is the only thing standing between an outsider and mesh membership. */
+    Serial.println("[MESH] PIN generated (shown in the app only)");
 }
 
 /* Verify incoming PIN */
@@ -653,7 +836,23 @@ static bool mesh_verify_pin(const char *pin) {
         mesh_pin_valid = false;
         return false;
     }
-    bool ok = (strncmp(pin, mesh_pin, 6)==0);
+    /* Six digits is a million values; without a limit that is minutes of
+     * online guessing. Lock out after a handful of wrong attempts. */
+    static uint8_t  pin_fails = 0;
+    static uint32_t pin_lock  = 0;
+    if (pin_lock && (int32_t)(millis() - pin_lock) < 0) return false;
+
+    bool ok = safe_equal(pin, mesh_pin, 6);
+    if (!ok) {
+        if (++pin_fails >= AUTH_MAX_FAILS) {
+            pin_lock  = millis() + AUTH_LOCKOUT_MS;
+            pin_fails = 0;
+            mesh_pin_valid = false;   /* burn it, force a fresh one */
+            Serial.println("[MESH] too many bad PINs, invalidated");
+        }
+        return false;
+    }
+    pin_fails = 0;
     if (ok) mesh_pin_valid = false; /* consume PIN */
     return ok;
 }
@@ -694,9 +893,12 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
     if (memcmp(src_uid, master_uid, 4)==0) return;
 
     if (type == MESH_PKT_STATE) {
-        /* State gossip from a peer */
-        int idx = mesh_alloc_peer(src_uid, info->src_addr);
-        if (idx < 0) return; /* mesh full */
+        /* Only peers admitted through the PIN-authenticated join are
+         * accepted. Previously any device that emitted one well-formed
+         * state packet enrolled itself, which made the PIN decorative and
+         * opened the firmware-distribution path to outsiders. */
+        int idx = mesh_find_peer(src_uid);
+        if (idx < 0) return;   /* unknown sender, ignore */
 
         /* Ensure this peer is registered as ESP-NOW peer with AP MAC.
          * Re-register on every gossip in case peer rebooted or was lost.
@@ -1508,64 +1710,60 @@ static int pending_count(void) {
  * ================================================================ */
 /* Send challenge to extension before welcoming */
 static void send_challenge(const uint8_t *uid) {
-    /* Generate pseudo-random challenge using uid + millis */
-    uint32_t now = millis();
-    uint8_t  challenge[4];
-    challenge[0] = (now >> 24) ^ uid[0] ^ uid[3];
-    challenge[1] = (now >> 16) ^ uid[1] ^ uid[2];
-    challenge[2] = (now >>  8) ^ uid[2] ^ uid[1];
-    challenge[3] = (now)       ^ uid[3] ^ uid[0];
+    int i = -1;
+    for (int k=0;k<MAX_PENDING;k++) if (!challenges[k].active) { i=k; break; }
+    if (i < 0) return;
 
-    /* Store challenge for verification */
-    for (int i=0; i<MAX_CHALLENGES; i++) {
-        if (!challenges[i].active) {
-            memcpy(challenges[i].uid,       uid,       4);
-            memcpy(challenges[i].challenge, challenge, 4);
-            challenges[i].sent_ms = millis();
-            challenges[i].active  = true;
-            break;
-        }
+    /* A real nonce. The old challenge was millis() XOR uid, and millis()
+     * restarts at zero, so challenges repeated after every power cut and a
+     * recorded exchange could simply be replayed. */
+    uint8_t nonce[8];
+    for (int k=0;k<8;k+=4) {
+        uint32_t r = esp_random();
+        nonce[k]=r&0xFF; nonce[k+1]=(r>>8)&0xFF;
+        nonce[k+2]=(r>>16)&0xFF; nonce[k+3]=(r>>24)&0xFF;
     }
+    memcpy(challenges[i].uid, uid, 4);
+    memcpy(challenges[i].nonce, nonce, 8);
+    challenges[i].active  = true;
+    challenges[i].sent_ms = millis();
 
-    uint8_t frame[40];
-    frame[0]=SOF; frame[1]=ADDR_UNASSIGNED; frame[2]=ADDR_MASTER;
-    frame[3]=CMD_CHALLENGE; frame[4]=8;
-    frame[5]=uid[0]; frame[6]=uid[1]; frame[7]=uid[2]; frame[8]=uid[3];
-    frame[9]=challenge[0]; frame[10]=challenge[1];
-    frame[11]=challenge[2]; frame[12]=challenge[3];
-    frame[13]=crc8(&frame[1], 12);
-    digitalWrite(RS485_DE_PIN, HIGH);
-    BusSerial.write(frame, 14);
-    BusSerial.flush();
-    digitalWrite(RS485_DE_PIN, LOW);
-    Serial.printf("[SEC] Challenge sent to %02X%02X%02X%02X\n",
-                  uid[0],uid[1],uid[2],uid[3]);
+    uint8_t payload[12];
+    memcpy(payload, uid, 4);
+    memcpy(payload+4, nonce, 8);
+    bus_send(ADDR_BCAST, CMD_CHALLENGE, payload, 12);
 }
 
 /* Verify challenge response and return true if valid */
-static bool verify_response(const uint8_t *uid, const uint8_t *resp_crc32) {
-    uint32_t received = ((uint32_t)resp_crc32[0]<<24)|
-                        ((uint32_t)resp_crc32[1]<<16)|
-                        ((uint32_t)resp_crc32[2]<<8) |
-                        ((uint32_t)resp_crc32[3]);
+static bool verify_response(const uint8_t *uid, const uint8_t *resp_mac) {
     for (int i=0; i<MAX_CHALLENGES; i++) {
         if (!challenges[i].active) continue;
         if (memcmp(challenges[i].uid, uid, 4) != 0) continue;
-        /* Challenge expires after 5 seconds */
         if ((millis()-challenges[i].sent_ms) > 5000) {
             challenges[i].active = false; continue;
         }
-        uint32_t expected = compute_expected_response(challenges[i].challenge, uid);
-        challenges[i].active = false; /* consume challenge */
-        if (received == expected) {
+        challenges[i].active = false;          /* single use */
+
+        if (!root_key_set) {
+            Serial.println("[SEC] no root key provisioned, refusing");
+            return false;
+        }
+        /* Derive this device's key from its UID, then check the MAC it
+         * returned over our nonce. Replaces CRC32, which was forgeable. */
+        uint8_t devkey[32], msg[12], want[32];
+        hmac_sha256(root_key, uid, 4, devkey);
+        memcpy(msg, challenges[i].nonce, 8);
+        memcpy(msg+8, uid, 4);
+        hmac_sha256(devkey, msg, 12, want);
+
+        if (ct_equal(want, resp_mac, 8)) {
             Serial.printf("[SEC] Auth OK %02X%02X%02X%02X\n",
                           uid[0],uid[1],uid[2],uid[3]);
             return true;
-        } else {
-            Serial.printf("[SEC] Auth FAIL %02X%02X%02X%02X\n",
-                          uid[0],uid[1],uid[2],uid[3]);
-            return false;
         }
+        Serial.printf("[SEC] Auth FAIL %02X%02X%02X%02X\n",
+                      uid[0],uid[1],uid[2],uid[3]);
+        return false;
     }
     Serial.printf("[SEC] No challenge found for %02X%02X%02X%02X\n",
                   uid[0],uid[1],uid[2],uid[3]);
@@ -1630,13 +1828,13 @@ static void handle_announce(const uint8_t *frame) {
 /* Called when CMD_RESPONSE received - verify and complete registration */
 static void handle_response(const uint8_t *frame) {
     uint8_t plen=frame[4];
-    if (plen<8) return;
+    if (plen<12) return;
     if (frame[5+plen]!=crc8(&frame[1],4+plen)) return;
 
     const uint8_t *uid      = &frame[5];
-    const uint8_t *resp_crc = &frame[9];
+    const uint8_t *resp_mac = &frame[9];
 
-    if (!verify_response(uid, resp_crc)) {
+    if (!verify_response(uid, resp_mac)) {
         /* Auth failed - send reject */
         send_reject(uid);
         Serial.printf("[SEC] REJECT invalid response from %02X%02X%02X%02X\n",
@@ -1774,6 +1972,7 @@ static void ext_reset_identity(extension_t *e) {
     e->hw_rev  = 0;
     e->fw_ver[0] = e->fw_ver[1] = e->fw_ver[2] = 0;
     e->ota_fails = 0;
+    e->ota_fail_ver[0] = e->ota_fail_ver[1] = e->ota_fail_ver[2] = 0;
     e->ota_next_try_ms = 0;
 }
 
@@ -2321,6 +2520,8 @@ static void setup_web(void) {
     /* Relay toggle - immediate, with rate limiting */
     /* Kill all switches on this master */
     server.on("/api/relay/killall", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        audit("all relays off");
         /* Update master relay state immediately under mutex so
          * notify_ui() snapshot reflects the new OFF state */
         xSemaphoreTake(state_mutex,portMAX_DELAY);
@@ -2349,6 +2550,7 @@ static void setup_web(void) {
     });
 
     server.on("/api/relay", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String id=server.arg("id");
         int ch=server.arg("ch").toInt();
         uint32_t now=millis();
@@ -2390,6 +2592,7 @@ static void setup_web(void) {
 
     /* Assign new extension */
     server.on("/api/assign", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String uid_str=server.arg("uid");
         String name=server.arg("name");
         if (name.length()==0) name="Switch";
@@ -2430,6 +2633,7 @@ static void setup_web(void) {
 
     /* Replace offline slot */
     server.on("/api/replace", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String uid_str=server.arg("uid");
         int slot=server.arg("slot").toInt();
         String name=server.arg("name");
@@ -2475,6 +2679,7 @@ static void setup_web(void) {
 
     /* Reject/ignore pending extension */
     server.on("/api/reject", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String uid_str=server.arg("uid");
         uint8_t uid[4];
         uid[0]=strtoul(uid_str.substring(0,2).c_str(),NULL,16);
@@ -2490,6 +2695,7 @@ static void setup_web(void) {
 
     /* Rename extension */
     server.on("/api/rename", HTTP_POST, [](){
+        if (!auth_ok()) return;
         int slot=server.arg("slot").toInt();
         String name=server.arg("name");
         if (slot<0||slot>=MAX_EXTENSIONS||name.length()==0) {
@@ -2509,6 +2715,8 @@ static void setup_web(void) {
 
     /* Remove extension */
     server.on("/api/remove", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        audit("switch removed");
         int slot=server.arg("slot").toInt();
         if (slot<0||slot>=MAX_EXTENSIONS) {
             server.send(400,"application/json","{\"error\":\"bad slot\"}"); return; }
@@ -2529,6 +2737,7 @@ static void setup_web(void) {
 
     /* Rename individual switch */
     server.on("/api/switch/rename", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String id   = server.arg("id");
         String name = server.arg("name");
         if (id.length()==0||name.length()==0) {
@@ -2540,6 +2749,7 @@ static void setup_web(void) {
 
     /* Rename master */
     server.on("/api/master/rename", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String name = server.arg("name");
         if (name.length()==0) {
             server.send(400,"application/json","{\"ok\":false}"); return; }
@@ -2554,6 +2764,7 @@ static void setup_web(void) {
 
     /* Save switch order - single call after all moves done */
     server.on("/api/switch/reorder", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String body = server.arg("plain");
         if (body.length()==0) {
             server.send(400,"application/json","{\"ok\":false}"); return; }
@@ -2583,6 +2794,9 @@ static void setup_web(void) {
         doc["free_heap"] = ESP.getFreeHeap();
         doc["uid"]       = uid_str;
         doc["fw"]        = MASTER_FW_VERSION;
+        /* So the UI knows whether to present a login before doing anything
+         * else. /api/info is deliberately open; it exposes no secrets. */
+        doc["auth"]      = owner_pw_set;
         String out; serializeJson(doc, out);
         server.send(200, "application/json", out);
     });
@@ -2590,6 +2804,14 @@ static void setup_web(void) {
     /* OTA firmware upload */
     server.on("/api/ota/master", HTTP_POST,
         [](){
+            /* Re-check rather than trust the flag: upload_authed is a
+             * global and survives between requests, so a stale true from an
+             * earlier authenticated upload must not carry over. */
+            if (!upload_authed || !auth_valid()) {
+                upload_authed = false;
+                server.send(401, "application/json", F("{\"error\":\"login required\"}"));
+                return;
+            }
             if (Update.hasError()) {
                 server.send(500, "text/plain", Update.errorString());
                 Serial.printf("[OTA] Failed: %s\n", Update.errorString());
@@ -2604,12 +2826,21 @@ static void setup_web(void) {
         [](){
             HTTPUpload &upload = server.upload();
             if (upload.status == UPLOAD_FILE_START) {
+                /* Refuse before a single byte reaches the OTA partition:
+                 * the write happens during upload, so checking in the
+                 * completion handler would be far too late. */
+                upload_authed = auth_valid();
+                if (!upload_authed) {
+                    Serial.println("[OTA] unauthenticated upload rejected");
+                    return;
+                }
                 Serial.printf("[OTA] Start: %s\n", upload.filename.c_str());
                 ota_in_progress = true;
                 if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                     Serial.printf("[OTA] Begin failed: %s\n", Update.errorString());
                 }
             } else if (upload.status == UPLOAD_FILE_WRITE) {
+                if (!upload_authed) return;
                 if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
                     Serial.printf("[OTA] Write failed: %s\n", Update.errorString());
                 }
@@ -2634,6 +2865,7 @@ static void setup_web(void) {
 
         /* -- Extensions API -- */
     server.on("/api/extensions", HTTP_GET, [](){
+        if (!auth_ok()) return;
         StaticJsonDocument<1024> doc;
         JsonArray arr = doc.createNestedArray("extensions");
         xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -2684,6 +2916,14 @@ static void setup_web(void) {
      * version can pull it. Only ever our own running partition, which is
      * by definition an image that booted successfully on real hardware. */
     server.on("/api/ota/image", HTTP_GET, [](){
+        /* Peer masters hold no session, so this endpoint is authorised by
+         * the shared mesh password rather than a login. Without it the
+         * complete firmware was downloadable by anyone on the network. */
+        if (!rate_ok()) { server.send(429, "text/plain", "slow down"); return; }
+        if (!mesh_active || server.arg("k") != String(mesh_pass)) {
+            server.send(403, "text/plain", "forbidden");
+            return;
+        }
         if (master_serve_busy || master_pull_active) {
             server.send(503, "text/plain", "busy");
             return;
@@ -2715,8 +2955,140 @@ static void setup_web(void) {
         Serial.printf("[MFW] sent %u/%u bytes\n", sent, size);
     });
 
+    /* Provision the root and firmware keys. Accepted unauthenticated only
+     * while unset, i.e. on the production jig; afterwards a login is
+     * required and the keys can never be read back. */
+    server.on("/api/provision", HTTP_POST, [](){
+        if ((root_key_set || fw_key_set) && !auth_ok()) return;
+        String rk = server.arg("root");
+        String fk = server.arg("fw");
+        if (rk.length()!=32 || fk.length()!=32) {
+            server.send(400, "application/json",
+                        F("{\"error\":\"need 32 hex chars each\"}"));
+            return;
+        }
+        auto unhex=[](const String &s, uint8_t *out){
+            for (int i=0;i<16;i++)
+                out[i]=(uint8_t)strtoul(s.substring(i*2,i*2+2).c_str(),NULL,16);
+        };
+        unhex(rk, root_key); unhex(fk, fw_key);
+        prefs.begin("keys", false);
+        prefs.putBytes("root", root_key, sizeof(root_key));
+        prefs.putBytes("fw",   fw_key,   sizeof(fw_key));
+        prefs.end();
+        root_key_set = fw_key_set = true;
+        audit("keys provisioned");
+        Serial.println("[SEC] keys provisioned");
+        server.send(200, "application/json", F("{\"ok\":true}"));
+    });
+
+    /* -- Authentication -- */
+    server.on("/api/login", HTTP_POST, [](){
+        if (!rate_ok()) {
+            server.send(429, "application/json", F("{\"error\":\"too many requests\"}"));
+            return;
+        }
+        if (auth_lock_until && (int32_t)(millis() - auth_lock_until) < 0) {
+            server.send(423, "application/json",
+                        F("{\"error\":\"locked, try again later\"}"));
+            return;
+        }
+        String pw = server.arg("password");
+        char salt[17], want[65], got[65];
+        prefs.begin("auth", true);
+        String s = prefs.getString("salt", "");
+        String h = prefs.getString("hash", "");
+        prefs.end();
+        if (s.length() == 0 || h.length() == 0) {
+            server.send(400, "application/json", F("{\"error\":\"no password set\"}"));
+            return;
+        }
+        strncpy(salt, s.c_str(), sizeof(salt)-1); salt[sizeof(salt)-1]=0;
+        strncpy(want, h.c_str(), sizeof(want)-1); want[sizeof(want)-1]=0;
+        sha256_hex(pw.c_str(), salt, got);
+
+        if (!safe_equal(want, got, 64)) {
+            if (++auth_fails >= AUTH_MAX_FAILS) {
+                auth_lock_until = millis() + AUTH_LOCKOUT_MS;
+                auth_fails = 0;
+                Serial.println("[AUTH] too many failures, locked out");
+            }
+            audit("login failed");
+            server.send(401, "application/json", F("{\"error\":\"wrong password\"}"));
+            return;
+        }
+        auth_fails = 0;
+        int slot = 0;
+        uint32_t oldest = 0xFFFFFFFF;
+        for (int i = 0; i < AUTH_SESSIONS; i++) {
+            if (!auth_sessions[i].token[0]) { slot = i; break; }
+            if (auth_sessions[i].expires_ms < oldest) {
+                oldest = auth_sessions[i].expires_ms; slot = i;
+            }
+        }
+        rand_hex(auth_sessions[slot].token, AUTH_TOKEN_LEN - 1);
+        auth_sessions[slot].expires_ms = millis() + AUTH_SESSION_MS;
+        auth_sessions[slot].ip = (uint32_t)server.client().remoteIP();
+        audit("login ok");
+        StaticJsonDocument<128> d;
+        d["token"] = auth_sessions[slot].token;
+        String out; serializeJson(d, out);
+        server.send(200, "application/json", out);
+    });
+
+    server.on("/api/logout", HTTP_POST, [](){
+        String tok = server.hasHeader("X-Auth") ? server.header("X-Auth")
+                                                : server.arg("t");
+        for (int i = 0; i < AUTH_SESSIONS; i++)
+            if (auth_sessions[i].token[0] &&
+                safe_equal(auth_sessions[i].token, tok.c_str(), AUTH_TOKEN_LEN-1))
+                auth_sessions[i].token[0] = 0;
+        server.send(200, "application/json", F("{\"ok\":true}"));
+    });
+
+    /* Set or change the owner password. Allowed unauthenticated only while
+     * none is set, i.e. during commissioning. */
+    server.on("/api/password", HTTP_POST, [](){
+        if (owner_pw_set && !auth_ok()) return;
+        String pw = server.arg("password");
+        if (pw.length() < 8) {
+            server.send(400, "application/json",
+                        F("{\"error\":\"minimum 8 characters\"}"));
+            return;
+        }
+        char salt[17], hash[65];
+        rand_hex(salt, 16);
+        sha256_hex(pw.c_str(), salt, hash);
+        prefs.begin("auth", false);
+        prefs.putString("salt", salt);
+        prefs.putString("hash", hash);
+        prefs.end();
+        owner_pw_set = true;
+        for (int i = 0; i < AUTH_SESSIONS; i++) auth_sessions[i].token[0] = 0;
+        audit("password changed");
+        Serial.println("[AUTH] owner password set, all sessions cleared");
+        server.send(200, "application/json", F("{\"ok\":true}"));
+    });
+
+    server.on("/api/audit", HTTP_GET, [](){
+        if (!auth_ok()) return;
+        StaticJsonDocument<2048> doc;
+        JsonArray a = doc.createNestedArray("events");
+        for (int n = 0; n < AUDIT_ENTRIES; n++) {
+            int i = (audit_head + n) % AUDIT_ENTRIES;
+            if (!audit_log[i].what[0]) continue;
+            JsonObject o = a.createNestedObject();
+            o["t"]  = audit_log[i].at_s;
+            o["ip"] = IPAddress(audit_log[i].ip).toString();
+            o["what"] = audit_log[i].what;
+        }
+        String out; serializeJson(doc, out);
+        server.send(200, "application/json", out);
+    });
+
         /* -- Firmware library -- */
     server.on("/api/fw/list", HTTP_GET, [](){
+        if (!auth_ok()) return;
         StaticJsonDocument<1024> doc;
         JsonArray arr = doc.createNestedArray("images");
         doc["fs"] = fs_ready;
@@ -2749,6 +3121,14 @@ static void setup_web(void) {
      * ?mesh=1 also offers it to every peer master. */
     server.on("/api/fw/upload", HTTP_POST,
         [](){
+            /* Re-check rather than trust the flag: upload_authed is a
+             * global and survives between requests, so a stale true from an
+             * earlier authenticated upload must not carry over. */
+            if (!upload_authed || !auth_valid()) {
+                upload_authed = false;
+                server.send(401, "application/json", F("{\"error\":\"login required\"}"));
+                return;
+            }
             if (!fs_ready) {
                 server.send(500, "application/json",
                             F("{\"error\":\"no filesystem\"}"));
@@ -2765,7 +3145,18 @@ static void setup_web(void) {
                             F("{\"error\":\"not a Unisync extension image\"}"));
                 return;
             }
-            bool ok = fw_store(type, ver, ext_ota_buf, ext_ota_total);
+            String sighex = server.arg("sig");
+            uint8_t secver = (uint8_t)server.arg("sec").toInt();
+            if (sighex.length() != 64) {
+                free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
+                server.send(400, "application/json",
+                            F("{\"error\":\"missing signature\"}"));
+                return;
+            }
+            uint8_t sig[32];
+            for (int k=0;k<32;k++)
+                sig[k]=(uint8_t)strtoul(sighex.substring(k*2,k*2+2).c_str(),NULL,16);
+            bool ok = fw_store(type, ver, ext_ota_buf, ext_ota_total, secver, sig);
             uint32_t crc  = fw_crc32(ext_ota_buf, ext_ota_total);
             uint32_t size = ext_ota_total;
             free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
@@ -2774,7 +3165,7 @@ static void setup_web(void) {
                             F("{\"error\":\"store failed\"}"));
                 return;
             }
-            if (server.arg("mesh") == "1") fw_mesh_offer(type, ver, size, crc);
+            if (server.arg("mesh") == "1") fw_mesh_offer(type, ver, size, crc, secver, sig);
             StaticJsonDocument<192> d;
             d["ok"] = true; d["type"] = type; d["size"] = size;
             char vb[16]; snprintf(vb, sizeof(vb), "%u.%u.%u", ver[0], ver[1], ver[2]);
@@ -2786,12 +3177,14 @@ static void setup_web(void) {
         [](){
             HTTPUpload &upload = server.upload();
             if (upload.status == UPLOAD_FILE_START) {
+                upload_authed = auth_valid();
+                if (!upload_authed) return;
                 ext_ota_total = 0;
                 if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
                 ext_ota_buf = (uint8_t*)malloc(EXT_OTA_MAX_SIZE);
                 if (!ext_ota_buf) Serial.println("[FW] malloc failed");
             } else if (upload.status == UPLOAD_FILE_WRITE) {
-                if (!ext_ota_buf) return;
+                if (!upload_authed || !ext_ota_buf) return;
                 if (ext_ota_total + upload.currentSize > EXT_OTA_MAX_SIZE) {
                     free(ext_ota_buf); ext_ota_buf = nullptr;
                     Serial.println("[FW] image too large");
@@ -2802,6 +3195,7 @@ static void setup_web(void) {
             } else if (upload.status == UPLOAD_FILE_ABORTED) {
                 if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
                 ext_ota_total = 0;
+                upload_authed = false;
                 Serial.println("[FW] upload aborted, buffer released");
             }
         }
@@ -2810,6 +3204,14 @@ static void setup_web(void) {
         /* -- Extension OTA -- */
     server.on("/api/ota/extension", HTTP_POST,
         [](){
+            /* Re-check rather than trust the flag: upload_authed is a
+             * global and survives between requests, so a stale true from an
+             * earlier authenticated upload must not carry over. */
+            if (!upload_authed || !auth_valid()) {
+                upload_authed = false;
+                server.send(401, "application/json", F("{\"error\":\"login required\"}"));
+                return;
+            }
             if (ext_ota_buf == nullptr || ext_ota_total == 0) {
                 server.send(400, "application/json", "{\"error\":\"no data\"}");
                 return;
@@ -2826,7 +3228,19 @@ static void setup_web(void) {
                             F("{\"error\":\"image has no Unisync descriptor\"}"));
                 return;
             }
-            bool ok = ext_ota_send(ext_ota_addr, ext_ota_buf, ext_ota_total, utype, uver);
+            /* Manual push still requires a valid signature: read it from
+             * the library entry for this type rather than trusting the
+             * upload, so an unsigned image can never be forced through. */
+            fw_entry_t le;
+            if (!fw_lookup(utype, &le) || le.size != ext_ota_total) {
+                free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
+                ota_in_progress = false;
+                server.send(400, "application/json",
+                            F("{\"error\":\"image not in signed library\"}"));
+                return;
+            }
+            bool ok = ext_ota_send(ext_ota_addr, ext_ota_buf, ext_ota_total,
+                                   utype, uver, le.secver, le.sig);
             free(ext_ota_buf); ext_ota_buf = nullptr; ext_ota_total = 0;
             ota_in_progress = false;
             if (ok) {
@@ -2839,6 +3253,8 @@ static void setup_web(void) {
             HTTPUpload &upload = server.upload();
             if (upload.status == UPLOAD_FILE_START) {
                 /* Get target address from ?addr=X */
+                upload_authed = auth_valid();
+                if (!upload_authed) return;
                 ext_ota_addr  = (uint8_t)server.arg("addr").toInt();
                 ext_ota_total = 0;
                 if (ext_ota_buf) { free(ext_ota_buf); ext_ota_buf = nullptr; }
@@ -2850,7 +3266,7 @@ static void setup_web(void) {
                 Serial.printf("[EXT-OTA] Receiving firmware for addr=0x%02X\n", ext_ota_addr);
 
             } else if (upload.status == UPLOAD_FILE_WRITE) {
-                if (!ext_ota_buf) return;
+                if (!upload_authed || !ext_ota_buf) return;
                 if (ext_ota_total + upload.currentSize > EXT_OTA_MAX_SIZE) {
                     Serial.println("[EXT-OTA] Firmware too large");
                     free(ext_ota_buf); ext_ota_buf = nullptr; return;
@@ -2876,6 +3292,7 @@ static void setup_web(void) {
 
     /* Generate PIN to invite new master */
     server.on("/api/mesh/invite", HTTP_POST, [](){
+        if (!auth_ok()) return;
         mesh_generate_pin();
         /* Use AP MAC -- in WIFI_AP_STA mode AP MAC = STA MAC + 1.
          * Peers must target AP MAC when sending via WIFI_IF_AP interface. */
@@ -2901,6 +3318,7 @@ static void setup_web(void) {
      * then sends JOIN_REQ directly via ESP-NOW. Master 1 verifies
      * PIN and sends mesh credentials back via ESP-NOW. */
     server.on("/api/mesh/join", HTTP_POST, [](){
+        if (!auth_ok()) return;
         if (mesh_active) {
             server.send(400,"application/json","{\"error\":\"already in mesh\"}");
             return;
@@ -2962,6 +3380,8 @@ static void setup_web(void) {
 
     /* Create a new mesh (first master) */
     server.on("/api/mesh/create", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        audit("created mesh");
         if (mesh_active) {
             server.send(400,"application/json","{\"error\":\"already in mesh\"}");
             return;
@@ -2993,6 +3413,8 @@ static void setup_web(void) {
 
     /* Leave mesh */
     server.on("/api/mesh/leave", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        audit("left mesh");
         if (!mesh_active) {
             server.send(400,"application/json","{\"error\":\"not in mesh\"}");
             return;
@@ -3024,7 +3446,7 @@ static void setup_web(void) {
                      tmac[4], tmac[5]);
             WiFi.softAPdisconnect(false);
             delay(100);
-            WiFi.softAP(unique_ssid, AP_PASS, AP_CHANNEL);
+            WiFi.softAP(unique_ssid, standalone_pass, AP_CHANNEL);
             Serial.printf("[WIFI] Reverted to unique SSID: %s\n", unique_ssid);
         }
         strncpy(mesh_name, "Unisync", sizeof(mesh_name)-1);
@@ -3034,6 +3456,7 @@ static void setup_web(void) {
 
     /* Cross-master relay command */
     server.on("/api/mesh/relay", HTTP_POST, [](){
+        if (!auth_ok()) return;
         String peer_uid_str = server.arg("peer_uid");
         String sw_id        = server.arg("sw_id");
         int    ch           = server.arg("ch").toInt();
@@ -3142,6 +3565,7 @@ static void setup_web(void) {
 
     /* Change mesh WiFi password -- propagates to all mesh peers */
     server.on("/api/mesh/passwd", HTTP_POST, [](){
+        if (!auth_ok()) return;
         if (!mesh_active) {
             server.send(400,"application/json","{\"error\":\"not in mesh\"}");
             return;
@@ -3189,6 +3613,7 @@ static void setup_web(void) {
 
     /* Rename mesh */
     server.on("/api/mesh/rename", HTTP_POST, [](){
+        if (!auth_ok()) return;
         if (!mesh_active) {
             server.send(400,"application/json","{\"error\":\"not in mesh\"}");
             return;
@@ -3227,6 +3652,7 @@ static void setup_web(void) {
 
     /* Mesh config proxy -- rename/reorder masters and peer switches */
     server.on("/api/mesh/config", HTTP_POST, [](){
+        if (!auth_ok()) return;
         if (!mesh_active) {
             server.send(400,"application/json","{\"error\":\"not in mesh\"}");
             return;
@@ -3295,6 +3721,7 @@ static void setup_web(void) {
 
     /* Mesh status */
     server.on("/api/mesh/status", HTTP_GET, [](){
+        if (!auth_ok()) return;
         StaticJsonDocument<3072> doc;   /* holds MAX_MESH_MASTERS peer entries */
         doc["active"]    = mesh_active;
         doc["mesh_name"] = mesh_name;
@@ -3323,6 +3750,7 @@ static void setup_web(void) {
 
     /* Manual scan trigger */
     server.on("/api/scan", HTTP_POST, [](){
+        if (!auth_ok()) return;
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         scan_active=true;
         scan_end_ms=millis()+5000;
@@ -3335,6 +3763,32 @@ static void setup_web(void) {
     wss.onEvent([](uint8_t num, WStype_t type,
                    uint8_t *payload, size_t length){
         if (type==WStype_CONNECTED) {
+            /* The socket both streams state and accepts commands, so an
+             * unauthenticated client is equivalent to an open API. The
+             * token is passed as ?t= on the websocket URL. */
+            if (owner_pw_set) {
+                String url = String((char*)payload);
+                int k = url.indexOf("t=");
+                bool good = false;
+                if (k >= 0) {
+                    String tok = url.substring(k+2);
+                    int amp = tok.indexOf('&');
+                    if (amp > 0) tok = tok.substring(0, amp);
+                    uint32_t now = millis();
+                    for (int i=0;i<AUTH_SESSIONS;i++) {
+                        if (!auth_sessions[i].token[0]) continue;
+                        if ((int32_t)(now - auth_sessions[i].expires_ms) >= 0) continue;
+                        if (tok.length()==AUTH_TOKEN_LEN-1 &&
+                            safe_equal(auth_sessions[i].token, tok.c_str(),
+                                       AUTH_TOKEN_LEN-1)) { good = true; break; }
+                    }
+                }
+                if (!good) {
+                    Serial.printf("[WS] Client #%u rejected, no session\n",num);
+                    wss.disconnect(num);
+                    return;
+                }
+            }
             Serial.printf("[WS] Client #%u connected\n",num);
             /* Signal notify queue -- state sent from task_web on next iteration.
              * Do NOT call build_state_json() here -- NVS reads inside a
@@ -3350,6 +3804,15 @@ static void setup_web(void) {
         server.send(204,"image/x-icon","");
     });
 
+    /* WebServer discards every header it was not told to keep, so without
+     * this server.header("X-Auth") is always empty and every authenticated
+     * request would be rejected. Fails closed, but the product stops
+     * working -- must be registered before begin(). */
+    {
+        const char *keep[] = { "X-Auth" };
+        server.collectHeaders(keep, 1);
+    }
+
     server.begin();
     wss.begin();
     Serial.println("[HTTP] Server on port 80, WebSocket on port 81");
@@ -3358,6 +3821,103 @@ static void setup_web(void) {
 /* ================================================================
  * SETUP
  * ================================================================ */
+
+/* ================================================================
+ * ACCESS CONTROL HELPERS
+ * ================================================================ */
+static void sha256_hex(const char *in, const char *salt, char *out65) {
+    mbedtls_sha256_context ctx;
+    uint8_t d[32];
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_update(&ctx, (const uint8_t *)salt, strlen(salt));
+    mbedtls_sha256_update(&ctx, (const uint8_t *)in,   strlen(in));
+    mbedtls_sha256_finish(&ctx, d);
+    mbedtls_sha256_free(&ctx);
+    for (int i = 0; i < 32; i++) sprintf(out65 + i*2, "%02x", d[i]);
+    out65[64] = 0;
+}
+
+static void rand_hex(char *out, int hex_chars) {
+    for (int i = 0; i < hex_chars; i += 8)
+        sprintf(out + i, "%08x", (unsigned)esp_random());
+    out[hex_chars] = 0;
+}
+
+/* Constant-time compare: a byte-by-byte early exit leaks how much of a
+ * token was correct, which is enough to recover one a byte at a time. */
+static bool safe_equal(const char *a, const char *b, size_t n) {
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+static void audit(const char *what) {
+    audit_entry_t *e = &audit_log[audit_head];
+    e->at_s = millis() / 1000;
+    e->ip   = (uint32_t)server.client().remoteIP();
+    strncpy(e->what, what, sizeof(e->what) - 1);
+    e->what[sizeof(e->what) - 1] = 0;
+    audit_head = (audit_head + 1) % AUDIT_ENTRIES;
+}
+
+/* Too many requests from one client in a short window. Relays are
+ * mechanical and have a finite cycle life, so a flood is a hardware
+ * destruction path, not just noise. */
+static bool rate_ok(void) {
+    uint32_t ip  = (uint32_t)server.client().remoteIP();
+    uint32_t now = millis();
+    rate_bucket_t *slot = NULL, *oldest = &rate_buckets[0];
+    for (unsigned i = 0; i < sizeof(rate_buckets)/sizeof(rate_buckets[0]); i++) {
+        if (rate_buckets[i].ip == ip) { slot = &rate_buckets[i]; break; }
+        if (rate_buckets[i].window_start < oldest->window_start)
+            oldest = &rate_buckets[i];
+    }
+    if (!slot) { slot = oldest; slot->ip = ip; slot->window_start = now; slot->count = 0; }
+    if (now - slot->window_start > RATE_WINDOW_MS) {
+        slot->window_start = now; slot->count = 0;
+    }
+    if (++slot->count > RATE_MAX_REQS) return false;
+    return true;
+}
+
+/* Gate for every endpoint that changes something or leaks firmware.
+ * Sends its own error response and returns false when it refuses. */
+static bool auth_valid(void) {
+    /* Before an owner password exists the device is being commissioned and
+     * must stay reachable, otherwise a factory-fresh unit is unusable. */
+    if (!owner_pw_set) return true;
+
+    String tok = server.hasHeader("X-Auth") ? server.header("X-Auth")
+                                            : server.arg("t");
+    if (tok.length() == AUTH_TOKEN_LEN - 1) {
+        uint32_t now = millis();
+        for (int i = 0; i < AUTH_SESSIONS; i++) {
+            if (!auth_sessions[i].token[0]) continue;
+            if ((int32_t)(now - auth_sessions[i].expires_ms) >= 0) {
+                auth_sessions[i].token[0] = 0;      /* expired */
+                continue;
+            }
+            if (safe_equal(auth_sessions[i].token, tok.c_str(), AUTH_TOKEN_LEN - 1)) {
+                auth_sessions[i].expires_ms = now + AUTH_SESSION_MS;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Responding gate for normal handlers. */
+static bool auth_ok(void) {
+    if (!rate_ok()) {
+        server.send(429, "application/json", F("{\"error\":\"too many requests\"}"));
+        return false;
+    }
+    if (auth_valid()) return true;
+    server.send(401, "application/json", F("{\"error\":\"login required\"}"));
+    return false;
+}
+
 /* ================================================================
  * FIRMWARE LIBRARY HELPERS
  * ================================================================ */
@@ -3419,6 +3979,11 @@ static bool fw_lookup(uint8_t type, fw_entry_t *out) {
          * would read back as 0 and be judged corrupt. */
         out->size   = e["size"].as<uint32_t>();
         out->crc    = e["crc"].as<uint32_t>();
+        out->secver = e["sec"] | 0;
+        const char *sg = e["sig"] | "";
+        if (strlen(sg) != 64) return false;      /* unsigned image, refuse */
+        for (int k=0;k<32;k++)
+            out->sig[k]=(uint8_t)strtoul(String(sg).substring(k*2,k*2+2).c_str(),NULL,16);
         return out->size > 0;
     }
     return false;
@@ -3428,8 +3993,18 @@ static bool fw_lookup(uint8_t type, fw_entry_t *out) {
  * updated after the image file is fully written and read back clean, so
  * a truncated write can never be handed to an extension. */
 static bool fw_store(uint8_t type, const uint8_t *ver,
-                     const uint8_t *img, uint32_t len) {
+                     const uint8_t *img, uint32_t len,
+                     uint8_t secver, const uint8_t *sig) {
     if (!fs_ready || len == 0 || len > FW_MAX_IMAGE) return false;
+    /* Defence in depth: the extension is the authority, but refusing an
+     * unsigned image here stops it being stored or gossiped onward. */
+    if (!fw_key_set) { Serial.println("[FW] no firmware key, refusing"); return false; }
+    uint8_t want[32];
+    hmac_sha256(fw_key, img, len, want);
+    if (!ct_equal(want, sig, 32)) {
+        Serial.println("[FW] signature INVALID, image rejected");
+        return false;
+    }
 
     String path = fw_path(type);
     File f = LittleFS.open(path, "w");
@@ -3458,6 +4033,10 @@ static bool fw_store(uint8_t type, const uint8_t *ver,
     tgt["type"] = type;
     tgt["size"] = len;
     tgt["crc"]  = crc;
+    tgt["sec"]  = secver;
+    { char hx[65];
+      for (int k=0;k<32;k++) sprintf(hx+k*2, "%02x", sig[k]);
+      hx[64]=0; tgt["sig"] = hx; }
     JsonArray v = tgt.containsKey("ver") ? tgt["ver"].as<JsonArray>()
                                          : tgt.createNestedArray("ver");
     v.clear();
@@ -3553,7 +4132,8 @@ static bool ext_ota_cmd(uint8_t addr, uint8_t cmd,
 }
 
 static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
-                         uint8_t type, const uint8_t *ver) {
+                         uint8_t type, const uint8_t *ver,
+                         uint8_t secver, const uint8_t *sig) {
     uint32_t crc = fw_crc32(fw, fw_len);
     Serial.printf("[EXT-OTA] type=%u v%u.%u.%u size=%u crc=0x%08X\n",
                   type, ver[0], ver[1], ver[2], fw_len, crc);
@@ -3561,14 +4141,17 @@ static bool ext_ota_send(uint8_t addr, const uint8_t *fw, uint32_t fw_len,
     /* OTA_BEGIN: size[4] crc[4] type[1] ver[3].
      * The extension rejects a type mismatch here, before any flash is
      * touched, so a wrong image costs one frame instead of a brick. */
-    uint8_t payload[12];
+    /* size[4] crc[4] type[1] ver[3] secver[1] hmac[32] */
+    uint8_t payload[45];
     payload[0]=(fw_len>>24)&0xFF; payload[1]=(fw_len>>16)&0xFF;
     payload[2]=(fw_len>>8)&0xFF;  payload[3]=fw_len&0xFF;
     payload[4]=(crc>>24)&0xFF;    payload[5]=(crc>>16)&0xFF;
     payload[6]=(crc>>8)&0xFF;     payload[7]=crc&0xFF;
     payload[8]=type;
     payload[9]=ver[0]; payload[10]=ver[1]; payload[11]=ver[2];
-    if (!ext_ota_cmd(addr, CMD_OTA_BEGIN, payload, 12, 1000)) return false;
+    payload[12]=secver;
+    memcpy(&payload[13], sig, 32);
+    if (!ext_ota_cmd(addr, CMD_OTA_BEGIN, payload, 45, 1000)) return false;
     Serial.println("[EXT-OTA] BEGIN ok");
     vTaskDelay(pdMS_TO_TICKS(100)); /* give extension time to enter OTA mode */
 
@@ -3719,7 +4302,8 @@ static void master_fw_sync(void) {
     bool ok = false;
     {
         HTTPClient http;
-        String url = "http://" + WiFi.gatewayIP().toString() + "/api/ota/image";
+        String url = "http://" + WiFi.gatewayIP().toString() +
+                     "/api/ota/image?k=" + String(mesh_pass);
         http.setTimeout(20000);
         if (http.begin(url)) {
             int code = http.GET();
@@ -3783,12 +4367,30 @@ static void fw_reconcile(void) {
 
         if (!ready) continue;
         if (type == 0 || type == 0xFF) continue;      /* identity not known */
-        if (fails >= OTA_MAX_FAILS) continue;         /* given up, shown in UI */
-        if (gate && (int32_t)(millis() - gate) < 0) continue;
 
         fw_entry_t e;
         if (!fw_lookup(type, &e)) continue;
         if (!fw_ver_newer(e.ver, cur)) continue;      /* upgrades only */
+
+        /* The retry budget belongs to a specific image, not to the device.
+         * A newer build in the library is a different attempt and deserves
+         * a fresh budget -- otherwise three failures against one bad image
+         * would lock that switch out of every future update, permanently
+         * and silently. */
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool same_image = (extensions[i].ota_fail_ver[0] == e.ver[0] &&
+                           extensions[i].ota_fail_ver[1] == e.ver[1] &&
+                           extensions[i].ota_fail_ver[2] == e.ver[2]);
+        if (!same_image && extensions[i].ota_fails) {
+            extensions[i].ota_fails       = 0;
+            extensions[i].ota_next_try_ms = 0;
+            fails = 0; gate = 0;
+            Serial.printf("[FW] ext 0x%02X: new version available, retrying\n", addr);
+        }
+        xSemaphoreGive(state_mutex);
+
+        if (fails >= OTA_MAX_FAILS) continue;         /* given up on THIS image */
+        if (gate && (int32_t)(millis() - gate) < 0) continue;
 
         uint8_t *img = (uint8_t *)malloc(e.size);
         if (!img) { Serial.println("[FW] reconcile: out of memory"); return; }
@@ -3804,7 +4406,7 @@ static void fw_reconcile(void) {
 
         ota_in_progress = true;
         vTaskDelay(pdMS_TO_TICKS(200));
-        bool ok = ext_ota_send(addr, img, n, type, e.ver);
+        bool ok = ext_ota_send(addr, img, n, type, e.ver, e.secver, e.sig);
         ota_in_progress = false;
         free(img);
 
@@ -3816,6 +4418,9 @@ static void fw_reconcile(void) {
             extensions[i].hw_type         = type;
         } else {
             extensions[i].ota_fails++;
+            extensions[i].ota_fail_ver[0] = e.ver[0];
+            extensions[i].ota_fail_ver[1] = e.ver[1];
+            extensions[i].ota_fail_ver[2] = e.ver[2];
             extensions[i].ota_next_try_ms = millis() + OTA_BACKOFF_MS;
             Serial.printf("[FW] ext 0x%02X update failed (%u/%u)\n",
                           addr, extensions[i].ota_fails, OTA_MAX_FAILS);
@@ -3834,7 +4439,8 @@ static void fw_reconcile(void) {
  * ================================================================ */
 static void fw_pkt_hdr(uint8_t *p, uint8_t sub, uint8_t type,
                        const uint8_t *ver, uint16_t idx, uint16_t total,
-                       uint32_t size, uint32_t crc) {
+                       uint32_t size, uint32_t crc,
+                       uint8_t secver, const uint8_t *sig) {
     p[0]=FWPKT_MAGIC; p[1]=sub; p[2]=type;
     p[3]=ver[0]; p[4]=ver[1]; p[5]=ver[2];
     p[6]=idx & 0xFF;    p[7]=(idx >> 8) & 0xFF;
@@ -3842,15 +4448,18 @@ static void fw_pkt_hdr(uint8_t *p, uint8_t sub, uint8_t type,
     p[10]=size & 0xFF;  p[11]=(size >> 8) & 0xFF;
     p[12]=crc & 0xFF;        p[13]=(crc >> 8) & 0xFF;
     p[14]=(crc >> 16) & 0xFF; p[15]=(crc >> 24) & 0xFF;
+    p[16]=secver;
+    for (int i=0;i<32;i++) p[17+i] = sig ? sig[i] : 0;
 }
 
 /* Offer an image to every known peer. They pull what they want. */
 static void fw_mesh_offer(uint8_t type, const uint8_t *ver,
-                          uint32_t size, uint32_t crc) {
+                          uint32_t size, uint32_t crc,
+                          uint8_t secver, const uint8_t *sig) {
     if (!mesh_active) return;
     uint16_t total = (size + FWPKT_DATA - 1) / FWPKT_DATA;
     uint8_t pkt[FWPKT_HDR];
-    fw_pkt_hdr(pkt, FWPKT_OFFER, type, ver, 0, total, size, crc);
+    fw_pkt_hdr(pkt, FWPKT_OFFER, type, ver, 0, total, size, crc, secver, sig);
     int sent = 0;
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_MESH_MASTERS; i++) {
@@ -3874,6 +4483,17 @@ static void fwrx_abort(const char *why) {
 
 static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
     if (!mesh_active || len < FWPKT_HDR) return;
+    /* Firmware may only arrive from an enrolled peer. Without this any
+     * transmitter in range could offer an image and have it propagate to
+     * every master and every switch. */
+    bool known = false;
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_MESH_MASTERS; i++)
+        if (mesh_peers[i].online && memcmp(mesh_peers[i].mac, src, 6) == 0) {
+            known = true; break;
+        }
+    xSemaphoreGive(state_mutex);
+    if (!known) return;
 
     uint8_t  sub   = d[1];
     uint8_t  type  = d[2];
@@ -3883,6 +4503,8 @@ static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
     uint32_t size  = (uint32_t)d[10] | ((uint32_t)d[11] << 8);
     uint32_t crc   = (uint32_t)d[12] | ((uint32_t)d[13] << 8)
                    | ((uint32_t)d[14] << 16) | ((uint32_t)d[15] << 24);
+    uint8_t  secv  = d[16];
+    const uint8_t *sigp = &d[17];
 
     if (sub == FWPKT_OFFER) {
         if (fwrx_active) return;                       /* already busy */
@@ -3894,12 +4516,13 @@ static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
         fwrx_active = true; fwrx_type = type;
         fwrx_ver[0]=ver[0]; fwrx_ver[1]=ver[1]; fwrx_ver[2]=ver[2];
         fwrx_size = size; fwrx_crc = crc; fwrx_total = total; fwrx_next = 0;
+        fwrx_sec = secv; memcpy(fwrx_sig, sigp, 32);
         memcpy(fwrx_src, src, 6);
         fwrx_last_ms = millis();
         Serial.printf("[FW-MESH] accepting type=%u v%u.%u.%u %u bytes\n",
                       type, ver[0], ver[1], ver[2], size);
         uint8_t req[FWPKT_HDR];
-        fw_pkt_hdr(req, FWPKT_REQ, type, ver, 0, total, size, crc);
+        fw_pkt_hdr(req, FWPKT_REQ, type, ver, 0, total, size, crc, 0, NULL);
         mesh_send(fwrx_src, req, sizeof(req));
         return;
     }
@@ -3919,7 +4542,8 @@ static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
         if (!f.seek(off)) { f.close(); return; }
         uint8_t pkt[FWPKT_HDR + FWPKT_DATA];
         uint16_t tot = (e.size + FWPKT_DATA - 1) / FWPKT_DATA;
-        fw_pkt_hdr(pkt, FWPKT_CHUNK, type, e.ver, idx, tot, e.size, e.crc);
+        fw_pkt_hdr(pkt, FWPKT_CHUNK, type, e.ver, idx, tot, e.size, e.crc,
+                   e.secver, e.sig);
         uint32_t got = f.read(pkt + FWPKT_HDR, n);
         f.close();
         if (got != n) return;
@@ -3942,10 +4566,11 @@ static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
                 fwrx_abort("CRC mismatch");
                 return;
             }
-            bool ok = fw_store(fwrx_type, fwrx_ver, fwrx_buf, fwrx_size);
+            bool ok = fw_store(fwrx_type, fwrx_ver, fwrx_buf, fwrx_size,
+                               fwrx_sec, fwrx_sig);
             uint8_t done[FWPKT_HDR];
             fw_pkt_hdr(done, FWPKT_DONE, fwrx_type, fwrx_ver, 0,
-                       fwrx_total, fwrx_size, fwrx_crc);
+                       fwrx_total, fwrx_size, fwrx_crc, 0, NULL);
             mesh_send(fwrx_src, done, sizeof(done));
             free(fwrx_buf); fwrx_buf = nullptr; fwrx_active = false;
             Serial.printf("[FW-MESH] image received and %s\n",
@@ -3955,7 +4580,7 @@ static void fw_mesh_rx(const uint8_t *src, const uint8_t *d, int len) {
         }
         uint8_t req[FWPKT_HDR];
         fw_pkt_hdr(req, FWPKT_REQ, fwrx_type, fwrx_ver, fwrx_next,
-                   fwrx_total, fwrx_size, fwrx_crc);
+                   fwrx_total, fwrx_size, fwrx_crc, 0, NULL);
         mesh_send(fwrx_src, req, sizeof(req));
         return;
     }
@@ -3975,7 +4600,7 @@ static void fw_mesh_tick(void) {
     if (++stalls > 10) { stalls = 0; fwrx_abort("peer stopped responding"); return; }
     uint8_t req[FWPKT_HDR];
     fw_pkt_hdr(req, FWPKT_REQ, fwrx_type, fwrx_ver, fwrx_next,
-               fwrx_total, fwrx_size, fwrx_crc);
+               fwrx_total, fwrx_size, fwrx_crc, 0, NULL);
     mesh_send(fwrx_src, req, sizeof(req));
     fwrx_last_ms = millis();
 }
@@ -4100,7 +4725,7 @@ void setup() {
         esp_read_mac(tmac, ESP_MAC_WIFI_STA);
         snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
                  tmac[4], tmac[5]);
-        WiFi.softAP(unique_ssid, AP_PASS, AP_CHANNEL);
+        WiFi.softAP(unique_ssid, standalone_pass, AP_CHANNEL);
         Serial.printf("[WIFI] AP (unique): %s\n", unique_ssid);
     } else {
         /* Use mesh name as SSID -- all masters in same mesh share this SSID */
@@ -4145,6 +4770,47 @@ void setup() {
      * broken partition produce different messages. The esp_littlefs
      * component logs its own errors on a failed mount; those are
      * expected once, on a partition that has never been formatted. */
+    /* A shipped default of "12345678" made every other control useless.
+     * Generate a unique one on first boot and print it once for the
+     * installer; it is stored and reused from then on. */
+    prefs.begin("auth", false);
+    {
+        String ap = prefs.getString("appw", "");
+        if (ap.length() < 8) {
+            char gen[13];
+            rand_hex(gen, 12);
+            prefs.putString("appw", gen);
+            ap = String(gen);
+            Serial.printf("\n[AUTH] ******************************************\n");
+            Serial.printf("[AUTH] WiFi password for this master: %s\n", gen);
+            Serial.printf("[AUTH] Record it on the device label now.\n");
+            Serial.printf("[AUTH] ******************************************\n\n");
+        }
+        /* Standalone AP password only. mesh_pass is SHARED across a mesh
+         * so a phone roams between masters and so a master-OTA pull can
+         * associate with a peer; overwriting it per device would split the
+         * mesh. Change the mesh password through /api/mesh/passwd. */
+        strncpy(standalone_pass, ap.c_str(), sizeof(standalone_pass)-1);
+        standalone_pass[sizeof(standalone_pass)-1] = 0;
+        owner_pw_set = prefs.getString("hash", "").length() == 64;
+    }
+    prefs.end();
+    if (!owner_pw_set)
+        Serial.println("[AUTH] no owner password set -- API open until one is set");
+
+    prefs.begin("keys", true);
+    {
+        size_t n1 = prefs.getBytes("root", root_key, sizeof(root_key));
+        size_t n2 = prefs.getBytes("fw",   fw_key,   sizeof(fw_key));
+        root_key_set = (n1 == sizeof(root_key));
+        fw_key_set   = (n2 == sizeof(fw_key));
+    }
+    prefs.end();
+    if (!root_key_set)
+        Serial.println("[SEC] no root key -- extensions cannot pair until provisioned");
+    if (!fw_key_set)
+        Serial.println("[SEC] no firmware key -- images cannot be verified");
+
     master_ver_parse(MASTER_FW_VERSION, master_fw);
     Serial.printf("[MFW] running image v%u.%u.%u, %u bytes\n",
                   master_fw[0], master_fw[1], master_fw[2], master_image_size());

@@ -1,5 +1,5 @@
 /*
- * Unisync Extension Bootloader v2.0  -- FROZEN INTERFACE
+ * Unisync Extension Bootloader v4.0  -- FROZEN INTERFACE
  * STM32G030F6P6
  *
  * THIS IMAGE CAN NEVER BE UPDATED IN THE FIELD. The NVS layout and the
@@ -7,10 +7,13 @@
  * extension firmware that will ever run on this hardware.
  *
  * Flash map
- *   0x08000000 - 0x08001000   bootloader (4 KB)
- *   0x08001000 - 0x08003800   Slot A -- the running application (10 KB)
- *   0x08003800 - 0x08006000   Slot B -- OTA staging only (10 KB)
- *   0x08006000 - 0x08008000   NVS (8 KB, first 32 bytes used)
+ *   0x08000000 - 0x08001000   bootloader (4 KB, 2 pages)
+ *   0x08001000 - 0x08004000   Slot A -- the running application (12 KB)
+ *   0x08004000 - 0x08007000   Slot B -- OTA staging only (12 KB)
+ *   0x08007000 - 0x08008000   NVS (4 KB, first 64 bytes used)
+ *
+ * Sized in whole 2 KB erase pages: 2 + 6 + 6 + 2 = 16 pages = 32 KB.
+ * NVS was 8 KB for 64 bytes of data; that waste now buys 2 KB of slot.
  *
  * NVS v2 (32 bytes, 4 doublewords)
  *   0      magic            0xA5 registered / 0x5A standalone
@@ -21,20 +24,24 @@
  *   8      hw_type          written at manufacture. 0xFF = unprovisioned
  *   9      hw_revision
  *   10     boot counter
- *   11-15  reserved
+ *   11     security version (rollback floor)
+ *   12-15  reserved
  *   16     meta magic       0x5A when metadata is valid
  *   17     staged image target type
  *   18-20  staged image version (major, minor, patch)
  *   22-23  staged image size, little endian
  *   24-27  staged image CRC32, little endian
+ *   21     staged image security version
  *   28-31  reserved
+ *   32-47  fw_key   -- firmware verification key
+ *   48-63  dev_key  -- per-device bus key
  *
  * An update is applied only if ALL of these hold:
  *   - pending flag is 0xAA
  *   - metadata magic is 0x5A
  *   - this unit is provisioned (hw_type != 0xFF)
  *   - staged image type == this unit's hw_type
- *   - 0 < size <= 10 KB
+ *   - 0 < size <= 12 KB
  *   - CRC32 over Slot B matches the recorded CRC
  * Any failure leaves Slot A untouched and boots the existing application.
  *
@@ -54,18 +61,21 @@
 #include "stm32g0xx.h"
 
 #define SLOT_A           0x08001000UL
-#define SLOT_B           0x08003800UL
-#define SLOT_SIZE        (10UL * 1024UL)
+#define SLOT_B           0x08004000UL
+#define SLOT_SIZE        (12UL * 1024UL)
 #define PAGE_SIZE        2048UL
-#define NVS_BASE         0x08006000UL
-#define NVS_SIZE         32
+#define NVS_BASE         0x08007000UL
+#define NVS_SIZE         64
 
 #define NVS_OTA_FLAG     7
 #define NVS_HW_TYPE      8
+#define NVS_FW_KEY       32
 #define NVS_META_MAGIC   16
 #define NVS_META_TYPE    17
 #define NVS_META_SIZE    22
 #define NVS_META_CRC     24
+#define NVS_META_SEC     21   /* security version of the staged image */
+#define NVS_SEC_VER      11   /* rollback floor stored on the device */
 
 #define UPDATE_PENDING   0xAA
 #define META_MAGIC_VAL   0x5A
@@ -146,7 +156,10 @@ static void nvs_read(void) {
  * discarding the staging metadata. Flash erases page-wise, so a bare erase
  * would destroy pairing and the manufacturing data. */
 static void nvs_clear_pending(void) {
-    for (uint8_t i = NVS_META_MAGIC; i < NVS_SIZE; i++) nvs[i] = 0xFF;
+    /* Wipe only the staging metadata (16..31). Bytes 32..63 hold the
+     * device keys and must survive; clearing them would leave the unit
+     * unable to authenticate or accept any future update. */
+    for (uint8_t i = NVS_META_MAGIC; i < NVS_FW_KEY; i++) nvs[i] = 0xFF;
     nvs[NVS_OTA_FLAG] = 0xFF;
     flash_erase_page(NVS_BASE);
     for (uint8_t i = 0; i < NVS_SIZE; i += 8) {
@@ -166,6 +179,11 @@ static uint32_t staged_image_len(void) {
     /* Fail closed: an unprovisioned unit accepts nothing. */
     if (nvs[NVS_HW_TYPE]    == HW_UNPROVISIONED) return 0;
     if (nvs[NVS_META_TYPE]  != nvs[NVS_HW_TYPE]) return 0;
+
+    /* Rollback floor: a genuine but withdrawn image must not be
+     * reinstallable, or a known vulnerability could be restored by
+     * replaying an old signed build. */
+    if (nvs[NVS_META_SEC] < nvs[NVS_SEC_VER]) return 0;
 
     uint32_t len = (uint32_t)nvs[NVS_META_SIZE]
                  | ((uint32_t)nvs[NVS_META_SIZE + 1] << 8);
@@ -236,6 +254,9 @@ int main(void) {
     if (nvs[NVS_OTA_FLAG] == UPDATE_PENDING) {
         if (staged_image_len()) {
             blink(3, 80000);            /* valid image, applying */
+            /* Adopt the new image's security version as the new floor. */
+            if (nvs[NVS_META_SEC] > nvs[NVS_SEC_VER])
+                nvs[NVS_SEC_VER] = nvs[NVS_META_SEC];
             copy_slot_b_to_a();
         } else {
             blink(5, 80000);            /* rejected, keep running image */

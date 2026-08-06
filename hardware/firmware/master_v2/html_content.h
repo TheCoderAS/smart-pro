@@ -74,6 +74,16 @@ h1{font-size:22px;font-weight:600;margin-bottom:4px}
   <h1>Settings</h1>
   <div class="sub" id="sub">Loading...</div>
 
+  <div id="login-overlay" style="display:none;position:fixed;inset:0;background:var(--bg1,#111);z-index:9999;align-items:center;justify-content:center">
+    <div class="card" style="max-width:320px;width:90%">
+      <div class="card-label">Sign in</div>
+      <input id="login-pw" type="password" placeholder="Password"
+             style="width:100%;padding:12px;margin:12px 0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text1);font-size:15px"/>
+      <button class="btn primary" onclick="doLogin()">Sign in</button>
+      <div id="login-err" class="err" style="margin-top:10px;font-size:13px"></div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-label">Device info</div>
     <div id="info"><div style="color:var(--text3);font-size:13px">Loading...</div></div>
@@ -207,6 +217,42 @@ function uptime(s){
   return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
 }
 
+var AUTH=localStorage_shim_get();
+function localStorage_shim_get(){ try{return sessionStorage.getItem('t')||'';}catch(e){return '';} }
+function authSet(t){ AUTH=t; try{sessionStorage.setItem('t',t);}catch(e){} }
+
+/* Every request carries the session token; a 401 sends us back to login. */
+function api(url,opts){
+  opts=opts||{};
+  opts.headers=opts.headers||{};
+  if(AUTH) opts.headers['X-Auth']=AUTH;
+  return fetch(url,opts).then(function(r){
+    if(r.status===401){ showLogin(); throw new Error('login required'); }
+    if(r.status===429){ throw new Error('too many requests'); }
+    return r;
+  });
+}
+
+function showLogin(){
+  var d=document.getElementById('login-overlay');
+  if(d) d.style.display='flex';
+}
+function hideLogin(){
+  var d=document.getElementById('login-overlay');
+  if(d) d.style.display='none';
+}
+function doLogin(){
+  var pw=document.getElementById('login-pw').value;
+  var fd=new FormData(); fd.append('password',pw);
+  fetch('/api/login',{method:'POST',body:fd})
+    .then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});})
+    .then(function(x){
+      if(x.s===200&&x.j.token){ authSet(x.j.token); hideLogin(); location.reload(); }
+      else document.getElementById('login-err').textContent=x.j.error||'Login failed';
+    })
+    .catch(function(){document.getElementById('login-err').textContent='Connection error';});
+}
+
 function loadInfo(){
   var xhr=new XMLHttpRequest();
   xhr.open('GET','/api/info',true);
@@ -244,6 +290,7 @@ function startOTA(){
   document.getElementById('pwrap').style.display='block';
   var xhr=new XMLHttpRequest();
   xhr.open('POST','/api/ota/master',true);
+  if(AUTH) xhr.setRequestHeader('X-Auth',AUTH);
   xhr.upload.onprogress=function(e){
     if(e.lengthComputable){
       var p=Math.round(e.loaded/e.total*100);
@@ -287,7 +334,7 @@ function extFilePicked(input){
 function loadExtensions(){
   var sel=document.getElementById('ext-addr');
   sel.innerHTML='<option value="">Loading...</option>';
-  fetch('/api/extensions').then(function(r){return r.json();}).then(function(d){
+  api('/api/extensions').then(function(r){return r.json();}).then(function(d){
     sel.innerHTML='<option value="">Select extension...</option>';
     if(!d.extensions||d.extensions.length===0){
       sel.innerHTML='<option value="">No extensions registered</option>';
@@ -319,6 +366,7 @@ function startExtOTA(){
   document.getElementById('ext-ostatus').textContent='Uploading...';
   var xhr=new XMLHttpRequest();
   xhr.open('POST','/api/fw/upload?mesh='+mesh,true);
+  if(AUTH) xhr.setRequestHeader('X-Auth',AUTH);
   xhr.upload.onprogress=function(e){
     if(e.lengthComputable){
       var p=Math.round(e.loaded/e.total*100);
@@ -352,7 +400,7 @@ function startExtOTA(){
 
 function loadFwLib(){
   var el=document.getElementById('fw-lib');
-  fetch('/api/fw/list').then(function(r){return r.json();}).then(function(d){
+  api('/api/fw/list').then(function(r){return r.json();}).then(function(d){
     if(!d.fs){el.innerHTML='<span class="err">No filesystem partition</span>';return;}
     if(!d.images||d.images.length===0){el.textContent='Library empty.';return;}
     var h='<b style="color:var(--text1)">Library</b><br/>';
@@ -365,7 +413,7 @@ function loadFwLib(){
 
 function loadExtensions(){
   var el=document.getElementById('ext-table');
-  fetch('/api/extensions').then(function(r){return r.json();}).then(function(d){
+  api('/api/extensions').then(function(r){return r.json();}).then(function(d){
     if(!d.extensions||d.extensions.length===0){
       el.textContent='No extensions registered.';return;
     }
@@ -387,7 +435,7 @@ function loadExtensions(){
 }
 
 function loadMesh(){
-  fetch('/api/mesh/status').then(function(r){return r.json();}).then(function(d){
+  api('/api/mesh/status').then(function(r){return r.json();}).then(function(d){
     var ms=document.getElementById('mesh-status');
     var as=document.getElementById('mesh-active-section');
     var is=document.getElementById('mesh-inactive-section');
@@ -423,7 +471,7 @@ async function renameMeshNetwork(){
   var msg=document.getElementById('rename-mesh-msg');
   if(!name){msg.innerHTML='<span style="color:var(--red)">Name required</span>';return;}
   msg.innerHTML='<span style="color:var(--text3)">Saving...</span>';
-  var r=await fetch('/api/mesh/rename?name='+encodeURIComponent(name),{method:'POST'});
+  var r=await api('/api/mesh/rename?name='+encodeURIComponent(name),{method:'POST'});
   var d=await r.json();
   if(d.ok){
     msg.innerHTML='<span style="color:var(--green)">Saved. WiFi name is now: '+name+'</span>';
@@ -440,7 +488,7 @@ async function changeMeshPass(){
   if(oldp.length<8){msg.innerHTML='<span style="color:var(--red)">Enter current password</span>';return;}
   if(newp.length<8){msg.innerHTML='<span style="color:var(--red)">New password min 8 chars</span>';return;}
   msg.innerHTML='<span style="color:var(--text3)">Verifying and changing on all masters...</span>';
-  var r=await fetch('/api/mesh/passwd?old='+encodeURIComponent(oldp)+
+  var r=await api('/api/mesh/passwd?old='+encodeURIComponent(oldp)+
                     '&pass='+encodeURIComponent(newp),{method:'POST'});
   var d=await r.json();
   if(d.ok){
@@ -454,17 +502,19 @@ async function changeMeshPass(){
 
 function leaveMesh(){
   if(!confirm('Leave mesh? This board will operate standalone.'))return;
-  fetch('/api/mesh/leave',{method:'POST'}).then(function(){
+  api('/api/mesh/leave',{method:'POST'}).then(function(){
     document.getElementById('mesh-msg').innerHTML='<span class="ok">Left mesh.</span>';
     loadMesh();
   });
 }
 
-loadInfo();
-loadMesh();
-loadExtensions();
-loadFwLib();
-setInterval(loadExtensions,15000);
+var AUTH_REQUIRED=false;
+fetch('/api/info').then(function(r){return r.json();}).then(function(d){
+  AUTH_REQUIRED = !!d.auth;
+  if(AUTH_REQUIRED && !AUTH){ showLogin(); return; }
+  loadInfo(); loadMesh(); loadExtensions(); loadFwLib();
+}).catch(function(){ loadInfo(); loadMesh(); loadExtensions(); loadFwLib(); });
+setInterval(function(){ if(!AUTH_REQUIRED||AUTH) loadExtensions(); },15000);
 
 
 </script>
@@ -689,6 +739,16 @@ html,body{background:var(--bg);color:var(--text);font-family:-apple-system,Blink
 </style>
 </head>
 <body>
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:#111;z-index:9999;align-items:center;justify-content:center">
+  <div style="max-width:320px;width:90%;background:#1c1c1e;padding:20px;border-radius:14px">
+    <div style="color:#fff;font-size:16px;margin-bottom:12px">Sign in</div>
+    <input id="login-pw" type="password" placeholder="Password"
+           style="width:100%;padding:12px;margin-bottom:12px;background:#2c2c2e;border:1px solid #3a3a3c;border-radius:8px;color:#fff;font-size:15px"/>
+    <button onclick="doLogin()"
+            style="width:100%;padding:12px;background:#0a84ff;border:0;border-radius:8px;color:#fff;font-size:15px">Sign in</button>
+    <div id="login-err" style="color:#ff453a;margin-top:10px;font-size:13px"></div>
+  </div>
+</div>
 <div class="app">
 
 <!-- Boot overlay -->
@@ -839,6 +899,37 @@ html,body{background:var(--bg);color:var(--text);font-family:-apple-system,Blink
 
 </div>
 
+<script>
+/* Session handling. Both documents need this: the main page and the
+ * settings page are separate HTML strings served independently, so each
+ * needs its own copy of the token plumbing. */
+var AUTH = (function(){ try{return sessionStorage.getItem('t')||'';}catch(e){return '';} })();
+function authSet(t){ AUTH=t; try{sessionStorage.setItem('t',t);}catch(e){} }
+
+function api(url,opts){
+  opts=opts||{};
+  opts.headers=opts.headers||{};
+  if(AUTH) opts.headers['X-Auth']=AUTH;
+  return fetch(url,opts).then(function(r){
+    if(r.status===401){ showLogin(); throw new Error('login required'); }
+    if(r.status===429){ throw new Error('too many requests'); }
+    return r;
+  });
+}
+function showLogin(){ var d=document.getElementById('login-overlay'); if(d) d.style.display='flex'; }
+function hideLogin(){ var d=document.getElementById('login-overlay'); if(d) d.style.display='none'; }
+function doLogin(){
+  var pw=document.getElementById('login-pw').value;
+  var fd=new FormData(); fd.append('password',pw);
+  fetch('/api/login',{method:'POST',body:fd})
+    .then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});})
+    .then(function(x){
+      if(x.s===200&&x.j.token){ authSet(x.j.token); hideLogin(); location.reload(); }
+      else document.getElementById('login-err').textContent=x.j.error||'Login failed';
+    })
+    .catch(function(){document.getElementById('login-err').textContent='Connection error';});
+}
+</script>
 <script>
 var ws,reconnTimer=null;
 var allData={};
@@ -1063,10 +1154,10 @@ async function killMaster(event,uid,mode){
   event.stopPropagation();
   if(mode==='local'){
     /* Single endpoint kills all local switches atomically */
-    await fetch('/api/relay/killall',{method:'POST'});
+    await api('/api/relay/killall',{method:'POST'});
   } else {
     /* Single wildcard mesh relay kills all peer switches atomically */
-    await fetch('/api/mesh/relay?peer_uid='+uid+'&sw_id=*&ch=0&state=0',{method:'POST'});
+    await api('/api/mesh/relay?peer_uid='+uid+'&sw_id=*&ch=0&state=0',{method:'POST'});
   }
   /* UI updates automatically via next WebSocket push / gossip */
 }
@@ -1100,7 +1191,7 @@ function localToggle(id){
   },1000);
   pendingToggles[k]={t:t,exp:!on};
   var ch=id.split('_')[1];
-  fetch('/api/relay?id='+id+'&ch='+ch,{method:'POST'}).catch(function(){
+  api('/api/relay?id='+id+'&ch='+ch,{method:'POST'}).catch(function(){
     clearTimeout(t);btn.classList.remove('loading');
     btn.classList.remove(on?'off':'on');btn.classList.add(on?'on':'off');
     btn.querySelector('.lbl').textContent=on?'ON':'OFF';
@@ -1123,7 +1214,7 @@ function meshToggle(pUid,swId,ch){
     btn.disabled=false;delete pendingToggles[k];
   },1000);
   pendingToggles[k]={t:t,exp:!on};
-  fetch('/api/mesh/relay?peer_uid='+pUid+'&sw_id='+swId+'&ch='+ch,{method:'POST'}).catch(function(){
+  api('/api/mesh/relay?peer_uid='+pUid+'&sw_id='+swId+'&ch='+ch,{method:'POST'}).catch(function(){
     clearTimeout(t);btn.classList.remove('loading');
     btn.classList.remove(on?'off':'on');btn.classList.add(on?'on':'off');
     btn.querySelector('.lbl').textContent=on?'ON':'OFF';
@@ -1179,10 +1270,10 @@ async function saveOrder(){
   var selfUid=allData.self_uid||'';
   var targetUid=expandedMaster||selfUid;
   if(targetUid===selfUid){
-    await fetch('/api/switch/reorder',{method:'POST',
+    await api('/api/switch/reorder',{method:'POST',
       headers:{'Content-Type':'text/plain'},body:order});
   } else {
-    await fetch('/api/mesh/config?cmd=reorder_switches&target_uid='+targetUid+
+    await api('/api/mesh/config?cmd=reorder_switches&target_uid='+targetUid+
                 '&order='+encodeURIComponent(order),{method:'POST'});
   }
   reorderMode=false;
@@ -1225,7 +1316,7 @@ function closeRenameModal(){
 
 async function saveMasterOrder(orderArr){
   var order=orderArr.join(',');
-  await fetch('/api/mesh/config?cmd=reorder_masters&order='+
+  await api('/api/mesh/config?cmd=reorder_masters&order='+
               encodeURIComponent(order),{method:'POST'});
 }
 async function submitRename(){
@@ -1235,19 +1326,19 @@ async function submitRename(){
   if(renameType==='master'){
     var targetUid=renameTarget||selfUid;
     if(targetUid===selfUid){
-      await fetch('/api/master/rename?name='+encodeURIComponent(name),{method:'POST'});
+      await api('/api/master/rename?name='+encodeURIComponent(name),{method:'POST'});
     } else {
-      await fetch('/api/mesh/config?cmd=rename_master&target_uid='+targetUid+
+      await api('/api/mesh/config?cmd=rename_master&target_uid='+targetUid+
                   '&name='+encodeURIComponent(name),{method:'POST'});
     }
   } else if(renameType==='switch'){
     var targetUid2=renameTarget?renameTarget.owner_uid:selfUid;
     var slot=renameTarget?renameTarget.slot:-1;
     if(targetUid2===selfUid){
-      await fetch('/api/switch/rename?id='+renameTarget.id+
+      await api('/api/switch/rename?id='+renameTarget.id+
                   '&name='+encodeURIComponent(name),{method:'POST'});
     } else {
-      await fetch('/api/mesh/config?cmd=rename_switch&target_uid='+targetUid2+
+      await api('/api/mesh/config?cmd=rename_switch&target_uid='+targetUid2+
                   '&slot='+slot+'&name='+encodeURIComponent(name),{method:'POST'});
     }
   }
@@ -1255,7 +1346,7 @@ async function submitRename(){
 }
 
 /* Scan */
-async function startScan(){await fetch('/api/scan',{method:'POST'});}
+async function startScan(){await api('/api/scan',{method:'POST'});}
 
 /* Mesh */
 function createMesh(){
@@ -1273,7 +1364,7 @@ async function submitCreateMesh(){
   document.getElementById('create-mesh-err').textContent='';
   document.getElementById('create-mesh-btn').disabled=true;
   document.getElementById('create-mesh-btn').textContent='Creating...';
-  await fetch('/api/mesh/create?name='+encodeURIComponent(name),{method:'POST'});
+  await api('/api/mesh/create?name='+encodeURIComponent(name),{method:'POST'});
   document.getElementById('create-mesh-overlay').classList.remove('show');
   document.getElementById('create-mesh-btn').disabled=false;
   document.getElementById('create-mesh-btn').textContent='Create mesh';
@@ -1288,7 +1379,7 @@ var inviteMac='';
 var invitePollTimer=null;
 
 async function showInvite(){
-  var r=await fetch('/api/mesh/invite',{method:'POST'});
+  var r=await api('/api/mesh/invite',{method:'POST'});
   var d=await r.json();
   invitePin=d.pin; inviteMac=d.mac||'';
 
@@ -1337,7 +1428,7 @@ async function inviteStep2(){
     invitePollTimer=setInterval(async function(){
       attempts++;
       try{
-        var sr=await fetch('/api/mesh/status');
+        var sr=await api('/api/mesh/status');
         var sd=await sr.json();
         if(sd.active){clearInterval(invitePollTimer);showInviteDone();}
       }catch(e){}
@@ -1495,7 +1586,7 @@ async function assignExt(uid){
   var name=(inp?inp.value.trim():'')||'Switch';
   var el=document.getElementById('ext-'+uid);
   if(el){el.style.opacity='0.5';el.style.pointerEvents='none';}
-  var r=await fetch('/api/assign?uid='+uid+'&name='+encodeURIComponent(name),{method:'POST'});
+  var r=await api('/api/assign?uid='+uid+'&name='+encodeURIComponent(name),{method:'POST'});
   var d=await r.json();
   if(d.ok&&el) el.remove();
   /* Close if no more pending */
@@ -1505,7 +1596,7 @@ async function assignExt(uid){
 async function rejectExt(uid){
   var el=document.getElementById('ext-'+uid);
   if(el){el.style.opacity='0.5';el.style.pointerEvents='none';}
-  await fetch('/api/reject?uid='+uid,{method:'POST'});
+  await api('/api/reject?uid='+uid,{method:'POST'});
   if(el) el.remove();
   if(!document.querySelector('.ext-item')) closeBatchModal();
 }
@@ -1516,7 +1607,7 @@ async function replaceExt(uid){
   /* For now same as assign -- replace logic handled server side */
   var el=document.getElementById('ext-'+uid);
   if(el){el.style.opacity='0.5';el.style.pointerEvents='none';}
-  var r=await fetch('/api/assign?uid='+uid+'&name='+encodeURIComponent(name)+'&replace=1',{method:'POST'});
+  var r=await api('/api/assign?uid='+uid+'&name='+encodeURIComponent(name)+'&replace=1',{method:'POST'});
   var d=await r.json();
   if(d.ok&&el) el.remove();
   if(!document.querySelector('.ext-item')) closeBatchModal();
@@ -1524,7 +1615,7 @@ async function replaceExt(uid){
 
 function connectWS(){
   var host=location.hostname;
-  ws=new WebSocket('ws://'+host+':81/ws');
+  ws=new WebSocket('ws://'+host+':81/ws' + (AUTH?('?t='+AUTH):''));
   ws.onopen=function(){
     var dot=document.getElementById('conn-dot');
     var lbl=document.getElementById('conn-label');
@@ -1538,13 +1629,29 @@ function connectWS(){
     var dot=document.getElementById('conn-dot');
     var lbl=document.getElementById('conn-label');
     if(dot) dot.style.background='var(--red)';
+    /* Without a session the socket is refused on every attempt. Retrying
+     * forever just hides the real problem behind a boot overlay that
+     * never clears, so ask for the password instead. */
+    if(AUTH_REQUIRED && !AUTH){
+      if(lbl) lbl.textContent='Sign in required';
+      showLogin();
+      return;
+    }
     if(lbl) lbl.textContent='Reconnecting...';
     clearTimeout(reconnTimer);
     reconnTimer=setTimeout(connectWS,2000);
   };
   ws.onerror=function(){ws.close();};
 }
-connectWS();
+
+/* Find out whether this master wants a login before doing anything else.
+ * /api/info is open, so this works with or without a session. */
+var AUTH_REQUIRED=false;
+fetch('/api/info').then(function(r){return r.json();}).then(function(d){
+  AUTH_REQUIRED = !!d.auth;
+  if(AUTH_REQUIRED && !AUTH){ showLogin(); return; }
+  connectWS();
+}).catch(function(){ connectWS(); });
 </script>
 </body>
 </html>

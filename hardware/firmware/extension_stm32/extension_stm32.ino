@@ -23,6 +23,118 @@
 
 #include "Arduino.h"   /* millis(), delay() only */
 
+/* Placed directly after the includes on purpose: the Arduino build
+ * generates function prototypes and inserts them above the first
+ * function in the sketch. A type used in a prototype must therefore
+ * be declared before that point, or every SHA-256 function fails to
+ * compile with "sha256_t was not declared in this scope".
+ */
+/* ================================================================
+ * SHA-256 and HMAC-SHA-256
+ * Compact implementation shared byte-for-byte by the master and the
+ * extension so both sides can never disagree. Replaces CRC32, which is
+ * linear and therefore forgeable from a handful of observed pairs.
+ * ================================================================ */
+typedef struct {
+    uint32_t st[8];
+    uint32_t len;
+    uint8_t  buf[64];
+    uint8_t  n;
+} sha256_t;
+
+static const uint32_t SHA_K[64] = {
+0x428a2f98UL,0x71374491UL,0xb5c0fbcfUL,0xe9b5dba5UL,0x3956c25bUL,0x59f111f1UL,
+0x923f82a4UL,0xab1c5ed5UL,0xd807aa98UL,0x12835b01UL,0x243185beUL,0x550c7dc3UL,
+0x72be5d74UL,0x80deb1feUL,0x9bdc06a7UL,0xc19bf174UL,0xe49b69c1UL,0xefbe4786UL,
+0x0fc19dc6UL,0x240ca1ccUL,0x2de92c6fUL,0x4a7484aaUL,0x5cb0a9dcUL,0x76f988daUL,
+0x983e5152UL,0xa831c66dUL,0xb00327c8UL,0xbf597fc7UL,0xc6e00bf3UL,0xd5a79147UL,
+0x06ca6351UL,0x14292967UL,0x27b70a85UL,0x2e1b2138UL,0x4d2c6dfcUL,0x53380d13UL,
+0x650a7354UL,0x766a0abbUL,0x81c2c92eUL,0x92722c85UL,0xa2bfe8a1UL,0xa81a664bUL,
+0xc24b8b70UL,0xc76c51a3UL,0xd192e819UL,0xd6990624UL,0xf40e3585UL,0x106aa070UL,
+0x19a4c116UL,0x1e376c08UL,0x2748774cUL,0x34b0bcb5UL,0x391c0cb3UL,0x4ed8aa4aUL,
+0x5b9cca4fUL,0x682e6ff3UL,0x748f82eeUL,0x78a5636fUL,0x84c87814UL,0x8cc70208UL,
+0x90befffaUL,0xa4506cebUL,0xbef9a3f7UL,0xc67178f2UL };
+
+#define SHA_ROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+
+static void sha256_block(sha256_t *c, const uint8_t *p) {
+    uint32_t w[64], a,b,cc,d,e,f,g,h,t1,t2;
+    for (int i=0;i<16;i++)
+        w[i]=((uint32_t)p[i*4]<<24)|((uint32_t)p[i*4+1]<<16)|
+             ((uint32_t)p[i*4+2]<<8)|(uint32_t)p[i*4+3];
+    for (int i=16;i<64;i++) {
+        uint32_t s0=SHA_ROR(w[i-15],7)^SHA_ROR(w[i-15],18)^(w[i-15]>>3);
+        uint32_t s1=SHA_ROR(w[i-2],17)^SHA_ROR(w[i-2],19)^(w[i-2]>>10);
+        w[i]=w[i-16]+s0+w[i-7]+s1;
+    }
+    a=c->st[0];b=c->st[1];cc=c->st[2];d=c->st[3];
+    e=c->st[4];f=c->st[5];g=c->st[6];h=c->st[7];
+    for (int i=0;i<64;i++) {
+        uint32_t S1=SHA_ROR(e,6)^SHA_ROR(e,11)^SHA_ROR(e,25);
+        uint32_t ch=(e&f)^((~e)&g);
+        t1=h+S1+ch+SHA_K[i]+w[i];
+        uint32_t S0=SHA_ROR(a,2)^SHA_ROR(a,13)^SHA_ROR(a,22);
+        uint32_t mj=(a&b)^(a&cc)^(b&cc);
+        t2=S0+mj;
+        h=g;g=f;f=e;e=d+t1;d=cc;cc=b;b=a;a=t1+t2;
+    }
+    c->st[0]+=a;c->st[1]+=b;c->st[2]+=cc;c->st[3]+=d;
+    c->st[4]+=e;c->st[5]+=f;c->st[6]+=g;c->st[7]+=h;
+}
+
+static void sha256_init(sha256_t *c) {
+    c->st[0]=0x6a09e667UL;c->st[1]=0xbb67ae85UL;c->st[2]=0x3c6ef372UL;
+    c->st[3]=0xa54ff53aUL;c->st[4]=0x510e527fUL;c->st[5]=0x9b05688cUL;
+    c->st[6]=0x1f83d9abUL;c->st[7]=0x5be0cd19UL;
+    c->len=0;c->n=0;
+}
+
+static void sha256_update(sha256_t *c, const uint8_t *p, uint32_t n) {
+    c->len += n;
+    while (n--) {
+        c->buf[c->n++]=*p++;
+        if (c->n==64) { sha256_block(c,c->buf); c->n=0; }
+    }
+}
+
+static void sha256_final(sha256_t *c, uint8_t *out) {
+    uint32_t bits = c->len * 8;
+    c->buf[c->n++]=0x80;
+    if (c->n>56) { while(c->n<64) c->buf[c->n++]=0; sha256_block(c,c->buf); c->n=0; }
+    while (c->n<56) c->buf[c->n++]=0;
+    c->buf[56]=0;c->buf[57]=0;c->buf[58]=0;c->buf[59]=0;
+    c->buf[60]=(bits>>24)&0xFF;c->buf[61]=(bits>>16)&0xFF;
+    c->buf[62]=(bits>>8)&0xFF; c->buf[63]=bits&0xFF;
+    sha256_block(c,c->buf);
+    for (int i=0;i<8;i++) {
+        out[i*4]  =(c->st[i]>>24)&0xFF; out[i*4+1]=(c->st[i]>>16)&0xFF;
+        out[i*4+2]=(c->st[i]>>8)&0xFF;  out[i*4+3]=c->st[i]&0xFF;
+    }
+}
+
+/* HMAC-SHA-256 with a 16-byte key. */
+static void hmac_sha256(const uint8_t *key, const uint8_t *msg, uint32_t mlen,
+                        uint8_t *out32) {
+    uint8_t k_ipad[64], k_opad[64], inner[32];
+    sha256_t c;
+    for (int i=0;i<64;i++) {
+        uint8_t kb = (i<16) ? key[i] : 0;
+        k_ipad[i]=kb^0x36; k_opad[i]=kb^0x5c;
+    }
+    sha256_init(&c); sha256_update(&c,k_ipad,64);
+    sha256_update(&c,msg,mlen); sha256_final(&c,inner);
+    sha256_init(&c); sha256_update(&c,k_opad,64);
+    sha256_update(&c,inner,32); sha256_final(&c,out32);
+}
+
+/* Constant-time compare: an early exit leaks how many bytes matched. */
+static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
+    uint8_t d=0;
+    while (n--) d |= (uint8_t)(*a++ ^ *b++);
+    return d==0;
+}
+
+
 /* ================================================================
  * GPIO BIT-BANG MACROS (replaces digitalWrite/pinMode)
  * All pins on GPIOA -- direct register writes, zero overhead
@@ -55,9 +167,9 @@
  * is the one fact an update must never be able to change.
  * ================================================================ */
 #define FW_VER_MAJOR   1
-#define FW_VER_MINOR   0
-#define FW_VER_PATCH   0
-#define FW_TARGET_TYPE 0x02          /* image is built for this hw_type */
+#define FW_VER_MINOR   2
+#define FW_VER_PATCH   5
+#define FW_TARGET_TYPE 0x01          /* image is built for this hw_type */
 
 /* No custom section: an orphan section is placed at the linker's
  * discretion and can disturb the .data load region. Ordinary .rodata,
@@ -101,10 +213,6 @@ const volatile uint8_t FW_DESC[16] = {
 #define CMD_CHALLENGE     0x54
 #define CMD_RESPONSE      0x55
 
-static const uint8_t SECRET_KEY[16] = {
-    0x55,0x6E,0x69,0x73,0x79,0x6E,0x63,0x53,
-    0x77,0x69,0x74,0x63,0x68,0x4B,0x65,0x79
-};
 
 /* ================================================================
  * FLASH EEPROM EMULATION
@@ -113,13 +221,13 @@ static const uint8_t SECRET_KEY[16] = {
  * Page must be erased before write (erase sets all bytes to 0xFF)
  * Write 8 bytes (double-word) at a time
  * ================================================================ */
-#define NVS_PAGE_ADDR   0x08006000UL  /* NVS start (8KB) */
+#define NVS_PAGE_ADDR   0x08007000UL  /* NVS start (4KB, 2 pages) */
 #define NVS_PAGE_SIZE   2048  /* flash erase page size */
 
 /* NVS byte offsets */
 /* NVS v2 -- 32 bytes / 4 doublewords. FROZEN: the bootloader depends on
  * this layout and the bootloader cannot be updated in the field. */
-#define NVS_SIZE        32
+#define NVS_SIZE        64
 #define NVS_MAGIC       0   /* 1 byte: 0xA5 registered / 0x5A standalone */
 #define NVS_ADDR        1   /* 1 byte: bus address */
 #define NVS_RELAY       2   /* 1 byte: bit0=relay1, bit1=relay2 */
@@ -128,12 +236,16 @@ static const uint8_t SECRET_KEY[16] = {
 #define NVS_HW_TYPE     8   /* provisioned at manufacture, 0xFF = unprovisioned */
 #define NVS_HW_REV      9
 #define NVS_BOOT_CNT   10
+#define NVS_SEC_VER    11   /* rollback floor: refuse images below this */
 /* bytes 16..31 = OTA staging metadata, read by the bootloader */
 #define NVS_META_MAGIC 16   /* 0x5A when a staged image is present */
 #define NVS_META_TYPE  17   /* target hw_type of the staged image */
 #define NVS_META_VER   18   /* 3 bytes: major, minor, patch */
 #define NVS_META_SIZE  22   /* 2 bytes LE: staged image length */
 #define NVS_META_CRC   24   /* 4 bytes LE: CRC32 of the staged image */
+#define NVS_META_SEC   21   /* security version of the staged image */
+#define NVS_FW_KEY     32   /* 16 bytes: firmware verification key */
+#define NVS_DEV_KEY    48   /* 16 bytes: per-device bus key */
 #define META_MAGIC_VAL 0x5A
 #define NVS_MUID1       4
 #define NVS_MUID2       5
@@ -145,12 +257,12 @@ static const uint8_t SECRET_KEY[16] = {
 
 /* Flash layout (with bootloader):
  * 0x08000000 - 0x08001000  Bootloader (4KB)
- * 0x08001000 - 0x08003800  Slot A -- always runs here (10KB)
- * 0x08003800 - 0x08006000  Slot B -- OTA staging (10KB)
- * 0x08006000 - 0x08008000  NVS (8KB)
+ * 0x08001000 - 0x08004000  Slot A -- always runs here (12KB)
+ * 0x08004000 - 0x08007000  Slot B -- OTA staging (12KB)
+ * 0x08007000 - 0x08008000  NVS (4KB)
  */
-#define SLOT_B_ADDR      0x08003800UL
-#define SLOT_SIZE        (10UL * 1024UL)
+#define SLOT_B_ADDR      0x08004000UL
+#define SLOT_SIZE        (12UL * 1024UL)
 #define OTA_CHUNK_SIZE   32
 
 /* Shadow RAM copy of NVS page (2KB is too large -- use only first 8 bytes) */
@@ -266,6 +378,7 @@ static void uid_init(void) {
     device_uid[2]=(w>>8)&0xFF; device_uid[3]=w&0xFF;
 }
 
+
 /* ================================================================
  * CRC-8
  * ================================================================ */
@@ -286,11 +399,16 @@ static uint32_t crc32_compute(const uint8_t *d, uint32_t n) {
     return c^0xFFFFFFFF;
 }
 
-static uint32_t compute_response(const uint8_t *ch) {
-    uint8_t b[24];
-    for(uint8_t i=0;i<16;i++) b[i]=SECRET_KEY[i];
-    for(uint8_t i=0;i<4;i++){b[16+i]=ch[i];b[20+i]=device_uid[i];}
-    return crc32_compute(b,24);
+/* HMAC-SHA256(dev_key, nonce || uid), truncated to 8 bytes.
+ * The old construction was CRC32 over a key, which is linear: a few
+ * observed pairs were enough to solve for the key's contribution. */
+static void compute_response(const uint8_t *nonce, uint8_t nlen, uint8_t *out8) {
+    uint8_t msg[16], mac[32];
+    uint8_t n = (nlen > 8) ? 8 : nlen;
+    for (uint8_t i=0;i<n;i++) msg[i]=nonce[i];
+    for (uint8_t i=0;i<4;i++) msg[n+i]=device_uid[i];
+    hmac_sha256(&nvs_shadow[NVS_DEV_KEY], msg, n+4, mac);
+    for (uint8_t i=0;i<8;i++) out8[i]=mac[i];
 }
 
 /* ================================================================
@@ -330,7 +448,7 @@ static bool     last_t1         = false;
 static bool     last_t2         = false;
 static uint32_t last_poll_ms    = 0;
 
-static uint8_t  rx_buf[42] __attribute__((aligned(4)));
+static uint8_t  rx_buf[56] __attribute__((aligned(4)));
 static uint8_t  rx_pos          = 0;
 static uint8_t  rx_elen         = 0;
 
@@ -436,7 +554,7 @@ static void rs485_send(uint8_t *frame, uint8_t len) {
 
 static void send_frame(uint8_t dst, uint8_t cmd,
                        uint8_t *payload, uint8_t plen) {
-    uint8_t frame[44];
+    uint8_t frame[56];
     frame[0] = SOF;
     frame[1] = dst;
     frame[2] = slot_address;
@@ -549,6 +667,9 @@ static void send_state_resp(void) {
 static uint32_t ota_total=0,ota_crc_ex=0;
 static uint16_t ota_last_idx=0xFFFF;  /* de-dupe retried chunks */
 static uint8_t  ota_ver[3]={0,0,0};   /* version of the staged image */
+static uint8_t  ota_sec = 0;          /* security version of staged image */
+static uint8_t  ota_sig[32];          /* HMAC-SHA256 over the image */
+static bool     ota_have_sig = false;
 
 static void ota_write_chunk(uint32_t off, const uint8_t *d, uint8_t len) {
     uint32_t addr = SLOT_B_ADDR + off;
@@ -622,13 +743,15 @@ static void process_frame(uint8_t *frame, uint8_t len) {
     }
 
     if (cmd == CMD_CHALLENGE) {
-        if (plen<8||p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
-        uint32_t r=compute_response(&p[4]);
-        uint8_t f[14]={SOF,ADDR_MASTER,ADDR_UNASSIGNED,CMD_RESPONSE,8,
+        /* payload: uid[4] nonce[8] */
+        if (plen<12||p[0]!=uid[0]||p[1]!=uid[1]||p[2]!=uid[2]||p[3]!=uid[3]) return;
+        uint8_t mac[8];
+        compute_response(&p[4], 8, mac);
+        uint8_t f[19]={SOF,ADDR_MASTER,ADDR_UNASSIGNED,CMD_RESPONSE,12,
             uid[0],uid[1],uid[2],uid[3],
-            (r>>24)&0xFF,(r>>16)&0xFF,(r>>8)&0xFF,r&0xFF,0};
-        f[13]=crc8(&f[1],12);
-        rs485_send(f,14); return;
+            mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],mac[6],mac[7],0,0};
+        f[17]=crc8(&f[1],16);
+        rs485_send(f,18); return;
     }
 
     /* Bus-address commands */
@@ -686,6 +809,14 @@ static void process_frame(uint8_t *frame, uint8_t len) {
         if(ota_total==0||ota_total>SLOT_SIZE){
             buf[0]=0xFB;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);break;}
         ota_ver[0]=p[9]; ota_ver[1]=p[10]; ota_ver[2]=p[11];
+        ota_sec = (plen>=13) ? p[12] : 0;
+        /* Refuse an image older than the security floor: a signed but
+         * withdrawn build must not be reinstallable. */
+        if (ota_sec < nvs_shadow[NVS_SEC_VER]) {
+            buf[0]=0xFA; send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1); break;
+        }
+        for (uint8_t _i=0;_i<32;_i++) ota_sig[_i] = (plen>=45) ? p[13+_i] : 0;
+        ota_have_sig = (plen>=45);
         ota_last_idx=0xFFFF;
         mode=MODE_OTA; buf[0]=0;
         send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1); break;
@@ -706,6 +837,20 @@ static void process_frame(uint8_t *frame, uint8_t len) {
 
     case CMD_OTA_END:
         {uint32_t crc=crc32_compute((const uint8_t*)SLOT_B_ADDR,ota_total);
+         uint8_t mac[32];
+         bool sig_ok=false;
+         if (ota_have_sig) {
+             hmac_sha256(&nvs_shadow[NVS_FW_KEY],
+                         (const uint8_t*)SLOT_B_ADDR, ota_total, mac);
+             sig_ok = ct_equal(mac, ota_sig, 32);
+         }
+         if(!sig_ok){
+             /* CRC proves the image arrived intact; only the signature
+              * proves it is ours. Unsigned or forged images are dropped
+              * here, before the pending flag is ever raised. */
+             buf[0]=0xF9; send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
+             FLASH->CR|=FLASH_CR_LOCK; mode=MODE_REGISTERED; break;
+         }
          if(crc==ota_crc_ex){
              buf[0]=0;send_frame(ADDR_MASTER,CMD_OTA_ACK,buf,1);
              /* Publish staging metadata, then raise the pending flag. The
@@ -716,6 +861,7 @@ static void process_frame(uint8_t *frame, uint8_t len) {
              nvs_shadow[NVS_META_VER+0]  = ota_ver[0];
              nvs_shadow[NVS_META_VER+1]  = ota_ver[1];
              nvs_shadow[NVS_META_VER+2]  = ota_ver[2];
+             nvs_shadow[NVS_META_SEC]    = ota_sec;
              nvs_shadow[NVS_META_SIZE+0] = (uint8_t)(ota_total & 0xFF);
              nvs_shadow[NVS_META_SIZE+1] = (uint8_t)((ota_total >> 8) & 0xFF);
              nvs_shadow[NVS_META_CRC+0]  = (uint8_t)(ota_crc_ex & 0xFF);
@@ -748,7 +894,7 @@ static void bus_rx_tick(void) {
         if (rx_pos == 0) {
             if (b == SOF) rx_buf[rx_pos++] = b;
         } else {
-            if (rx_pos >= 42) { rx_pos=0; rx_elen=0; return; }
+            if (rx_pos >= 56) { rx_pos=0; rx_elen=0; return; }
             rx_buf[rx_pos++] = b;
             if (rx_pos == 5) rx_elen = 6 + rx_buf[4];
             if (rx_elen > 0 && rx_pos >= rx_elen) {
