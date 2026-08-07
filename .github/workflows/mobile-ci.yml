@@ -126,13 +126,19 @@ jobs:
       - run: flutter pub get
       - run: dart run build_runner build --delete-conflicting-outputs
       - run: flutter build apk --release
+      # Per-ABI APKs are ~1/3 the size of the universal one; most phones
+      # want app-arm64-v8a-release.apk.
+      - run: flutter build apk --release --split-per-abi
       - name: publish to mobile-latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create mobile-latest --prerelease \
             --title "Unisync Android (rolling)" \
-            --notes "Debug-signed release APK, rebuilt on every mobile change. Built from ${GITHUB_SHA}." \
+            --notes "Debug-signed release APKs, rebuilt on every mobile change. Most phones want app-arm64-v8a-release.apk; app-release.apk is the universal fallback. Built from ${GITHUB_SHA}." \
             || true
           gh release upload mobile-latest \
-            build/app/outputs/flutter-apk/app-release.apk --clobber
+            build/app/outputs/flutter-apk/app-release.apk \
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
+            build/app/outputs/flutter-apk/app-x86_64-release.apk --clobber
