@@ -16,8 +16,12 @@ val keystoreProperties = Properties().apply {
 val hasReleaseKeystore = keystoreProperties.containsKey("storeFile")
 
 android {
-    namespace = "`in`.unisync.unisync"
-    compileSdk = flutter.compileSdkVersion
+    // Plain form, no Kotlin backtick escapes — AGP rejects the escaped
+    // string; "in" is fine in a Java package / applicationId.
+    namespace = "in.unisync.unisync"
+    // flutter.compileSdkVersion is 36, but flutter_secure_storage and
+    // permission_handler ship AARs that demand 37+ (PLAN.md §2: track latest).
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -28,7 +32,7 @@ android {
     defaultConfig {
         // NOTE: confirm final store applicationId before first Play upload;
         // changing it after publication is impossible.
-        applicationId = "`in`.unisync.unisync"
+        applicationId = "in.unisync.unisync"
         // minSdk 24 per PLAN.md §2 — BLE + WifiNetworkSuggestion floor.
         // compileSdk/targetSdk track the Flutter SDK's current defaults.
         minSdk = maxOf(24, flutter.minSdkVersion)
