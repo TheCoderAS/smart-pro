@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "in.unisync.unisync"
-    compileSdk = flutter.compileSdkVersion
+    // flutter.compileSdkVersion is 36, but flutter_secure_storage and
+    // permission_handler ship AARs that demand 37+ (PLAN.md §2: track latest).
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
