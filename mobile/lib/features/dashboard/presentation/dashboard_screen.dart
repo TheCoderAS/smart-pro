@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../app/router.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../auth/application/session.dart';
 import '../../switches/data/switch_repository.dart';
+import '../../switches/presentation/rename_sheet.dart';
 import '../application/switch_overrides.dart';
 
 class DashboardScreen extends ConsumerWidget {
@@ -41,6 +46,8 @@ class DashboardScreen extends ConsumerWidget {
           PopupMenuButton<String>(
             onSelected: (v) async {
               switch (v) {
+                case 'reorder':
+                  unawaited(context.push(Routes.reorder));
                 case 'killall':
                   await _confirmKillAll(context, ref);
                 case 'signout':
@@ -48,6 +55,10 @@ class DashboardScreen extends ConsumerWidget {
               }
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'reorder',
+                child: Text('Reorder switches'),
+              ),
               PopupMenuItem(
                 value: 'killall',
                 child: Text('Turn everything off'),
@@ -186,6 +197,7 @@ class SwitchTile extends ConsumerWidget {
       color: on ? scheme.primaryContainer : null,
       child: InkWell(
         onTap: sw.online ? () => _toggle(ref, on) : null,
+        onLongPress: () => showRenameSwitchSheet(context, ref, sw),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(
