@@ -15,11 +15,12 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        // NOTE: confirm final store applicationId before first Play upload;
+        // changing it after publication is impossible.
         applicationId = "`in`.unisync.unisync"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // minSdk 24 per PLAN.md §2 — BLE + WifiNetworkSuggestion floor.
+        // compileSdk/targetSdk track the Flutter SDK's current defaults.
+        minSdk = maxOf(24, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
