@@ -1,16 +1,32 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:unisync/core/api/failure.dart';
+import 'package:unisync/features/auth/data/auth_repository.dart';
 import 'package:unisync/main.dart';
 
+/// Boot smoke test. The default (un-mocked) session hits an
+/// unreachable master, so the app must land on the "can't reach your
+/// switch" screen rather than crashing or spinning forever.
+class _UnreachableRepo implements AuthRepository {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw const Unreachable();
+}
+
 void main() {
-  testWidgets('app boots to the home screen', (tester) async {
-    await tester.pumpWidget(const ProviderScope(child: UnisyncApp()));
+  testWidgets('app boots to the unreachable screen without a device',
+      (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(_UnreachableRepo()),
+        ],
+        child: const UnisyncApp(),
+      ),
+    );
     await tester.pumpAndSettle();
 
-    expect(find.text('Unisync'), findsWidgets);
-    expect(
-      find.text('The wall should be smarter than the bulb.'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('reach your switch'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
   });
 }
