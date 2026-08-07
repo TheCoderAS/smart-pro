@@ -1,9 +1,14 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../features/audit/presentation/audit_screen.dart';
 import '../features/auth/presentation/session_gate.dart';
+import '../features/extensions/presentation/extensions_screen.dart';
+import '../features/firmware/presentation/firmware_screen.dart';
+import '../features/mesh/presentation/mesh_screen.dart';
 import '../features/onboarding/presentation/add_master_screen.dart';
 import '../features/recovery/presentation/recovery_screen.dart';
+import '../features/settings/presentation/settings_screen.dart';
 import '../features/switches/presentation/reorder_screen.dart';
 
 /// Route paths, one constant per screen. Feature blocks add theirs here
@@ -13,6 +18,11 @@ abstract final class Routes {
   static const reorder = '/switches/reorder';
   static const recovery = '/recovery';
   static const addMaster = '/add-master';
+  static const extensions = '/extensions';
+  static const mesh = '/mesh';
+  static const firmware = '/firmware';
+  static const audit = '/audit';
+  static const settings = '/settings';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -34,6 +44,26 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.addMaster,
         builder: (context, state) => const AddMasterScreen(),
+      ),
+      GoRoute(
+        path: Routes.extensions,
+        builder: (context, state) => const ExtensionsScreen(),
+      ),
+      GoRoute(
+        path: Routes.mesh,
+        builder: (context, state) => const MeshScreen(),
+      ),
+      GoRoute(
+        path: Routes.firmware,
+        builder: (context, state) => const FirmwareScreen(),
+      ),
+      GoRoute(
+        path: Routes.audit,
+        builder: (context, state) => const AuditScreen(),
+      ),
+      GoRoute(
+        path: Routes.settings,
+        builder: (context, state) => const SettingsScreen(),
       ),
     ],
   );

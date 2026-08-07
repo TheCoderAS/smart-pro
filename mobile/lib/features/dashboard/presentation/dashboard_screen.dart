@@ -7,7 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/router.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
-import '../../auth/application/session.dart';
+import '../../settings/presentation/master_switcher.dart';
 import '../../switches/data/switch_repository.dart';
 import '../../switches/presentation/rename_sheet.dart';
 import '../application/switch_overrides.dart';
@@ -30,6 +30,11 @@ class DashboardScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Your switches',
+          icon: const Icon(Icons.home_work_outlined),
+          onPressed: () => showMasterSwitcher(context, ref),
+        ),
         title: Text(
           snapshot.value?.masterName.isNotEmpty ?? false
               ? snapshot.value!.masterName
@@ -48,10 +53,18 @@ class DashboardScreen extends ConsumerWidget {
               switch (v) {
                 case 'reorder':
                   unawaited(context.push(Routes.reorder));
+                case 'extensions':
+                  unawaited(context.push(Routes.extensions));
+                case 'mesh':
+                  unawaited(context.push(Routes.mesh));
+                case 'firmware':
+                  unawaited(context.push(Routes.firmware));
+                case 'audit':
+                  unawaited(context.push(Routes.audit));
+                case 'settings':
+                  unawaited(context.push(Routes.settings));
                 case 'killall':
                   await _confirmKillAll(context, ref);
-                case 'signout':
-                  await ref.read(sessionProvider.notifier).signOut();
               }
             },
             itemBuilder: (context) => const [
@@ -59,11 +72,15 @@ class DashboardScreen extends ConsumerWidget {
                 value: 'reorder',
                 child: Text('Reorder switches'),
               ),
+              PopupMenuItem(value: 'extensions', child: Text('Extensions')),
+              PopupMenuItem(value: 'mesh', child: Text('Mesh')),
+              PopupMenuItem(value: 'firmware', child: Text('Firmware')),
+              PopupMenuItem(value: 'audit', child: Text('Activity log')),
+              PopupMenuItem(value: 'settings', child: Text('Settings')),
               PopupMenuItem(
                 value: 'killall',
                 child: Text('Turn everything off'),
               ),
-              PopupMenuItem(value: 'signout', child: Text('Sign out')),
             ],
           ),
         ],
