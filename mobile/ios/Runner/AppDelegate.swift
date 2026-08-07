@@ -18,7 +18,7 @@ import UIKit
     // Wi-Fi join/read channel — counterpart of the Android
     // implementation in MainActivity.kt. Requires the Hotspot
     // Configuration entitlement (see mobile/RELEASE.md).
-    let messenger = engineBridge.applicationBinaryMessenger
+    let messenger = engineBridge.applicationRegistrar.messenger()
     let channel = FlutterMethodChannel(
       name: "in.unisync.unisync/wifi",
       binaryMessenger: messenger
