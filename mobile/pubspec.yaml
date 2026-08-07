@@ -1,0 +1,51 @@
+name: unisync
+description: "Unisync — control your switches. Local-first companion app for Unisync masters and extensions."
+publish_to: 'none'
+
+# versionName / CFBundleShortVersionString + versionCode / CFBundleVersion
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  # State management — Riverpod 3, hand-written notifiers (no codegen:
+  # riverpod_generator's analyzer pins currently conflict with
+  # web_socket_channel 3.x; see mobile/PLAN.md §3 note).
+  flutter_riverpod: ^3.4.2
+  # Declarative routing
+  go_router: ^17.4.0
+  # HTTP to the master (X-Auth interceptor, multipart OTA uploads)
+  dio: ^5.11.0
+  # Live state socket, ws://192.168.4.1:81/ws
+  web_socket_channel: ^3.0.3
+  # Token storage — Keychain / EncryptedSharedPreferences
+  flutter_secure_storage: ^11.0.0
+  # Non-secret prefs: theme, last-used master UID
+  shared_preferences: ^2.5.5
+  # HMAC-SHA256 for BLE recovery challenge
+  crypto: ^3.0.7
+  # Hex codec for recovery keys
+  convert: ^3.1.2
+  # Structured dev logging; silent in release
+  logger: ^2.7.0
+  # Immutable models + JSON
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.12.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  build_runner: ^2.15.1
+  freezed: ^3.2.5
+  json_serializable: ^6.14.1
+  mocktail: ^1.0.5
+
+flutter:
+  uses-material-design: true
