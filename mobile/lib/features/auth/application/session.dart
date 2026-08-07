@@ -146,4 +146,46 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(_bootstrap);
   }
+
+  /// The reconnect dance after any password change (API §6): the
+  /// master replied 200 FIRST, then restarts its Wi-Fi ~400 ms later.
+  /// The old token is dead everywhere. So: drop the token, give the
+  /// AP time to come back, then retry a fresh login with the new
+  /// password. The phone may need to rejoin the Wi-Fi in between —
+  /// callers fire WifiService.join independently when the SSID is
+  /// known.
+  Future<void> handlePasswordChanged(
+    String newPassword, {
+    int attempts = 5,
+    Duration delay = const Duration(seconds: 2),
+  }) async {
+    final current = state.value;
+    final info = switch (current) {
+      Authenticated(:final info) => info,
+      NeedsLogin(:final info) => info,
+      NeedsCommissioning(:final info) => info,
+      _ => null,
+    };
+    ref.read(tokenProvider.notifier).set(null);
+    if (info != null) await _store.deleteToken(info.uid);
+
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(() async {
+      for (var i = 0; i < attempts; i++) {
+        await Future<void>.delayed(delay);
+        try {
+          final result = await _repo.login(newPassword);
+          final freshInfo = info ?? await _repo.info();
+          await _store.writeToken(freshInfo.uid, result.token);
+          ref.read(tokenProvider.notifier).set(result.token);
+          return Authenticated(freshInfo, mesh: result.mesh);
+        } on Unreachable {
+          continue; // AP still restarting or phone still rejoining
+        } on ApiFailure {
+          break; // a real verdict — fall through to bootstrap
+        }
+      }
+      return _bootstrap();
+    });
+  }
 }

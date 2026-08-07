@@ -126,6 +126,56 @@ void main() {
     expect((state! as NeedsLogin).failure, isA<Unauthorized>());
   });
 
+  test('password change dance: retries login until AP returns', () async {
+    when(() => repo.info()).thenAnswer((_) async => _info);
+    when(() => store.readToken('C5F77720'))
+        .thenAnswer((_) async => 'cafebabe');
+    when(() => repo.validateToken()).thenAnswer((_) async => true);
+    final c = makeContainer();
+    await bootstrap(c);
+
+    // First two logins fail while the AP restarts; third succeeds.
+    var calls = 0;
+    when(() => repo.login('newpass123')).thenAnswer((_) async {
+      calls++;
+      if (calls < 3) throw const Unreachable();
+      return const LoginResult(token: 'feedf00d', mesh: true);
+    });
+
+    await c.read(sessionProvider.notifier).handlePasswordChanged(
+          'newpass123',
+          delay: const Duration(milliseconds: 1),
+        );
+
+    final state = c.read(sessionProvider).value;
+    expect(state, isA<Authenticated>());
+    expect(c.read(tokenProvider), 'feedf00d');
+    expect(calls, 3);
+    verify(() => store.deleteToken('C5F77720')).called(1);
+    verify(() => store.writeToken('C5F77720', 'feedf00d')).called(1);
+  });
+
+  test('password change dance: wrong new password → bootstrap path',
+      () async {
+    when(() => repo.info()).thenAnswer((_) async => _info);
+    when(() => store.readToken('C5F77720'))
+        .thenAnswer((_) async => 'cafebabe');
+    when(() => repo.validateToken()).thenAnswer((_) async => true);
+    final c = makeContainer();
+    await bootstrap(c);
+
+    when(() => repo.login('badpass123')).thenThrow(const Unauthorized());
+    // Bootstrap after the failed dance: token was deleted.
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => null);
+
+    await c.read(sessionProvider.notifier).handlePasswordChanged(
+          'badpass123',
+          delay: const Duration(milliseconds: 1),
+        );
+
+    expect(c.read(sessionProvider).value, isA<NeedsLogin>());
+  });
+
   test('sign out → token cleared, NeedsLogin', () async {
     when(() => repo.info()).thenAnswer((_) async => _info);
     when(() => store.readToken('C5F77720'))
