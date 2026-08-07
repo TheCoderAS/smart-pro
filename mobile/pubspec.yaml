@@ -37,7 +37,6 @@ dependencies:
   dio: ^5.11.0
   web_socket_channel: ^3.0.3
   flutter_blue_plus: ^2.3.11
-  wifi_iot: ^0.3.19+2
   wifi_scan: ^0.4.1+2
   flutter_secure_storage: ^11.0.0
   shared_preferences: ^2.5.5
