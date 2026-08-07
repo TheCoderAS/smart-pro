@@ -1,11 +1,55 @@
+# Monorepo gitignore.
+# Unqualified patterns (no leading /) match at any depth, so rules like
+# `node_modules` cover both root and `web/node_modules`. Path-qualified
+# rules (with a leading segment) apply only where they say.
+
+# ─── Node / package managers ───────────────────────────────────
 node_modules
+.pnpm-store/
+
+# ─── Next.js ───────────────────────────────────────────────────
 .next
 out
-.env*.local
-.DS_Store
-*.log
-.vercel
 next-env.d.ts
+
+# ─── TypeScript ────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── Environment files ─────────────────────────────────────────
+# Ignore all .env and .env.<mode>[.local], but keep example templates.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# ─── Hosting / deploy ──────────────────────────────────────────
+.vercel
+
+# ─── Editor / IDE ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS artefacts ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+._*
+
+# ─── Logs / coverage ───────────────────────────────────────────
+*.log
+coverage/
+
+# ─── Hardware: firmware build outputs ──────────────────────────
 hardware/firmware/**/build/
+
+# ─── Hardware: KiCad generated / backup / autosave ─────────────
 hardware/ki_cad/**/gerber/
 hardware/ki_cad/**/*.history
+hardware/ki_cad/**/*-backups/
+hardware/ki_cad/**/_autosave-*
+hardware/ki_cad/**/*.autosave
+hardware/ki_cad/**/fp-info-cache
+hardware/ki_cad/**/*.bak
+hardware/ki_cad/**/*.tmp
