@@ -29,7 +29,6 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: bash tools/restore_icons.sh
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test --coverage
@@ -58,7 +57,6 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/pubspec.lock') }}
           restore-keys: gradle-${{ runner.os }}-
-      - run: bash tools/restore_icons.sh
       - run: flutter pub get
       - run: flutter build apk --release
       - run: flutter build appbundle --release
@@ -88,6 +86,5 @@ jobs:
           path: mobile/ios/Pods
           key: pods-${{ runner.os }}-${{ hashFiles('mobile/ios/Podfile.lock') }}
           restore-keys: pods-${{ runner.os }}-
-      - run: bash tools/restore_icons.sh
       - run: flutter pub get
       - run: flutter build ios --release --no-codesign
