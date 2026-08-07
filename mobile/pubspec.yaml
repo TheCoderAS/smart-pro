@@ -43,6 +43,7 @@ dependencies:
   # Runtime permission prompts (BLE split, NEARBY_WIFI_DEVICES)
   permission_handler: ^13.0.0
   flutter_reactive_ble: ^5.5.0
+  mobile_scanner: ^7.4.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

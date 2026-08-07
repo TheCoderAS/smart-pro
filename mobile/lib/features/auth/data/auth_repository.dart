@@ -49,6 +49,22 @@ class AuthRepository {
     }
   }
 
+  /// Sets the owner password. On a factory-fresh master the API is
+  /// open (ops guide §A2/A3), so this needs no token; afterwards every
+  /// TOKEN endpoint closes and login() is required. On an owned master
+  /// the X-Auth interceptor supplies the token automatically and the
+  /// API §6 reconnect dance applies to the caller.
+  Future<void> setPassword(String password) async {
+    try {
+      await _dio.post<dynamic>(
+        Api.password,
+        data: {'password': password},
+      );
+    } on DioException catch (e) {
+      throw e.apiFailure;
+    }
+  }
+
   /// Cheapest TOKEN-authed call — used to validate a restored token.
   /// Returns true when the token is accepted.
   Future<bool> validateToken() async {

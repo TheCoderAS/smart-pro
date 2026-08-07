@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../app/router.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
+import '../../onboarding/presentation/commissioning_screen.dart';
 import '../application/session.dart';
 import 'login_screen.dart';
 
@@ -17,7 +20,7 @@ class SessionGate extends ConsumerWidget {
     return switch (session.value) {
       Authenticated() => const DashboardScreen(),
       final NeedsLogin s => LoginScreen(state: s),
-      NeedsCommissioning() => const _CommissioningPlaceholder(),
+      final NeedsCommissioning s => CommissioningScreen(state: s),
       MasterUnreachable() => const _UnreachableScreen(),
       _ => const Scaffold(
           body: Center(child: CircularProgressIndicator()),
@@ -65,47 +68,11 @@ class _UnreachableScreen extends ConsumerWidget {
                   icon: const Icon(Icons.refresh),
                   label: const Text('Try again'),
                 ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Factory-fresh master detected (info.auth == false). The real
-/// commissioning flow lands with block 13 (onboarding); until then
-/// the state is surfaced honestly instead of being unreachable.
-class _CommissioningPlaceholder extends StatelessWidget {
-  const _CommissioningPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.new_releases_outlined,
-                  size: 56,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'New switch detected',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
                 const SizedBox(height: 8),
-                Text(
-                  'This master has no owner password yet. '
-                  'Setup is coming in an upcoming build.',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium,
+                OutlinedButton.icon(
+                  onPressed: () => context.push(Routes.addMaster),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add a switch'),
                 ),
               ],
             ),

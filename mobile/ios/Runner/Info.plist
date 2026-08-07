@@ -41,6 +41,8 @@
 	<string>Unisync uses Bluetooth to recover a lost password from a nearby switch.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Unisync uses Bluetooth to recover a lost password from a nearby switch.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Unisync uses the camera to scan the QR code on your switch's card.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
