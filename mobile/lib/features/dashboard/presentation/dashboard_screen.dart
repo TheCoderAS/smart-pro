@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
@@ -28,17 +29,18 @@ class DashboardScreen extends ConsumerWidget {
       }
     });
 
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          tooltip: 'Your switches',
+          tooltip: l10n.yourSwitches,
           icon: const Icon(Icons.home_work_outlined),
           onPressed: () => showMasterSwitcher(context, ref),
         ),
         title: Text(
           snapshot.value?.masterName.isNotEmpty ?? false
               ? snapshot.value!.masterName
-              : 'Unisync',
+              : l10n.appTitle,
         ),
         actions: [
           if (status != SocketStatus.connected)
@@ -67,19 +69,28 @@ class DashboardScreen extends ConsumerWidget {
                   await _confirmKillAll(context, ref);
               }
             },
-            itemBuilder: (context) => const [
+            itemBuilder: (context) => [
               PopupMenuItem(
                 value: 'reorder',
-                child: Text('Reorder switches'),
+                child: Text(l10n.menuReorder),
               ),
-              PopupMenuItem(value: 'extensions', child: Text('Extensions')),
-              PopupMenuItem(value: 'mesh', child: Text('Mesh')),
-              PopupMenuItem(value: 'firmware', child: Text('Firmware')),
-              PopupMenuItem(value: 'audit', child: Text('Activity log')),
-              PopupMenuItem(value: 'settings', child: Text('Settings')),
+              PopupMenuItem(
+                value: 'extensions',
+                child: Text(l10n.menuExtensions),
+              ),
+              PopupMenuItem(value: 'mesh', child: Text(l10n.menuMesh)),
+              PopupMenuItem(
+                value: 'firmware',
+                child: Text(l10n.menuFirmware),
+              ),
+              PopupMenuItem(value: 'audit', child: Text(l10n.menuAudit)),
+              PopupMenuItem(
+                value: 'settings',
+                child: Text(l10n.menuSettings),
+              ),
               PopupMenuItem(
                 value: 'killall',
-                child: Text('Turn everything off'),
+                child: Text(l10n.menuKillAll),
               ),
             ],
           ),
@@ -95,21 +106,20 @@ class DashboardScreen extends ConsumerWidget {
   }
 
   Future<void> _confirmKillAll(BuildContext context, WidgetRef ref) async {
+    final l10n = AppLocalizations.of(context)!;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Turn everything off?'),
-        content: const Text(
-          'Every switch on every master in the mesh will turn off.',
-        ),
+        title: Text(l10n.killAllTitle),
+        content: Text(l10n.killAllBody),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
+            child: Text(l10n.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Turn off'),
+            child: Text(l10n.turnOff),
           ),
         ],
       ),
@@ -131,7 +141,7 @@ class _ReconnectingChip extends StatelessWidget {
         height: 12,
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      label: const Text('Reconnecting'),
+      label: Text(AppLocalizations.of(context)!.reconnecting),
       labelStyle: Theme.of(context).textTheme.labelSmall,
       visualDensity: VisualDensity.compact,
     );
@@ -156,13 +166,12 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              'No switches yet',
+              AppLocalizations.of(context)!.dashboardEmptyTitle,
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
             Text(
-              'Snap an Extension onto the bus next to your Master '
-              'and it will appear here.',
+              AppLocalizations.of(context)!.dashboardEmptyBody,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -243,7 +252,11 @@ class SwitchTile extends ConsumerWidget {
                 style: Theme.of(context).textTheme.titleSmall,
               ),
               Text(
-                sw.online ? (on ? 'On' : 'Off') : 'Offline',
+                sw.online
+                    ? (on
+                        ? AppLocalizations.of(context)!.switchOn
+                        : AppLocalizations.of(context)!.switchOff)
+                    : AppLocalizations.of(context)!.switchOffline,
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                       color: scheme.onSurfaceVariant,
                     ),

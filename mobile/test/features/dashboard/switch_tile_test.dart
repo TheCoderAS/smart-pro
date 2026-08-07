@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:unisync/app/l10n/app_localizations.dart';
 import 'package:unisync/core/ws/state_dto.dart';
 import 'package:unisync/features/dashboard/application/switch_overrides.dart';
 import 'package:unisync/features/dashboard/presentation/dashboard_screen.dart';
@@ -19,7 +20,11 @@ void main() {
   Widget wrap(Widget child, ProviderContainer container) {
     return UncontrolledProviderScope(
       container: container,
-      child: MaterialApp(home: Scaffold(body: child)),
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(body: child),
+      ),
     );
   }
 

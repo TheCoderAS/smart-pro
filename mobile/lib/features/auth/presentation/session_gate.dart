@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
@@ -34,6 +35,7 @@ class _UnreachableScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -49,13 +51,12 @@ class _UnreachableScreen extends ConsumerWidget {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Can’t reach your switch',
+                  l10n.unreachableTitle,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Join the switch’s Wi-Fi network and try again. '
-                  'The network name is on the card in the box.',
+                  l10n.unreachableBody,
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -66,13 +67,13 @@ class _UnreachableScreen extends ConsumerWidget {
                   onPressed: () =>
                       ref.read(sessionProvider.notifier).refresh(),
                   icon: const Icon(Icons.refresh),
-                  label: const Text('Try again'),
+                  label: Text(l10n.tryAgain),
                 ),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
                   onPressed: () => context.push(Routes.addMaster),
                   icon: const Icon(Icons.add),
-                  label: const Text('Add a switch'),
+                  label: Text(l10n.addASwitch),
                 ),
               ],
             ),

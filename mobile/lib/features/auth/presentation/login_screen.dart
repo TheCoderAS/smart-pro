@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
 import '../application/session.dart';
@@ -28,23 +29,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     super.dispose();
   }
 
-  String? get _failureText => switch (widget.state.failure) {
+  String? _failureText(AppLocalizations l10n) =>
+      switch (widget.state.failure) {
         null => null,
-        Unauthorized() => 'Wrong password. It is on the card in the box.',
+        Unauthorized() => l10n.errorWrongPassword,
         LockedOut(:final retryAfter) =>
-          'Too many attempts. Locked for about ${retryAfter.inMinutes} '
-              'minutes.',
-        RateLimited() => 'Too many requests — give it a few seconds.',
-        Unreachable() => 'Lost the connection to the switch. '
-            'Check that you are still on its Wi-Fi.',
-        ServerFailure(:final status) => 'The switch replied with an error '
-            '($status). Try again.',
+          l10n.errorLockedOut(retryAfter.inMinutes),
+        RateLimited() => l10n.errorRateLimited,
+        Unreachable() => l10n.errorUnreachable,
+        ServerFailure(:final status) => l10n.errorServer(status),
       };
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     final locked = widget.state.failure is LockedOut;
-    final error = _failureText;
+    final error = _failureText(l10n);
 
     return Scaffold(
       body: SafeArea(
@@ -57,13 +57,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'Sign in',
+                    l10n.signInTitle,
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Master ${widget.state.info.uid} · '
-                    'firmware ${widget.state.info.fw}',
+                    l10n.masterIdentity(
+                      widget.state.info.uid,
+                      widget.state.info.fw,
+                    ),
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color:
                               Theme.of(context).colorScheme.onSurfaceVariant,
@@ -77,9 +79,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     enableSuggestions: false,
                     enabled: !locked,
                     decoration: InputDecoration(
-                      labelText: 'Password',
-                      helperText:
-                          'The same password you used to join the Wi-Fi.',
+                      labelText: l10n.passwordLabel,
+                      helperText: l10n.passwordHelper,
                       errorText: error,
                       errorMaxLines: 3,
                       suffixIcon: IconButton(
@@ -94,13 +95,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   const SizedBox(height: 24),
                   FilledButton(
                     onPressed: locked ? null : _submit,
-                    child: const Text('Sign in'),
+                    child: Text(l10n.signInButton),
                   ),
                   const SizedBox(height: 12),
                   TextButton(
                     // Reachable while logged out, per API §8.
                     onPressed: () => context.push(Routes.recovery),
-                    child: const Text('Forgot password?'),
+                    child: Text(l10n.forgotPassword),
                   ),
                 ],
               ),

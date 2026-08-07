@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:unisync/app/l10n/app_localizations.dart';
 import 'package:unisync/core/api/failure.dart';
 import 'package:unisync/features/auth/application/session.dart';
 import 'package:unisync/features/auth/domain/models.dart';
@@ -17,7 +18,11 @@ const _info = DeviceInfo(
 void main() {
   Widget wrap(NeedsLogin state) {
     return ProviderScope(
-      child: MaterialApp(home: LoginScreen(state: state)),
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: LoginScreen(state: state),
+      ),
     );
   }
 
