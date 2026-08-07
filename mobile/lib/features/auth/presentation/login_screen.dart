@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
 import '../application/session.dart';
 
@@ -96,15 +98,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                   const SizedBox(height: 12),
                   TextButton(
-                    // BLE recovery flow arrives with block 12 — the
-                    // route exists so the affordance is discoverable
-                    // from day one (API §8: must be reachable while
-                    // logged out).
-                    onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Password recovery is coming soon.'),
-                      ),
-                    ),
+                    // Reachable while logged out, per API §8.
+                    onPressed: () => context.push(Routes.recovery),
                     child: const Text('Forgot password?'),
                   ),
                 ],
