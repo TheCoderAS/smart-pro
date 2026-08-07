@@ -46,9 +46,7 @@ class DashboardScreen extends ConsumerWidget {
           if (status != SocketStatus.connected)
             const Padding(
               padding: EdgeInsets.only(right: 12),
-              child: Center(
-                child: _ReconnectingChip(),
-              ),
+              child: Center(child: _ReconnectingChip()),
             ),
           PopupMenuButton<String>(
             onSelected: (v) async {
@@ -70,34 +68,23 @@ class DashboardScreen extends ConsumerWidget {
               }
             },
             itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'reorder',
-                child: Text(l10n.menuReorder),
-              ),
+              PopupMenuItem(value: 'reorder', child: Text(l10n.menuReorder)),
               PopupMenuItem(
                 value: 'extensions',
                 child: Text(l10n.menuExtensions),
               ),
               PopupMenuItem(value: 'mesh', child: Text(l10n.menuMesh)),
-              PopupMenuItem(
-                value: 'firmware',
-                child: Text(l10n.menuFirmware),
-              ),
+              PopupMenuItem(value: 'firmware', child: Text(l10n.menuFirmware)),
               PopupMenuItem(value: 'audit', child: Text(l10n.menuAudit)),
-              PopupMenuItem(
-                value: 'settings',
-                child: Text(l10n.menuSettings),
-              ),
-              PopupMenuItem(
-                value: 'killall',
-                child: Text(l10n.menuKillAll),
-              ),
+              PopupMenuItem(value: 'settings', child: Text(l10n.menuSettings)),
+              PopupMenuItem(value: 'killall', child: Text(l10n.menuKillAll)),
             ],
           ),
         ],
       ),
       body: switch (snapshot) {
-        AsyncValue(value: final StateSnapshot snap) when snap.switches.isNotEmpty =>
+        AsyncValue(value: final StateSnapshot snap)
+            when snap.switches.isNotEmpty =>
           _SwitchGrid(switches: snap.switches),
         AsyncValue(value: final StateSnapshot _) => const _EmptyState(),
         _ => const Center(child: CircularProgressIndicator()),
@@ -135,15 +122,18 @@ class _ReconnectingChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      avatar: const SizedBox(
-        width: 12,
-        height: 12,
-        child: CircularProgressIndicator(strokeWidth: 2),
+    return Semantics(
+      liveRegion: true,
+      child: Chip(
+        avatar: const SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        label: Text(AppLocalizations.of(context)!.reconnecting),
+        labelStyle: Theme.of(context).textTheme.labelSmall,
+        visualDensity: VisualDensity.compact,
       ),
-      label: Text(AppLocalizations.of(context)!.reconnecting),
-      labelStyle: Theme.of(context).textTheme.labelSmall,
-      visualDensity: VisualDensity.compact,
     );
   }
 }
@@ -174,8 +164,8 @@ class _EmptyState extends StatelessWidget {
               AppLocalizations.of(context)!.dashboardEmptyBody,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ],
         ),
@@ -218,50 +208,57 @@ class SwitchTile extends ConsumerWidget {
     final on = overrides[sw.id] ?? sw.on;
     final scheme = Theme.of(context).colorScheme;
 
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      color: on ? scheme.primaryContainer : null,
-      child: InkWell(
-        onTap: sw.online ? () => _toggle(ref, on) : null,
-        onLongPress: () => showRenameSwitchSheet(context, ref, sw),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    on ? Icons.toggle_on : Icons.toggle_off_outlined,
-                    color: on ? scheme.primary : scheme.onSurfaceVariant,
-                  ),
-                  const Spacer(),
-                  if (!sw.online)
+    final l10n = AppLocalizations.of(context)!;
+    final stateLabel = sw.online
+        ? (on ? l10n.switchOn : l10n.switchOff)
+        : l10n.switchOffline;
+    return Semantics(
+      label: '${sw.name.isEmpty ? sw.id : sw.name}, $stateLabel',
+      button: sw.online,
+      toggled: on,
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        color: on ? scheme.primaryContainer : null,
+        child: InkWell(
+          onTap: sw.online ? () => _toggle(ref, on) : null,
+          onLongPress: () => showRenameSwitchSheet(context, ref, sw),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
                     Icon(
-                      Icons.cloud_off_outlined,
-                      size: 16,
-                      color: scheme.error,
+                      on ? Icons.toggle_on : Icons.toggle_off_outlined,
+                      color: on ? scheme.primary : scheme.onSurfaceVariant,
                     ),
-                ],
-              ),
-              const Spacer(),
-              Text(
-                sw.name.isEmpty ? sw.id : sw.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              Text(
-                sw.online
-                    ? (on
-                        ? AppLocalizations.of(context)!.switchOn
-                        : AppLocalizations.of(context)!.switchOff)
-                    : AppLocalizations.of(context)!.switchOffline,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    const Spacer(),
+                    if (!sw.online)
+                      Icon(
+                        Icons.cloud_off_outlined,
+                        size: 16,
+                        color: scheme.error,
+                      ),
+                  ],
+                ),
+                const Spacer(),
+                Text(
+                  sw.name.isEmpty ? sw.id : sw.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                ExcludeSemantics(
+                  child: Text(
+                    stateLabel,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
                       color: scheme.onSurfaceVariant,
                     ),
-              ),
-            ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -273,11 +270,9 @@ class SwitchTile extends ConsumerWidget {
     final overrides = ref.read(switchOverridesProvider.notifier);
     overrides.set(sw.id, next);
     try {
-      await ref.read(switchRepositoryProvider).setRelay(
-            id: sw.id,
-            on: next,
-            ch: sw.ch,
-          );
+      await ref
+          .read(switchRepositoryProvider)
+          .setRelay(id: sw.id, on: next, ch: sw.ch);
       // Leave the override in place; the next snapshot clears it.
     } on Exception {
       // Command failed — snap back to the snapshot state.
