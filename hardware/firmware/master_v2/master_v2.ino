@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.11.2
+ * Unisync - Master Firmware v11.13.2
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -29,10 +29,13 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "mbedtls/sha256.h"
+/* NimBLE rather than the Bluedroid stack: same functionality, roughly
+ * 100-150 KB smaller. Install "NimBLE-Arduino" from the Library Manager. */
+#include <NimBLEDevice.h>
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.11.3"
+#define MASTER_FW_VERSION  "11.13.2"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -448,32 +451,61 @@ static uint8_t  master_fw[3]       = {0,0,0}; /* our own version, parsed   */
  * switch relays, unpair switches or push firmware. Sessions are held in
  * RAM only, so a reboot logs everyone out, which is the safe default.
  * ================================================================ */
-#define AUTH_SESSIONS      4
+/* ONE CREDENTIAL PER MODE
+ * Standalone: the password printed on the label joins the Wi-Fi AND logs
+ * in to the API -- they are the same string, so there is nothing to claim
+ * and no second secret to manage.
+ * In a mesh: the mesh password replaces it entirely for both jobs.
+ *
+ * The password is stored in clear because SoftAP needs the literal
+ * string; hashing it separately would protect nothing. Comparison is
+ * still constant time. */
 #define AUTH_TOKEN_LEN     33          /* 32 hex chars + NUL */
-#define AUTH_SESSION_MS    3600000UL   /* 1 hour */
+#define PASS_MIN_LEN       8
+#define AP_APPLY_DELAY_MS  400         /* let the HTTP reply drain first */
 #define AUTH_MAX_FAILS     5
 #define AUTH_LOCKOUT_MS    300000UL    /* 5 min after 5 bad passwords */
 #define RATE_WINDOW_MS     10000UL
 #define RATE_MAX_REQS      40          /* per client per window */
 #define AUDIT_ENTRIES      24
 
-typedef struct {
-    char     token[AUTH_TOKEN_LEN];
-    uint32_t expires_ms;
-    uint32_t ip;
-} auth_session_t;
-
-static auth_session_t auth_sessions[AUTH_SESSIONS];
 static uint8_t        auth_fails      = 0;
 static uint32_t       auth_lock_until = 0;
-static bool           owner_pw_set    = false;
+
+/* BLE RECOVERY
+ * A master has no USB and no debug header in production, and its own
+ * Wi-Fi password is the thing being recovered -- so recovery cannot go
+ * over Wi-Fi. BLE is the only channel that survives a lost credential.
+ *
+ * The recovery key never crosses the air. The phone proves it knows the
+ * key by answering a challenge; only then is a new password issued. */
+#define BLE_SVC_UUID   "556e6973-796e-6320-5265-636f76657231"
+#define BLE_CHAL_UUID  "556e6973-796e-6320-5265-636f76657232"
+#define BLE_RESP_UUID  "556e6973-796e-6320-5265-636f76657233"
+#define BLE_RESULT_UUID "556e6973-796e-6320-5265-636f76657234"
+#define BLE_MAX_FAILS  5
+#define BLE_LOCKOUT_MS 900000UL      /* 15 min after 5 wrong answers */
+
+static NimBLECharacteristic *ble_chal_char   = nullptr;
+static NimBLECharacteristic *ble_result_char = nullptr;
+static uint8_t  ble_nonce[8]      = {0};
+static uint8_t  ble_fails         = 0;
+static uint32_t ble_lock_until    = 0;
+static bool     ble_recover_ready = false;   /* apply from task_web */
+static char     ble_new_pass[64]  = {0};
+
+/* Deferred credential change: reply first, then restart the AP, so the
+ * caller learns the outcome instead of inferring it from a dropped
+ * connection. */
+static bool     ap_change_pending = false;
+static uint32_t ap_change_at_ms   = 0;
 
 typedef struct {
     uint32_t ip;
     uint32_t window_start;
     uint16_t count;
 } rate_bucket_t;
-static rate_bucket_t rate_buckets[AUTH_SESSIONS * 2];
+static rate_bucket_t rate_buckets[8];
 
 typedef struct {
     uint32_t at_s;
@@ -487,13 +519,38 @@ static uint8_t       audit_head = 0;
  * HMAC(root_key, its uid), so the master derives any device's key from
  * its UID and needs no key database. Extracting one extension exposes
  * only that extension. */
-static char     standalone_pass[64] = {0};  /* per-device, non-mesh AP */
+/* Written once at first boot and never regenerated. These are the values
+ * printed on the card in the box, so the card stays true for the life of
+ * the device -- a factory reset or a BLE recovery returns to them rather
+ * than inventing something the customer has no record of. */
+static char     factory_pass[64]   = {0};
+static uint8_t  recovery_key[16]   = {0};
+static bool     factory_set        = false;
+
+static char     device_pass[64] = {0};   /* standalone credential, in use now */
+static char     unique_ssid[32] = {0};   /* standalone SSID, kept for AP restarts */
+/* Mesh-scoped keys, created with the mesh and carried to joiners inside
+ * the PIN-wrapped join payload. mesh_auth_key stays fixed for the life of
+ * the mesh (it is the mesh's identity); the session key is derived from
+ * the mesh password, so changing the password revokes every token. */
+static uint8_t  mesh_auth_key[16] = {0};
+static bool     mesh_auth_set     = false;
+static uint32_t cred_version      = 0;
+static char     mesh_join_pin[7]  = {0};  /* PIN we are joining with */
+static bool     cred_stale        = false;  /* we missed a change, re-add me */
+
 static uint8_t  root_key[16] = {0};
 static bool     root_key_set = false;
 static uint8_t  fw_key[16]   = {0};
 static bool     fw_key_set   = false;
 
 static bool     upload_authed  = false;   /* set at UPLOAD_FILE_START */
+static void     pin_wrap(const char *pin, const uint8_t *uid4,
+                         const uint8_t *nonce8, uint8_t *buf, uint16_t n);
+static void     ble_recovery_begin(void);
+static void     ble_recovery_apply(void);
+static void     mesh_broadcast_pass_change(void);
+static int      mesh_verify(const uint8_t *data, int len);
 static bool     fs_ready       = false;
 static uint32_t last_reconcile = 0;
 
@@ -506,7 +563,7 @@ static uint32_t last_reconcile = 0;
 #define FWPKT_CHUNK     0x03
 #define FWPKT_DONE      0x04
 #define FWPKT_HDR       49   /* 16 + secver + 32-byte signature */
-#define FWPKT_DATA      192          /* 49 + 192 = 241, under the 250 cap */
+#define FWPKT_DATA      184          /* 49 + 184 + 8 tag = 241, under 250 */
 #define FWRX_TIMEOUT_MS 800
 
 static bool     fwrx_active  = false;
@@ -536,6 +593,10 @@ static void     sha256_hex(const char *in, const char *salt, char *out65);
 static void     rand_hex(char *out, int hex_chars);
 static bool     safe_equal(const char *a, const char *b, size_t n);
 static bool     rate_ok(void);
+static const char *active_pass(void);
+static void     session_key(uint8_t *out16);
+static void     make_token(char *out);
+static bool     token_valid(const String &tok);
 static bool     auth_valid(void);
 static bool     auth_ok(void);
 static void     audit(const char *what);
@@ -731,10 +792,82 @@ static int mesh_alloc_peer(const uint8_t *uid, const uint8_t *mac) {
 }
 
 /* Send ESP-NOW packet to a peer MAC */
+/* Every mesh packet carries an 8-byte tag over its body.
+ *
+ * ESP-NOW's own encryption cannot be used here: encrypted peers are
+ * capped well below MAX_MESH_MASTERS, and broadcast -- which is exactly
+ * where join and discovery live -- cannot be encrypted at all. Tagging at
+ * the application layer has no peer cap and covers broadcast.
+ *
+ * Before a mesh exists there is no key, so packets go out untagged and a
+ * receiver with no key accepts them. That is only the pre-join state. */
+#define MESH_TAG_LEN 8
+
+/* The join payload carries the credential that controls the whole house,
+ * over an unencrypted broadcast medium. Wrap it with a key derived from
+ * the PIN, which is already out of band, single use and rate limited.
+ * Same routine both directions -- XOR keystream is its own inverse. */
+static void pin_wrap(const char *pin, const uint8_t *uid4,
+                     const uint8_t *nonce8, uint8_t *buf, uint16_t n) {
+    uint8_t seed[12], key[32], ks[32];
+    memcpy(seed, uid4, 4);
+    memcpy(seed + 4, nonce8, 8);
+    hmac_sha256((const uint8_t *)pin, seed, sizeof(seed), key);
+    for (uint16_t off = 0; off < n; off += 32) {
+        uint8_t ctr[36];
+        memcpy(ctr, key, 32);
+        ctr[32]=(off>>24)&0xFF; ctr[33]=(off>>16)&0xFF;
+        ctr[34]=(off>>8)&0xFF;  ctr[35]=off&0xFF;
+        hmac_sha256(key, ctr, sizeof(ctr), ks);
+        for (uint16_t k = 0; k < 32 && off + k < n; k++)
+            buf[off + k] ^= ks[k];
+    }
+}
+
+/* Push the current mesh password and name to every peer. The packet is
+ * tagged with mesh_auth_key, which peers still hold, so a member can
+ * change the password without needing the old one -- that is what makes
+ * recovery possible without walking to every switch. */
+static void mesh_broadcast_pass_change(void) {
+    if (!mesh_active) return;
+    StaticJsonDocument<256> doc;
+    char self_uid[12];
+    snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+    doc["type"] = MESH_PKT_PASS_CHG;
+    doc["uid"]  = self_uid;
+    doc["pass"] = mesh_pass;
+    doc["name"] = mesh_name;
+    doc["cv"]   = cred_version;
+    String payload; serializeJson(doc,payload);
+    mesh_broadcast(payload.c_str(), payload.length()+1);
+    Serial.println("[MESH] password change broadcast to peers");
+}
+
 static bool mesh_send(const uint8_t *mac, const void *data, size_t len) {
     if (!mesh_active) return false;
-    esp_err_t r = esp_now_send(mac, (const uint8_t*)data, len);
+    if (!mesh_auth_set || len + MESH_TAG_LEN > 250) {
+        esp_err_t r0 = esp_now_send(mac, (const uint8_t*)data, len);
+        return (r0 == ESP_OK);
+    }
+    uint8_t buf[250];
+    memcpy(buf, data, len);
+    uint8_t mac32[32];
+    hmac_sha256(mesh_auth_key, (const uint8_t*)data, len, mac32);
+    memcpy(buf + len, mac32, MESH_TAG_LEN);
+    esp_err_t r = esp_now_send(mac, buf, len + MESH_TAG_LEN);
     return (r == ESP_OK);
+}
+
+/* Strip and check the tag. Returns the body length, or -1 to drop. */
+static int mesh_verify(const uint8_t *data, int len) {
+    if (!mesh_auth_set) return len;          /* no mesh yet */
+    if (len <= MESH_TAG_LEN) return -1;
+    int body = len - MESH_TAG_LEN;
+    uint8_t mac32[32];
+    hmac_sha256(mesh_auth_key, data, body, mac32);
+    if (!ct_equal(mac32, data + body, MESH_TAG_LEN)) return -1;
+    return body;
 }
 
 /* Broadcast to all known mesh peers */
@@ -756,6 +889,7 @@ static void mesh_gossip(void) {
     doc["type"]         = MESH_PKT_STATE;
     doc["name"]         = master_name;
     doc["fw"]           = MASTER_FW_VERSION;
+    doc["cv"]           = cred_version;
     doc["master_order"] = master_order_str;
 
     xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -861,6 +995,12 @@ static bool mesh_verify_pin(const char *pin) {
 static void mesh_recv_cb(const esp_now_recv_info_t *info,
                          const uint8_t *data, int len) {
     if (len < 2) return;
+    /* Authenticate before parsing anything. An unsigned or forged packet
+     * is dropped here, so nothing downstream ever sees attacker input. */
+    { int body = mesh_verify(data, len);
+      if (body < 0) return;
+      len = body; }
+
     /* Binary firmware packets share the ESP-NOW channel with the JSON
      * protocol. JSON always starts with '{' (0x7B), so a 0xFB first byte
      * is unambiguous and the JSON path below is untouched. */
@@ -918,6 +1058,16 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         mesh_peers[idx].online       = true;
         mesh_peers[idx].last_seen_ms = millis();
+        /* If a peer reports a newer credential version we missed a change
+         * while offline. Credentials are never sent outside the PIN-wrapped
+         * join, so this cannot self-heal: flag it and let the user remove
+         * and re-add this master. */
+        { uint32_t pv = doc["cv"] | 0;
+          if (pv > cred_version && !cred_stale) {
+              cred_stale = true;
+              Serial.println("[MESH] credentials out of date -- remove and re-add this master");
+              notify_ui();
+          } }
         master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
         /* ESP-NOW carries far further than a usable TCP association, so a
          * peer we can hear is not necessarily a peer we can download 1.1 MB
@@ -1027,6 +1177,24 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
     } else if (type == MESH_PKT_JOIN_REQ) {
         /* New master wants to join our mesh */
         Serial.println("[MESH] JOIN_REQ received");
+        /* Only genuine provisioned hardware may join. The joiner proves it
+         * by echoing a checksum of the keys it holds; a device without
+         * them cannot produce it. */
+        {
+            const char *pv = doc["pv"] | "";
+            uint8_t want[32];
+            uint8_t both[32];
+            memcpy(both, root_key, 16); memcpy(both+16, fw_key, 16);
+            hmac_sha256(both, (const uint8_t*)"unisync-prov-v1", 15, want);
+            char wh[17];
+            for (int k=0;k<8;k++) snprintf(wh+k*2,3,"%02x",want[k]);
+            wh[16]=0;
+            if (!root_key_set || !fw_key_set || strlen(pv)!=16 ||
+                !safe_equal(wh, pv, 16)) {
+                Serial.println("[MESH] JOIN_REQ rejected: joiner not provisioned");
+                return;
+            }
+        }
         if (!mesh_active) {
             Serial.println("[MESH] JOIN_REQ rejected: not in mesh. Create mesh first.");
             /* Send reject so Master 2 knows why */
@@ -1062,7 +1230,28 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             ack["uid"]          = self_uid;
             ack["mesh_id"]      = mid_hex;
             ack["mesh_name"]    = mesh_name;
-            ack["mesh_pass"]    = mesh_pass;
+            /* Credentials travel wrapped, not in clear. The joiner knows
+             * the PIN; a listener does not. */
+            {
+                uint8_t nonce[8];
+                for (int k=0;k<8;k+=4){ uint32_t r=esp_random();
+                    nonce[k]=r&0xFF; nonce[k+1]=(r>>8)&0xFF;
+                    nonce[k+2]=(r>>16)&0xFF; nonce[k+3]=(r>>24)&0xFF; }
+                uint8_t sec[80]; uint16_t n=0;
+                uint8_t plen = (uint8_t)strlen(mesh_pass);
+                sec[n++] = plen;
+                memcpy(sec+n, mesh_pass, plen); n += plen;
+                memcpy(sec+n, mesh_auth_key, 16); n += 16;
+                sec[n++] = (cred_version>>8)&0xFF;
+                sec[n++] = cred_version&0xFF;
+                pin_wrap(mesh_pin, src_uid, nonce, sec, n);
+                char nh[17], sh[161];
+                for (int k=0;k<8;k++)  snprintf(nh+k*2,3,"%02X",nonce[k]);
+                for (int k=0;k<n;k++)  snprintf(sh+k*2,3,"%02X",sec[k]);
+                nh[16]=0; sh[n*2]=0;
+                ack["n"]   = nh;
+                ack["sec"] = sh;
+            }
             ack["master_order"] = master_order_str;
             String ack_str; serializeJson(ack, ack_str);
             /* Register sender as ESP-NOW peer first */
@@ -1119,8 +1308,40 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             /* Store mesh name, password, and master order from ACK */
             const char *mn = doc["mesh_name"] | "Unisync";
             strncpy(mesh_name, mn, sizeof(mesh_name)-1);
-            const char *mp = doc["mesh_pass"] | "12345678";
-            strncpy(mesh_pass, mp, sizeof(mesh_pass)-1);
+            /* Unwrap the credential payload with our own PIN. If the PIN
+             * is wrong the bytes are garbage and the join is abandoned,
+             * rather than half-joining with a broken password. */
+            {
+                const char *nh = doc["n"]   | "";
+                const char *sh = doc["sec"] | "";
+                uint16_t n = strlen(sh) / 2;
+                if (strlen(nh) != 16 || n == 0 || n > 80) {
+                    Serial.println("[MESH] JOIN_ACK malformed, ignoring");
+                    return;
+                }
+                uint8_t nonce[8], sec[80];
+                for (int k=0;k<8;k++){ char b[3]={nh[k*2],nh[k*2+1],0};
+                    nonce[k]=(uint8_t)strtoul(b,NULL,16); }
+                for (int k=0;k<n;k++){ char b[3]={sh[k*2],sh[k*2+1],0};
+                    sec[k]=(uint8_t)strtoul(b,NULL,16); }
+                pin_wrap(mesh_join_pin, master_uid, nonce, sec, n);
+
+                uint8_t plen = sec[0];
+                if (plen == 0 || plen > 63 || (uint16_t)(1+plen+18) > n) {
+                    Serial.println("[MESH] JOIN_ACK unwrap failed -- wrong PIN?");
+                    return;
+                }
+                memcpy(mesh_pass, sec+1, plen); mesh_pass[plen]=0;
+                memcpy(mesh_auth_key, sec+1+plen, 16);
+                mesh_auth_set = true;
+                cred_version  = ((uint32_t)sec[1+plen+16]<<8) | sec[1+plen+17];
+                prefs.begin("mesh", false);
+                prefs.putString("mesh_pass", mesh_pass);
+                prefs.putBytes("authkey", mesh_auth_key, 16);
+                prefs.putUInt("credver", cred_version);
+                prefs.end();
+                Serial.println("[MESH] credentials unwrapped and stored");
+            }
             const char *mo = doc["master_order"] | "";
             strncpy(master_order_str, mo, sizeof(master_order_str)-1);
             /* Add self to master_order if not already there */
@@ -1596,7 +1817,17 @@ static void mesh_nvs_clear(void) {
     memset(mesh_peers,0,sizeof(mesh_peers));
     mesh_active=false;
     strncpy(mesh_name,"Unisync",sizeof(mesh_name)-1);
-    strncpy(mesh_pass,"12345678",sizeof(mesh_pass)-1);
+    /* Leaving reverts to this device's own credential: its SSID and the
+         * password on its label. The mesh keys are cleared so a stale copy
+         * cannot authenticate anything. */
+        memset(mesh_auth_key, 0, sizeof(mesh_auth_key));
+        mesh_auth_set = false;
+        cred_version  = 0;
+        cred_stale    = false;
+        prefs.begin("mesh", false);
+        prefs.remove("authkey"); prefs.remove("credver"); prefs.remove("mesh_pass");
+        prefs.end();
+        strncpy(mesh_pass,"12345678",sizeof(mesh_pass)-1);
 }
 
 /* ================================================================
@@ -2224,6 +2455,20 @@ static void task_bus(void *arg) {
             fw_reconcile();
         }
 
+        ble_recovery_apply();
+
+        /* Apply a deferred credential change once the HTTP reply has gone
+         * out. Doing it inline would cut the connection before the caller
+         * could read the result. */
+        if (ap_change_pending && (int32_t)(millis() - ap_change_at_ms) >= 0) {
+            ap_change_pending = false;
+            const char *ssid = mesh_active ? mesh_name : unique_ssid;
+            Serial.printf("[AUTH] restarting AP %s with new password\n", ssid);
+            WiFi.softAPdisconnect(true);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            WiFi.softAP(ssid, active_pass(), AP_CHANNEL);
+        }
+
         /* Expire old pending and stale challenges */
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         for (int i=0;i<MAX_PENDING;i++) {
@@ -2796,7 +3041,7 @@ static void setup_web(void) {
         doc["fw"]        = MASTER_FW_VERSION;
         /* So the UI knows whether to present a login before doing anything
          * else. /api/info is deliberately open; it exposes no secrets. */
-        doc["auth"]      = owner_pw_set;
+        doc["auth"]      = true;   /* a credential is always set */
         String out; serializeJson(doc, out);
         server.send(200, "application/json", out);
     });
@@ -2994,20 +3239,9 @@ static void setup_web(void) {
             return;
         }
         String pw = server.arg("password");
-        char salt[17], want[65], got[65];
-        prefs.begin("auth", true);
-        String s = prefs.getString("salt", "");
-        String h = prefs.getString("hash", "");
-        prefs.end();
-        if (s.length() == 0 || h.length() == 0) {
-            server.send(400, "application/json", F("{\"error\":\"no password set\"}"));
-            return;
-        }
-        strncpy(salt, s.c_str(), sizeof(salt)-1); salt[sizeof(salt)-1]=0;
-        strncpy(want, h.c_str(), sizeof(want)-1); want[sizeof(want)-1]=0;
-        sha256_hex(pw.c_str(), salt, got);
-
-        if (!safe_equal(want, got, 64)) {
+        const char *want = active_pass();
+        if (pw.length() != strlen(want) ||
+            !safe_equal(want, pw.c_str(), strlen(want))) {
             if (++auth_fails >= AUTH_MAX_FAILS) {
                 auth_lock_until = millis() + AUTH_LOCKOUT_MS;
                 auth_fails = 0;
@@ -3018,57 +3252,66 @@ static void setup_web(void) {
             return;
         }
         auth_fails = 0;
-        int slot = 0;
-        uint32_t oldest = 0xFFFFFFFF;
-        for (int i = 0; i < AUTH_SESSIONS; i++) {
-            if (!auth_sessions[i].token[0]) { slot = i; break; }
-            if (auth_sessions[i].expires_ms < oldest) {
-                oldest = auth_sessions[i].expires_ms; slot = i;
-            }
-        }
-        rand_hex(auth_sessions[slot].token, AUTH_TOKEN_LEN - 1);
-        auth_sessions[slot].expires_ms = millis() + AUTH_SESSION_MS;
-        auth_sessions[slot].ip = (uint32_t)server.client().remoteIP();
+        char tok[AUTH_TOKEN_LEN];
+        make_token(tok);
         audit("login ok");
         StaticJsonDocument<128> d;
-        d["token"] = auth_sessions[slot].token;
+        d["token"] = tok;
+        d["mesh"]  = mesh_active;
         String out; serializeJson(d, out);
         server.send(200, "application/json", out);
     });
+;
 
+    /* Tokens are stateless, so there is nothing to forget server side.
+     * The client discards its copy; changing the password revokes all. */
     server.on("/api/logout", HTTP_POST, [](){
-        String tok = server.hasHeader("X-Auth") ? server.header("X-Auth")
-                                                : server.arg("t");
-        for (int i = 0; i < AUTH_SESSIONS; i++)
-            if (auth_sessions[i].token[0] &&
-                safe_equal(auth_sessions[i].token, tok.c_str(), AUTH_TOKEN_LEN-1))
-                auth_sessions[i].token[0] = 0;
         server.send(200, "application/json", F("{\"ok\":true}"));
     });
+;
 
     /* Set or change the owner password. Allowed unauthenticated only while
      * none is set, i.e. during commissioning. */
+    /* Changes the one credential in force: the mesh password when meshed,
+     * this device's password otherwise. It is both the Wi-Fi and the API
+     * secret, so the AP must restart -- but only after the reply has been
+     * sent, so the caller sees the outcome rather than a dropped socket. */
     server.on("/api/password", HTTP_POST, [](){
-        if (owner_pw_set && !auth_ok()) return;
+        if (!auth_ok()) return;
         String pw = server.arg("password");
-        if (pw.length() < 8) {
+        if (pw.length() < PASS_MIN_LEN) {
             server.send(400, "application/json",
                         F("{\"error\":\"minimum 8 characters\"}"));
             return;
         }
-        char salt[17], hash[65];
-        rand_hex(salt, 16);
-        sha256_hex(pw.c_str(), salt, hash);
-        prefs.begin("auth", false);
-        prefs.putString("salt", salt);
-        prefs.putString("hash", hash);
-        prefs.end();
-        owner_pw_set = true;
-        for (int i = 0; i < AUTH_SESSIONS; i++) auth_sessions[i].token[0] = 0;
+        if (mesh_active) {
+            strncpy(mesh_pass, pw.c_str(), sizeof(mesh_pass)-1);
+            mesh_pass[sizeof(mesh_pass)-1] = 0;
+            cred_version++;
+            prefs.begin("mesh", false);
+            prefs.putString("mesh_pass", mesh_pass);
+            prefs.putUInt("credver", cred_version);
+            prefs.end();
+            mesh_broadcast_pass_change();
+        } else {
+            strncpy(device_pass, pw.c_str(), sizeof(device_pass)-1);
+            device_pass[sizeof(device_pass)-1] = 0;
+            prefs.begin("auth", false); prefs.putString("appw", device_pass); prefs.end();
+        }
         audit("password changed");
-        Serial.println("[AUTH] owner password set, all sessions cleared");
-        server.send(200, "application/json", F("{\"ok\":true}"));
+        StaticJsonDocument<192> d;
+        d["ok"]    = true;
+        d["scope"] = mesh_active ? "mesh" : "device";
+        d["note"]  = "reconnect with the new password";
+        String out; serializeJson(d, out);
+        server.send(200, "application/json", out);
+
+        /* Reply is queued; apply once it has drained. */
+        ap_change_pending = true;
+        ap_change_at_ms   = millis() + AP_APPLY_DELAY_MS;
+        Serial.println("[AUTH] credential changed, AP restarts shortly");
     });
+;
 
     server.on("/api/audit", HTTP_GET, [](){
         if (!auth_ok()) return;
@@ -3323,6 +3566,14 @@ static void setup_web(void) {
             server.send(400,"application/json","{\"error\":\"already in mesh\"}");
             return;
         }
+        /* Mesh membership requires our keys, not just a PIN. Without this
+         * an unprovisioned or cloned master could join with a stolen PIN
+         * and drive relays on every other master in the house. */
+        if (!root_key_set || !fw_key_set) {
+            server.send(403,"application/json",
+                "{\"error\":\"not provisioned, cannot join a mesh\"}");
+            return;
+        }
         String pin     = server.arg("pin");
         String mac_str = server.arg("mac");
         if (pin.length()!=6 || mac_str.length()!=12) {
@@ -3354,13 +3605,25 @@ static void setup_web(void) {
             return;
         }
         /* Send JOIN_REQ directly to Master 1 via ESP-NOW (not broadcast) */
-        StaticJsonDocument<128> doc;
+        StaticJsonDocument<192> doc;
         char self_uid[12];
         snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
                  master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
         doc["type"] = MESH_PKT_JOIN_REQ;
         doc["uid"]  = self_uid;
         doc["pin"]  = pin.c_str();
+        /* Proof we hold the product keys. Not the keys themselves -- a
+         * checksum over both, which only genuine provisioned hardware can
+         * produce, and which reveals nothing if captured. */
+        {
+            uint8_t both[32], mac[32];
+            memcpy(both, root_key, 16); memcpy(both+16, fw_key, 16);
+            hmac_sha256(both, (const uint8_t*)"unisync-prov-v1", 15, mac);
+            char pv[17];
+            for (int k=0;k<8;k++) snprintf(pv+k*2,3,"%02x",mac[k]);
+            pv[16]=0;
+            doc["pv"] = pv;
+        }
         String payload; serializeJson(doc,payload);
         uint8_t my_ap_mac[6]; esp_read_mac(my_ap_mac, ESP_MAC_WIFI_SOFTAP);
         Serial.printf("[MESH] JOIN_REQ: my AP MAC=%02X%02X%02X%02X%02X%02X\n",
@@ -3391,6 +3654,28 @@ static void setup_web(void) {
         name.trim();
         if (name.length() == 0) name = "Unisync";
         if (name.length() > 31) name = name.substring(0,31);
+        /* A new mesh gets a real password and a real auth key. Previously it
+         * inherited the compiled-in default, which also gated
+         * /api/ota/image -- so every new mesh shipped with 12345678. */
+        {
+            char gen[13];
+            rand_hex(gen, 12);
+            strncpy(mesh_pass, gen, sizeof(mesh_pass)-1);
+            mesh_pass[sizeof(mesh_pass)-1] = 0;
+            for (int k = 0; k < 16; k += 4) {
+                uint32_t r = esp_random();
+                mesh_auth_key[k]=r&0xFF;     mesh_auth_key[k+1]=(r>>8)&0xFF;
+                mesh_auth_key[k+2]=(r>>16)&0xFF; mesh_auth_key[k+3]=(r>>24)&0xFF;
+            }
+            mesh_auth_set = true;
+            cred_version  = 1;
+            prefs.begin("mesh", false);
+            prefs.putString("mesh_pass", mesh_pass);
+            prefs.putBytes("authkey", mesh_auth_key, 16);
+            prefs.putUInt("credver", cred_version);
+            prefs.end();
+            Serial.printf("[MESH] created, password: %s\n", gen);
+        }
         strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);
         /* Generate random mesh ID */
         for (int i=0;i<16;i++) mesh_id[i]=(uint8_t)(esp_random()&0xFF);
@@ -3441,12 +3726,11 @@ static void setup_web(void) {
         {
             uint8_t tmac[6];
             esp_read_mac(tmac, ESP_MAC_WIFI_STA);
-            char unique_ssid[32];
-            snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
+                    snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
                      tmac[4], tmac[5]);
             WiFi.softAPdisconnect(false);
             delay(100);
-            WiFi.softAP(unique_ssid, standalone_pass, AP_CHANNEL);
+            WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
             Serial.printf("[WIFI] Reverted to unique SSID: %s\n", unique_ssid);
         }
         strncpy(mesh_name, "Unisync", sizeof(mesh_name)-1);
@@ -3734,6 +4018,7 @@ static void setup_web(void) {
         /* Version of every node, so convergence is visible in the UI. */
         doc["fw"] = MASTER_FW_VERSION;
         doc["syncing"] = master_pull_active || master_serve_busy;
+        doc["cred_stale"] = cred_stale;
         JsonArray pv = doc.createNestedArray("peers");
         for (int i=0;i<MAX_MESH_MASTERS;i++) {
             if (!mesh_peers[i].online) continue;
@@ -3766,24 +4051,16 @@ static void setup_web(void) {
             /* The socket both streams state and accepts commands, so an
              * unauthenticated client is equivalent to an open API. The
              * token is passed as ?t= on the websocket URL. */
-            if (owner_pw_set) {
+            {
                 String url = String((char*)payload);
                 int k = url.indexOf("t=");
-                bool good = false;
+                String tok = "";
                 if (k >= 0) {
-                    String tok = url.substring(k+2);
+                    tok = url.substring(k+2);
                     int amp = tok.indexOf('&');
                     if (amp > 0) tok = tok.substring(0, amp);
-                    uint32_t now = millis();
-                    for (int i=0;i<AUTH_SESSIONS;i++) {
-                        if (!auth_sessions[i].token[0]) continue;
-                        if ((int32_t)(now - auth_sessions[i].expires_ms) >= 0) continue;
-                        if (tok.length()==AUTH_TOKEN_LEN-1 &&
-                            safe_equal(auth_sessions[i].token, tok.c_str(),
-                                       AUTH_TOKEN_LEN-1)) { good = true; break; }
-                    }
                 }
-                if (!good) {
+                if (!token_valid(tok)) {
                     Serial.printf("[WS] Client #%u rejected, no session\n",num);
                     wss.disconnect(num);
                     return;
@@ -3883,28 +4160,56 @@ static bool rate_ok(void) {
 
 /* Gate for every endpoint that changes something or leaks firmware.
  * Sends its own error response and returns false when it refuses. */
-static bool auth_valid(void) {
-    /* Before an owner password exists the device is being commissioned and
-     * must stay reachable, otherwise a factory-fresh unit is unusable. */
-    if (!owner_pw_set) return true;
+/* The credential in force right now: mesh password when meshed, device
+ * password otherwise. One place decides, so nothing can disagree. */
+static const char *active_pass(void) {
+    return mesh_active ? mesh_pass : device_pass;
+}
 
+/* Session key is DERIVED from the active credential, so changing the
+ * password rotates it automatically and every outstanding token dies.
+ * That is the only revocation mechanism -- tokens do not expire. */
+static void session_key(uint8_t *out16) {
+    uint8_t mac[32];
+    const char *p = active_pass();
+    hmac_sha256((const uint8_t *)"unisync-session-v1",
+                (const uint8_t *)p, strlen(p), mac);
+    memcpy(out16, mac, 16);
+}
+
+/* Stateless token: nonce plus a MAC over it. Any master holding the same
+ * credential validates a token it never issued, so roaming between
+ * masters in a mesh needs no re-login, and a reboot logs nobody out. */
+static void make_token(char *out) {
+    uint8_t nonce[8], key[16], mac[32];
+    for (int i = 0; i < 8; i += 4) {
+        uint32_t r = esp_random();
+        nonce[i]=r&0xFF; nonce[i+1]=(r>>8)&0xFF;
+        nonce[i+2]=(r>>16)&0xFF; nonce[i+3]=(r>>24)&0xFF;
+    }
+    session_key(key);
+    hmac_sha256(key, nonce, 8, mac);
+    for (int i = 0; i < 8; i++)  sprintf(out + i*2,      "%02x", nonce[i]);
+    for (int i = 0; i < 8; i++)  sprintf(out + 16 + i*2, "%02x", mac[i]);
+    out[32] = 0;
+}
+
+static bool token_valid(const String &tok) {
+    if (tok.length() != AUTH_TOKEN_LEN - 1) return false;
+    uint8_t nonce[8], given[8], key[16], mac[32];
+    for (int i = 0; i < 8; i++) {
+        nonce[i] = (uint8_t)strtoul(tok.substring(i*2, i*2+2).c_str(), NULL, 16);
+        given[i] = (uint8_t)strtoul(tok.substring(16+i*2, 16+i*2+2).c_str(), NULL, 16);
+    }
+    session_key(key);
+    hmac_sha256(key, nonce, 8, mac);
+    return ct_equal(mac, given, 8);
+}
+
+static bool auth_valid(void) {
     String tok = server.hasHeader("X-Auth") ? server.header("X-Auth")
                                             : server.arg("t");
-    if (tok.length() == AUTH_TOKEN_LEN - 1) {
-        uint32_t now = millis();
-        for (int i = 0; i < AUTH_SESSIONS; i++) {
-            if (!auth_sessions[i].token[0]) continue;
-            if ((int32_t)(now - auth_sessions[i].expires_ms) >= 0) {
-                auth_sessions[i].token[0] = 0;      /* expired */
-                continue;
-            }
-            if (safe_equal(auth_sessions[i].token, tok.c_str(), AUTH_TOKEN_LEN - 1)) {
-                auth_sessions[i].expires_ms = now + AUTH_SESSION_MS;
-                return true;
-            }
-        }
-    }
-    return false;
+    return token_valid(tok);
 }
 
 /* Responding gate for normal handlers. */
@@ -4616,6 +4921,128 @@ static void task_fwsync(void *arg) {
     }
 }
 
+/* ================================================================
+ * BLE RECOVERY SERVICE
+ * ================================================================ */
+static void ble_new_nonce(void) {
+    for (int i = 0; i < 8; i += 4) {
+        uint32_t r = esp_random();
+        ble_nonce[i]=r&0xFF; ble_nonce[i+1]=(r>>8)&0xFF;
+        ble_nonce[i+2]=(r>>16)&0xFF; ble_nonce[i+3]=(r>>24)&0xFF;
+    }
+    if (ble_chal_char) ble_chal_char->setValue(ble_nonce, 8);
+}
+
+class BleRespCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        /* Runs on the BLE task. Do the cheap checks here, hand the actual
+         * credential change to task_web -- NVS writes and an AP restart do
+         * not belong on this stack. */
+        if (ble_lock_until && (int32_t)(millis() - ble_lock_until) < 0) return;
+
+        /* Arduino ESP32 core 3.x returns an Arduino String here; the 2.x
+         * API returned std::string. Use the Arduino type. */
+        String v = ch->getValue();
+        if (v.length() != 8 || !factory_set) return;
+
+        uint8_t want[32];
+        hmac_sha256(recovery_key, ble_nonce, 8, want);
+        if (!ct_equal(want, (const uint8_t*)v.c_str(), 8)) {
+            /* Silent on failure: no distinguishable response, so the
+             * service cannot be probed for near-misses. */
+            if (++ble_fails >= BLE_MAX_FAILS) {
+                ble_lock_until = millis() + BLE_LOCKOUT_MS;
+                ble_fails = 0;
+            }
+            ble_new_nonce();
+            return;
+        }
+        ble_fails = 0;
+
+        if (mesh_active) {
+            /* A mesh password is shared, so it cannot be restored from
+             * this device's card. Issue a fresh one and push it to every
+             * peer, authenticated with mesh_auth_key which they all still
+             * hold. One master recovers the whole house. */
+            char gen[13];
+            rand_hex(gen, 12);
+            strncpy(ble_new_pass, gen, sizeof(ble_new_pass)-1);
+        } else {
+            /* Standalone: go back to the value printed on the card. */
+            strncpy(ble_new_pass, factory_pass, sizeof(ble_new_pass)-1);
+        }
+        ble_new_pass[sizeof(ble_new_pass)-1] = 0;
+
+        if (ble_result_char) {
+            ble_result_char->setValue((uint8_t*)ble_new_pass, strlen(ble_new_pass));
+            ble_result_char->notify();
+        }
+        ble_recover_ready = true;
+        ble_new_nonce();
+    }
+};
+
+class BleChalCB : public NimBLECharacteristicCallbacks {
+    void onRead(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        ch->setValue(ble_nonce, 8);
+    }
+};
+
+static void ble_recovery_begin(void) {
+    char name[24];
+    snprintf(name, sizeof(name), "U%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+    NimBLEDevice::init(name);
+    NimBLEServer *srv = NimBLEDevice::createServer();
+    NimBLEService *svc = srv->createService(BLE_SVC_UUID);
+
+    ble_chal_char = svc->createCharacteristic(
+        BLE_CHAL_UUID, NIMBLE_PROPERTY::READ);
+    ble_chal_char->setCallbacks(new BleChalCB());
+
+    NimBLECharacteristic *resp = svc->createCharacteristic(
+        BLE_RESP_UUID, NIMBLE_PROPERTY::WRITE);
+    resp->setCallbacks(new BleRespCB());
+
+    /* NimBLE adds the notify descriptor itself; no BLE2902 needed. */
+    ble_result_char = svc->createCharacteristic(
+        BLE_RESULT_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+
+    ble_new_nonce();
+    svc->start();
+    NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+    adv->addServiceUUID(BLE_SVC_UUID);
+    adv->enableScanResponse(true);
+    NimBLEDevice::startAdvertising();
+    Serial.printf("[BLE] recovery service advertising as %s\n", name);
+}
+
+/* Called from task_web: performs the change the BLE callback authorised. */
+static void ble_recovery_apply(void) {
+    if (!ble_recover_ready) return;
+    ble_recover_ready = false;
+
+    if (mesh_active) {
+        strncpy(mesh_pass, ble_new_pass, sizeof(mesh_pass)-1);
+        mesh_pass[sizeof(mesh_pass)-1] = 0;
+        cred_version++;
+        prefs.begin("mesh", false);
+        prefs.putString("mesh_pass", mesh_pass);
+        prefs.putUInt("credver", cred_version);
+        prefs.end();
+        mesh_broadcast_pass_change();
+        Serial.println("[BLE] mesh password recovered and pushed to peers");
+    } else {
+        strncpy(device_pass, ble_new_pass, sizeof(device_pass)-1);
+        device_pass[sizeof(device_pass)-1] = 0;
+        prefs.begin("auth", false); prefs.putString("appw", device_pass); prefs.end();
+        Serial.println("[BLE] device password restored to the card value");
+    }
+    audit("BLE recovery");
+    ap_change_pending = true;
+    ap_change_at_ms   = millis() + AP_APPLY_DELAY_MS;
+}
+
 void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
@@ -4720,12 +5147,11 @@ void setup() {
      * Once in mesh: only broadcast "Unisync" (shared SSID for auto-connect). */
     if (!mesh_active) {
         /* Use efuse base MAC for unique SSID -- available before WiFi init */
-        char unique_ssid[32];
-        uint8_t tmac[6];
+            uint8_t tmac[6];
         esp_read_mac(tmac, ESP_MAC_WIFI_STA);
         snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
                  tmac[4], tmac[5]);
-        WiFi.softAP(unique_ssid, standalone_pass, AP_CHANNEL);
+        WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
         Serial.printf("[WIFI] AP (unique): %s\n", unique_ssid);
     } else {
         /* Use mesh name as SSID -- all masters in same mesh share this SSID */
@@ -4773,30 +5199,66 @@ void setup() {
     /* A shipped default of "12345678" made every other control useless.
      * Generate a unique one on first boot and print it once for the
      * installer; it is stored and reused from then on. */
+    prefs.begin("mesh", true);
+    {
+        size_t n = prefs.getBytes("authkey", mesh_auth_key, 16);
+        mesh_auth_set = (n == 16);
+        cred_version  = prefs.getUInt("credver", 0);
+    }
+    prefs.end();
+
     prefs.begin("auth", false);
     {
         String ap = prefs.getString("appw", "");
-        if (ap.length() < 8) {
+        if (ap.length() < PASS_MIN_LEN) {
             char gen[13];
             rand_hex(gen, 12);
             prefs.putString("appw", gen);
             ap = String(gen);
-            Serial.printf("\n[AUTH] ******************************************\n");
-            Serial.printf("[AUTH] WiFi password for this master: %s\n", gen);
-            Serial.printf("[AUTH] Record it on the device label now.\n");
-            Serial.printf("[AUTH] ******************************************\n\n");
         }
         /* Standalone AP password only. mesh_pass is SHARED across a mesh
          * so a phone roams between masters and so a master-OTA pull can
          * associate with a peer; overwriting it per device would split the
          * mesh. Change the mesh password through /api/mesh/passwd. */
-        strncpy(standalone_pass, ap.c_str(), sizeof(standalone_pass)-1);
-        standalone_pass[sizeof(standalone_pass)-1] = 0;
-        owner_pw_set = prefs.getString("hash", "").length() == 64;
+        strncpy(device_pass, ap.c_str(), sizeof(device_pass)-1);
+        device_pass[sizeof(device_pass)-1] = 0;
     }
     prefs.end();
-    if (!owner_pw_set)
-        Serial.println("[AUTH] no owner password set -- API open until one is set");
+
+    /* Factory namespace: written once, never regenerated, never cleared by
+     * a reset. These two values are what the card in the box says, so the
+     * card remains accurate for the life of the device. */
+    prefs.begin("factory", false);
+    {
+        String fp = prefs.getString("pass", "");
+        size_t  n = prefs.getBytes("rkey", recovery_key, 16);
+        if (fp.length() < PASS_MIN_LEN || n != 16) {
+            fp = String(device_pass);
+            for (int i = 0; i < 16; i += 4) {
+                uint32_t r = esp_random();
+                recovery_key[i]=r&0xFF; recovery_key[i+1]=(r>>8)&0xFF;
+                recovery_key[i+2]=(r>>16)&0xFF; recovery_key[i+3]=(r>>24)&0xFF;
+            }
+            prefs.putString("pass", fp);
+            prefs.putBytes("rkey", recovery_key, 16);
+            char rk[33];
+            for (int i=0;i<16;i++) sprintf(rk+i*2, "%02x", recovery_key[i]);
+            rk[32]=0;
+            Serial.printf("\n[CARD] **************************************************\n");
+            Serial.printf("[CARD] Model        : U%02X%02X%02X%02X\n",
+                          master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            Serial.printf("[CARD] Password     : %s\n", fp.c_str());
+            Serial.printf("[CARD] Recovery key : %s\n", rk);
+            Serial.printf("[CARD] Print these on the card. Shown once, never again.\n");
+            Serial.printf("[CARD] **************************************************\n\n");
+        }
+        strncpy(factory_pass, fp.c_str(), sizeof(factory_pass)-1);
+        factory_pass[sizeof(factory_pass)-1] = 0;
+        factory_set = true;
+    }
+    prefs.end();
+    /* There is never an unclaimed window: the credential is set before the
+     * device ever boots for a user, so /api/password always needs auth. */
 
     prefs.begin("keys", true);
     {
@@ -4828,6 +5290,7 @@ void setup() {
     } else {
         Serial.println("[FW] filesystem UNUSABLE -- firmware library disabled");
     }
+    ble_recovery_begin();
     Serial.println("[MASTER] Ready - connect to Unisync -> 192.168.4.1");
 }
 

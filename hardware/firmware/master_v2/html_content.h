@@ -508,7 +508,7 @@ function leaveMesh(){
   });
 }
 
-var AUTH_REQUIRED=false;
+var AUTH_REQUIRED=true;
 fetch('/api/info').then(function(r){return r.json();}).then(function(d){
   AUTH_REQUIRED = !!d.auth;
   if(AUTH_REQUIRED && !AUTH){ showLogin(); return; }
@@ -1646,7 +1646,7 @@ function connectWS(){
 
 /* Find out whether this master wants a login before doing anything else.
  * /api/info is open, so this works with or without a session. */
-var AUTH_REQUIRED=false;
+var AUTH_REQUIRED=true;
 fetch('/api/info').then(function(r){return r.json();}).then(function(d){
   AUTH_REQUIRED = !!d.auth;
   if(AUTH_REQUIRED && !AUTH){ showLogin(); return; }
