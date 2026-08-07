@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:wifi_iot/wifi_iot.dart';
 import 'package:wifi_scan/wifi_scan.dart';
 
 import '../api/endpoints.dart';
@@ -14,47 +14,60 @@ final wifiServiceProvider = Provider<WifiService>((ref) => WifiService());
 /// SSID, and (Android only) scan for Unisync networks during
 /// onboarding.
 ///
+/// Join/read run over a hand-rolled platform channel
+/// (`in.unisync.unisync/wifi`, implemented in MainActivity.kt and
+/// AppDelegate.swift) because wifi_iot's Android build is incompatible
+/// with modern AGP and no maintained plugin covers app-scoped AP
+/// joining. On Android 10+ the join uses WifiNetworkSpecifier and the
+/// process is bound to the resulting network, so all app sockets route
+/// to the internet-less AP; iOS uses NEHotspotConfiguration.
+///
 /// Roaming caveat (API §3): in a mesh every master serves the same
 /// SSID at the same IP, so "connected to the right SSID" is the
 /// strongest signal available — the app cannot and must not care
 /// which physical master answers.
 class WifiService {
+  static const _channel = MethodChannel('in.unisync.unisync/wifi');
+
   /// Joins [ssid] with [password]. Resolves once the platform reports
-  /// the connection attempt finished; the caller should then verify
-  /// reachability with GET /api/info rather than trusting the OS.
-  ///
-  /// On iOS this triggers the NEHotspotConfiguration system prompt.
-  /// On Android it uses WifiNetworkSuggestion under the hood.
+  /// the attempt finished; callers should then verify reachability
+  /// with GET /api/info rather than trusting the OS. On iOS this
+  /// triggers the NEHotspotConfiguration system prompt.
   Future<bool> join(String ssid, String password) async {
     log.i('joining Wi-Fi "$ssid"');
-    // security must be WPA (plugin default is NONE) and joinOnce
-    // false so the configuration persists beyond one association.
-    final ok = await WiFiForIoTPlugin.connect(
-      ssid,
-      password: password,
-      security: NetworkSecurity.WPA,
-      joinOnce: false,
-    );
-    if (ok) {
-      // Route traffic to the AP even though it has no internet.
-      await WiFiForIoTPlugin.forceWifiUsage(true);
+    try {
+      final ok = await _channel.invokeMethod<bool>('join', {
+        'ssid': ssid,
+        'password': password,
+      });
+      return ok ?? false;
+    } on PlatformException catch (e) {
+      log.w('wifi join failed: ${e.code}');
+      return false;
     }
-    return ok;
   }
 
   /// The SSID the phone is currently associated with, or null when
-  /// not on Wi-Fi / not determinable (iOS restricts SSID access —
-  /// treat null as "unknown", not "wrong network").
+  /// not determinable. Both platforms restrict SSID reads without
+  /// certain permissions/entitlements — treat null as "unknown",
+  /// never "wrong network".
   Future<String?> currentSsid() async {
     try {
-      final ssid = await WiFiForIoTPlugin.getSSID();
-      if (ssid == null || ssid.isEmpty || ssid == '<unknown ssid>') {
-        return null;
-      }
+      final ssid = await _channel.invokeMethod<String>('currentSsid');
+      if (ssid == null || ssid.isEmpty) return null;
       return ssid;
-    } on Exception catch (e) {
-      log.w('currentSsid failed: $e');
+    } on PlatformException catch (e) {
+      log.w('currentSsid failed: ${e.code}');
       return null;
+    }
+  }
+
+  /// Undoes the app-scoped network binding (Android; iOS no-op).
+  Future<void> release() async {
+    try {
+      await _channel.invokeMethod<bool>('release');
+    } on PlatformException {
+      // best-effort
     }
   }
 
