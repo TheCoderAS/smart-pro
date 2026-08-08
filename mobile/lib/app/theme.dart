@@ -1,18 +1,52 @@
 import 'package:flutter/material.dart';
 
-/// Material 3 light and dark themes.
-///
-/// The app follows the system brightness by default; an explicit toggle
-/// lands with the settings feature (PLAN.md §6.11).
-const _seed = Color(0xFF0057B8);
+/// Unisync brand palette, shared with the marketing site
+/// (web/app/globals.css). Warm near-black ground, copper accent.
+abstract final class UnisyncColors {
+  static const accent = Color(0xFFD97757);
+  static const bgDark = Color(0xFF0A0A0B);
+  static const bgElevatedDark = Color(0xFF111113);
+  static const fgDark = Color(0xFFF4F2EE);
+  static const fgMuted = Color(0xFF8A8780);
+}
 
-final ThemeData lightTheme = ThemeData(
-  colorScheme: ColorScheme.fromSeed(seedColor: _seed),
-);
+ThemeData buildLightTheme() {
+  final scheme = ColorScheme.fromSeed(
+    seedColor: UnisyncColors.accent,
+  );
+  return _base(scheme);
+}
 
-final ThemeData darkTheme = ThemeData(
-  colorScheme: ColorScheme.fromSeed(
-    seedColor: _seed,
+ThemeData buildDarkTheme() {
+  final scheme = ColorScheme.fromSeed(
+    seedColor: UnisyncColors.accent,
     brightness: Brightness.dark,
-  ),
-);
+    surface: UnisyncColors.bgDark,
+  );
+  return _base(scheme).copyWith(
+    scaffoldBackgroundColor: UnisyncColors.bgDark,
+    appBarTheme: AppBarTheme(
+      backgroundColor: UnisyncColors.bgDark,
+      foregroundColor: UnisyncColors.fgDark,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+    ),
+    cardTheme: const CardThemeData(
+      color: UnisyncColors.bgElevatedDark,
+    ),
+  );
+}
+
+ThemeData _base(ColorScheme scheme) {
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    visualDensity: VisualDensity.adaptivePlatformDensity,
+    inputDecorationTheme: const InputDecorationTheme(
+      border: OutlineInputBorder(),
+    ),
+    snackBarTheme: const SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+}

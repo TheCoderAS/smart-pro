@@ -44,6 +44,7 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# Generated sources — CI regenerates via build_runner (see mobile-ci.yml).
-*.g.dart
-*.freezed.dart
+# Release signing secrets — never commit (see RELEASE.md)
+android/key.properties
+android/app/*.jks
+android/app/*.keystore

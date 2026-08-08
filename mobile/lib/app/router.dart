@@ -1,39 +1,70 @@
-import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:riverpod_annotation/riverpod_annotation.dart';
 
-part 'router.g.dart';
+import '../features/audit/presentation/audit_screen.dart';
+import '../features/auth/presentation/session_gate.dart';
+import '../features/extensions/presentation/extensions_screen.dart';
+import '../features/firmware/presentation/firmware_screen.dart';
+import '../features/mesh/presentation/mesh_screen.dart';
+import '../features/onboarding/presentation/add_master_screen.dart';
+import '../features/recovery/presentation/recovery_screen.dart';
+import '../features/settings/presentation/settings_screen.dart';
+import '../features/switches/presentation/reorder_screen.dart';
 
-/// Route paths, kept as constants so features can reference them without
-/// stringly-typed duplication as screens land (PLAN.md §7).
-abstract final class AppRoutes {
+/// Route paths, one constant per screen. Feature blocks add theirs here
+/// so deep links stay discoverable in one place.
+abstract final class Routes {
   static const home = '/';
+  static const reorder = '/switches/reorder';
+  static const recovery = '/recovery';
+  static const addMaster = '/add-master';
+  static const extensions = '/extensions';
+  static const mesh = '/mesh';
+  static const firmware = '/firmware';
+  static const audit = '/audit';
+  static const settings = '/settings';
 }
 
-@riverpod
-GoRouter appRouter(Ref ref) {
+final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
-    initialLocation: AppRoutes.home,
+    initialLocation: Routes.home,
     routes: [
       GoRoute(
-        path: AppRoutes.home,
-        builder: (context, state) => const _PlaceholderHomeScreen(),
+        path: Routes.home,
+        builder: (context, state) => const SessionGate(),
+      ),
+      GoRoute(
+        path: Routes.reorder,
+        builder: (context, state) => const ReorderScreen(),
+      ),
+      GoRoute(
+        path: Routes.recovery,
+        builder: (context, state) => const RecoveryScreen(),
+      ),
+      GoRoute(
+        path: Routes.addMaster,
+        builder: (context, state) => const AddMasterScreen(),
+      ),
+      GoRoute(
+        path: Routes.extensions,
+        builder: (context, state) => const ExtensionsScreen(),
+      ),
+      GoRoute(
+        path: Routes.mesh,
+        builder: (context, state) => const MeshScreen(),
+      ),
+      GoRoute(
+        path: Routes.firmware,
+        builder: (context, state) => const FirmwareScreen(),
+      ),
+      GoRoute(
+        path: Routes.audit,
+        builder: (context, state) => const AuditScreen(),
+      ),
+      GoRoute(
+        path: Routes.settings,
+        builder: (context, state) => const SettingsScreen(),
       ),
     ],
   );
-}
-
-/// Stand-in for the dashboard until the auth + state-socket blocks land.
-class _PlaceholderHomeScreen extends StatelessWidget {
-  const _PlaceholderHomeScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Unisync')),
-      body: const Center(
-        child: Text('Unisync app bootstrap — features land per mobile/PLAN.md'),
-      ),
-    );
-  }
-}
+});

@@ -26,6 +26,23 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- The master serves plain HTTP on its own AP (192.168.4.1);
+		     no internet path, no certificates possible. This permits
+		     local-network cleartext only - remote hosts still require
+		     HTTPS. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Unisync connects to your switches over your home Wi-Fi.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Unisync uses Bluetooth to recover a lost password from a nearby switch.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Unisync uses Bluetooth to recover a lost password from a nearby switch.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Unisync uses the camera to scan the QR code on your switch's card.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

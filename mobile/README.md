@@ -1,25 +1,20 @@
 # Unisync mobile app
 
-Flutter app for Unisync masters (Android + iOS). The full build plan —
-architecture, package matrix, feature inventory, and platform
-configuration — lives in [`PLAN.md`](PLAN.md).
+Flutter app for Android + iOS. Controls Unisync masters and extensions
+over the device's own Wi-Fi (`192.168.4.1`) — local-first, no cloud.
 
-## Getting started
+See [PLAN.md](PLAN.md) for the full build plan, and
+`../web/docs/UNISYNC_API_REFERENCE_v1.md` for the device API.
 
-```sh
-cd mobile
+## Development
+
+```bash
 flutter pub get
-dart run build_runner build --delete-conflicting-outputs   # generated sources are not committed
-flutter run
-```
-
-## Checks
-
-```sh
 flutter analyze
 flutter test
+flutter run          # with a device/emulator attached
 ```
 
-CI (`.github/workflows/mobile-ci.yml`) runs analyze + test on every PR
-touching `mobile/**`, then builds a release APK/AAB and an unsigned iOS
-build.
+Layout follows PLAN.md §4: features under `lib/features/`, transport
+and platform plumbing under `lib/core/`, app-level wiring (router,
+theme, l10n) under `lib/app/`.
