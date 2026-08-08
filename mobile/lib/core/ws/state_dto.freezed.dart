@@ -15,7 +15,7 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$StateSnapshot {
 
-@JsonKey(name: 'master_name') String get masterName; int get uptime;@JsonKey(name: 'boot_complete') bool get bootComplete;@JsonKey(name: 'scan_active') bool get scanActive; List<SwitchState> get switches; List<PeerState> get peers;
+@JsonKey(name: 'master_name') String get masterName; int get uptime;@JsonKey(name: 'boot_complete') bool get bootComplete;@JsonKey(name: 'scan_active') bool get scanActive; List<SwitchState> get switches;@JsonKey(name: 'mesh_peers') List<PeerState> get peers;
 /// Create a copy of StateSnapshot
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -48,7 +48,7 @@ abstract mixin class $StateSnapshotCopyWith<$Res>  {
   factory $StateSnapshotCopyWith(StateSnapshot value, $Res Function(StateSnapshot) _then) = _$StateSnapshotCopyWithImpl;
 @useResult
 $Res call({
-@JsonKey(name: 'master_name') String masterName, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches, List<PeerState> peers
+@JsonKey(name: 'master_name') String masterName, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches,@JsonKey(name: 'mesh_peers') List<PeerState> peers
 });
 
 
@@ -158,7 +158,7 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches,  List<PeerState> peers)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _StateSnapshot() when $default != null:
 return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
@@ -179,7 +179,7 @@ return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActiv
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches,  List<PeerState> peers)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)  $default,) {final _that = this;
 switch (_that) {
 case _StateSnapshot():
 return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
@@ -199,7 +199,7 @@ return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActiv
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches,  List<PeerState> peers)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)?  $default,) {final _that = this;
 switch (_that) {
 case _StateSnapshot() when $default != null:
 return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
@@ -214,7 +214,7 @@ return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActiv
 @JsonSerializable()
 
 class _StateSnapshot implements StateSnapshot {
-  const _StateSnapshot({@JsonKey(name: 'master_name') this.masterName = '', this.uptime = 0, @JsonKey(name: 'boot_complete') this.bootComplete = true, @JsonKey(name: 'scan_active') this.scanActive = false, final  List<SwitchState> switches = const <SwitchState>[], final  List<PeerState> peers = const <PeerState>[]}): _switches = switches,_peers = peers;
+  const _StateSnapshot({@JsonKey(name: 'master_name') this.masterName = '', this.uptime = 0, @JsonKey(name: 'boot_complete') this.bootComplete = true, @JsonKey(name: 'scan_active') this.scanActive = false, final  List<SwitchState> switches = const <SwitchState>[], @JsonKey(name: 'mesh_peers') final  List<PeerState> peers = const <PeerState>[]}): _switches = switches,_peers = peers;
   factory _StateSnapshot.fromJson(Map<String, dynamic> json) => _$StateSnapshotFromJson(json);
 
 @override@JsonKey(name: 'master_name') final  String masterName;
@@ -229,7 +229,7 @@ class _StateSnapshot implements StateSnapshot {
 }
 
  final  List<PeerState> _peers;
-@override@JsonKey() List<PeerState> get peers {
+@override@JsonKey(name: 'mesh_peers') List<PeerState> get peers {
   if (_peers is EqualUnmodifiableListView) return _peers;
   // ignore: implicit_dynamic_type
   return EqualUnmodifiableListView(_peers);
@@ -269,7 +269,7 @@ abstract mixin class _$StateSnapshotCopyWith<$Res> implements $StateSnapshotCopy
   factory _$StateSnapshotCopyWith(_StateSnapshot value, $Res Function(_StateSnapshot) _then) = __$StateSnapshotCopyWithImpl;
 @override @useResult
 $Res call({
-@JsonKey(name: 'master_name') String masterName, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches, List<PeerState> peers
+@JsonKey(name: 'master_name') String masterName, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches,@JsonKey(name: 'mesh_peers') List<PeerState> peers
 });
 
 
@@ -305,8 +305,8 @@ as List<PeerState>,
 /// @nodoc
 mixin _$SwitchState {
 
- String get id; String get name; bool get on;/// Channel parameter for multi-channel switches (API §5 relay `ch`).
- int get ch;/// Whether the extension backing this switch is currently online.
+ String get id; String get name;@JsonKey(name: 'state') bool get on;/// Channel for multi-channel switches. Wire key is `channel`.
+@JsonKey(name: 'channel') int get ch;/// Whether the extension backing this switch is currently online.
  bool get online;
 /// Create a copy of SwitchState
 /// with the given fields replaced by the non-null parameter values.
@@ -340,7 +340,7 @@ abstract mixin class $SwitchStateCopyWith<$Res>  {
   factory $SwitchStateCopyWith(SwitchState value, $Res Function(SwitchState) _then) = _$SwitchStateCopyWithImpl;
 @useResult
 $Res call({
- String id, String name, bool on, int ch, bool online
+ String id, String name,@JsonKey(name: 'state') bool on,@JsonKey(name: 'channel') int ch, bool online
 });
 
 
@@ -449,7 +449,7 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id,  String name,  bool on,  int ch,  bool online)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id,  String name, @JsonKey(name: 'state')  bool on, @JsonKey(name: 'channel')  int ch,  bool online)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _SwitchState() when $default != null:
 return $default(_that.id,_that.name,_that.on,_that.ch,_that.online);case _:
@@ -470,7 +470,7 @@ return $default(_that.id,_that.name,_that.on,_that.ch,_that.online);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id,  String name,  bool on,  int ch,  bool online)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id,  String name, @JsonKey(name: 'state')  bool on, @JsonKey(name: 'channel')  int ch,  bool online)  $default,) {final _that = this;
 switch (_that) {
 case _SwitchState():
 return $default(_that.id,_that.name,_that.on,_that.ch,_that.online);case _:
@@ -490,7 +490,7 @@ return $default(_that.id,_that.name,_that.on,_that.ch,_that.online);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id,  String name,  bool on,  int ch,  bool online)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id,  String name, @JsonKey(name: 'state')  bool on, @JsonKey(name: 'channel')  int ch,  bool online)?  $default,) {final _that = this;
 switch (_that) {
 case _SwitchState() when $default != null:
 return $default(_that.id,_that.name,_that.on,_that.ch,_that.online);case _:
@@ -505,14 +505,14 @@ return $default(_that.id,_that.name,_that.on,_that.ch,_that.online);case _:
 @JsonSerializable()
 
 class _SwitchState implements SwitchState {
-  const _SwitchState({this.id = '', this.name = '', this.on = false, this.ch = 0, this.online = true});
+  const _SwitchState({this.id = '', this.name = '', @JsonKey(name: 'state') this.on = false, @JsonKey(name: 'channel') this.ch = 0, this.online = true});
   factory _SwitchState.fromJson(Map<String, dynamic> json) => _$SwitchStateFromJson(json);
 
 @override@JsonKey() final  String id;
 @override@JsonKey() final  String name;
-@override@JsonKey() final  bool on;
-/// Channel parameter for multi-channel switches (API §5 relay `ch`).
-@override@JsonKey() final  int ch;
+@override@JsonKey(name: 'state') final  bool on;
+/// Channel for multi-channel switches. Wire key is `channel`.
+@override@JsonKey(name: 'channel') final  int ch;
 /// Whether the extension backing this switch is currently online.
 @override@JsonKey() final  bool online;
 
@@ -549,7 +549,7 @@ abstract mixin class _$SwitchStateCopyWith<$Res> implements $SwitchStateCopyWith
   factory _$SwitchStateCopyWith(_SwitchState value, $Res Function(_SwitchState) _then) = __$SwitchStateCopyWithImpl;
 @override @useResult
 $Res call({
- String id, String name, bool on, int ch, bool online
+ String id, String name,@JsonKey(name: 'state') bool on,@JsonKey(name: 'channel') int ch, bool online
 });
 
 

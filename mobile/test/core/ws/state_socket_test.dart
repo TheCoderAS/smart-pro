@@ -66,12 +66,17 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(channels, hasLength(1));
 
+    // Real firmware wire shape (master_v2 build_state_json): the boolean
+    // is `state`, the channel is `channel`, peers live under `mesh_peers`.
     channels[0].incoming.add(jsonEncode({
       'master_name': 'Living Room',
       'uptime': 100,
       'switches': [
-        {'id': 'ext0_1', 'name': 'Fan', 'on': true},
-        {'id': 'ext0_2', 'name': 'Light', 'on': false},
+        {'id': 'ext0_1', 'name': 'Fan', 'channel': 1, 'state': true},
+        {'id': 'ext0_2', 'name': 'Light', 'channel': 2, 'state': false},
+      ],
+      'mesh_peers': [
+        {'uid': 'C5F77720', 'name': 'Bro Room', 'online': true},
       ],
     }));
 
@@ -81,6 +86,10 @@ void main() {
     expect(first.masterName, 'Living Room');
     expect(first.switches, hasLength(2));
     expect(first.switches[0].on, isTrue);
+    expect(first.switches[0].ch, 1);
+    expect(first.switches[1].ch, 2);
+    expect(first.peers, hasLength(1));
+    expect(first.peers[0].name, 'Bro Room');
     expect(container.read(socketStatusProvider), SocketStatus.connected);
 
     // Second push replaces everything — fewer switches, new name
@@ -88,7 +97,7 @@ void main() {
     channels[0].incoming.add(jsonEncode({
       'master_name': 'Bedroom',
       'switches': [
-        {'id': 'ext1_1', 'name': 'Lamp', 'on': false},
+        {'id': 'ext1_1', 'name': 'Lamp', 'channel': 1, 'state': false},
       ],
     }));
 

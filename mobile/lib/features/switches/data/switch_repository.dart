@@ -16,24 +16,40 @@ class SwitchRepository {
 
   final Dio _dio;
 
-  /// POST /api/relay — `state` is 1/0; `ch` for multi-channel units.
+  /// POST /api/relay — `state` is 1/0; `ch` is the channel.
+  ///
+  /// The channel is derived from the id suffix (`master_1`, `ext0_2` →
+  /// 1, 2), exactly as the firmware's own web UI does. The firmware
+  /// *requires* a valid channel (`ch==1||ch==2`) or it 404s the relay,
+  /// and the state document's channel field is named inconsistently
+  /// (`channel` for local switches, `ch` for peers) — deriving it from
+  /// the id is the one source of truth that always holds.
   Future<void> setRelay({
     required String id,
     required bool on,
     int? ch,
   }) async {
+    final channel = _channelFromId(id) ?? ch ?? 1;
     try {
       await _dio.post<dynamic>(
         Api.relay,
         data: {
           'id': id,
           'state': on ? 1 : 0,
-          'ch': ?ch,
+          'ch': channel,
         },
       );
     } on DioException catch (e) {
       throw e.apiFailure;
     }
+  }
+
+  /// Parse the trailing channel from a switch id (`ext0_1` → 1). Returns
+  /// null when the id has no `_<n>` suffix.
+  static int? _channelFromId(String id) {
+    final us = id.lastIndexOf('_');
+    if (us < 0 || us == id.length - 1) return null;
+    return int.tryParse(id.substring(us + 1));
   }
 
   /// POST /api/relay/killall — everything off, everywhere.
