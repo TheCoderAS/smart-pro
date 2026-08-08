@@ -82,6 +82,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get reconnecting => 'Reconnecting';
 
   @override
+  String get connected => 'Connected';
+
+  @override
   String get switchOn => 'On';
 
   @override
@@ -89,6 +92,20 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get switchOffline => 'Offline';
+
+  @override
+  String onOfTotal(int on, int total) {
+    return '$on of $total on';
+  }
+
+  @override
+  String get allOn => 'All on';
+
+  @override
+  String get allOff => 'All off';
+
+  @override
+  String get meshBadge => 'Mesh';
 
   @override
   String get menuReorder => 'Reorder switches';
