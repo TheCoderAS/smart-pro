@@ -9,6 +9,7 @@
   "unreachableBody": "Join the switch’s Wi-Fi network and try again. The network name is on the card in the box.",
   "tryAgain": "Try again",
   "addASwitch": "Add a switch",
+  "forgotPasswordRecover": "Forgot the password? Recover it",
 
   "signInTitle": "Sign in",
   "masterIdentity": "Master {uid} · firmware {fw}",

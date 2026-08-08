@@ -28,6 +28,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get addASwitch => 'Add a switch';
 
   @override
+  String get forgotPasswordRecover => 'Forgot the password? Recover it';
+
+  @override
   String get signInTitle => 'Sign in';
 
   @override

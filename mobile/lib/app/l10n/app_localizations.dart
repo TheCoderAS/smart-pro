@@ -130,6 +130,12 @@ abstract class AppLocalizations {
   /// **'Add a switch'**
   String get addASwitch;
 
+  /// No description provided for @forgotPasswordRecover.
+  ///
+  /// In en, this message translates to:
+  /// **'Forgot the password? Recover it'**
+  String get forgotPasswordRecover;
+
   /// No description provided for @signInTitle.
   ///
   /// In en, this message translates to:
