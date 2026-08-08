@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
 import '../data/mesh_repository.dart';
@@ -381,21 +382,17 @@ class _Actions extends ConsumerWidget {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            PasswordField(
               controller: oldController,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'Current password'),
+              label: 'Current password',
             ),
-            TextField(
+            PasswordField(
               controller: newController,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'New password',
-                helperText: 'At least 8 characters. Every master takes '
-                    'the change; every signed-in device must sign in '
-                    'again.',
-                helperMaxLines: 3,
-              ),
+              label: 'New password',
+              helper: 'At least 8 characters. Every master takes '
+                  'the change; every signed-in device must sign in '
+                  'again.',
+              helperMaxLines: 3,
             ),
           ],
         ),

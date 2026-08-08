@@ -53,6 +53,9 @@ void main() {
     // Optimistic: shows On even though no snapshot arrived.
     expect(find.text('On'), findsOneWidget);
     verify(() => repo.setRelay(id: 'ext0_1', on: true, ch: 1)).called(1);
+
+    // Drain the optimistic safety timeout so no timer leaks into teardown.
+    await tester.pump(const Duration(seconds: 8));
   });
 
   testWidgets('failed POST rolls the tile back', (tester) async {

@@ -42,14 +42,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final status = ref.watch(socketStatusProvider);
     final transport = ref.watch(currentTransportProvider);
 
-    // Every snapshot is authoritative (API §4) — clear optimistic
-    // overrides the moment one lands, confirmed or contradicted. Also
-    // record the master (uid + name) so the BLE cold-start path can find
-    // it later even if the user only ever signed in (never commissioned).
+    // Reconcile optimistic overrides against the authoritative snapshot
+    // (API §4): confirmed ones clear, contradicted ones hold until the
+    // firmware catches up — no flicker after "All off". Also record the
+    // master (uid + name) so the BLE cold-start path can find it later
+    // even if the user only ever signed in (never commissioned).
     ref.listen(activeStateProvider, (prev, next) {
       final snap = next.value;
       if (snap != null) {
-        ref.read(switchOverridesProvider.notifier).clearAll();
+        ref.read(switchOverridesProvider.notifier).reconcile(snap.switches);
         ref.read(masterRegistryProvider.notifier).ensure(
               uid: snap.selfUid,
               name: snap.masterName,
@@ -124,28 +125,27 @@ class _DashboardHeader extends ConsumerWidget {
 
     return SliverAppBar(
       pinned: true,
-      expandedHeight: 200,
+      expandedHeight: 178,
+      titleSpacing: 0,
+      // The connection pill lives inline in the toolbar row (with the
+      // grid, reconnect and menu icons) — one row, always visible.
       leading: IconButton(
         tooltip: l10n.yourSwitches,
         icon: const Icon(Icons.grid_view_rounded),
         onPressed: () => showMasterSwitcher(context, ref),
       ),
+      title: _StatusPill(status: status, transport: transport),
       actions: [
         IconButton(
           tooltip: l10n.reconnect,
           icon: const Icon(Icons.refresh_rounded),
-          onPressed: () => ref.read(transportCoordinatorProvider).reconcile(),
+          onPressed: () => ref.read(transportCoordinatorProvider).reconnect(),
         ),
         _OverflowMenu(),
         const SizedBox(width: 4),
       ],
       flexibleSpace: FlexibleSpaceBar(
-        titlePadding: const EdgeInsetsDirectional.only(
-          start: 56,
-          bottom: 16,
-          end: 16,
-        ),
-        title: _CollapsedTitle(name: name, status: status),
+        titlePadding: EdgeInsets.zero,
         background: DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -159,16 +159,13 @@ class _DashboardHeader extends ConsumerWidget {
           ),
           child: SafeArea(
             child: Padding(
-              // Top clears the pinned toolbar (leading/actions) so the
-              // status pill never sits under the grid/menu icons; bottom
-              // keeps the title off the content below.
-              padding: const EdgeInsets.fromLTRB(20, kToolbarHeight + 4, 20, 16),
+              // Below the toolbar row so the master name never rides
+              // under the pill/icons.
+              padding: const EdgeInsets.fromLTRB(20, kToolbarHeight + 8, 20, 16),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _StatusPill(status: status, transport: transport),
-                  const SizedBox(height: 12),
                   Row(
                     children: [
                       Expanded(
@@ -197,44 +194,6 @@ class _DashboardHeader extends ConsumerWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _CollapsedTitle extends StatelessWidget {
-  const _CollapsedTitle({required this.name, required this.status});
-
-  final String name;
-  final SocketStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = context
-        .dependOnInheritedWidgetOfExactType<FlexibleSpaceBarSettings>();
-    final t = settings == null
-        ? 0.0
-        : ((settings.maxExtent - settings.currentExtent) /
-                  (settings.maxExtent - settings.minExtent))
-              .clamp(0.0, 1.0);
-    // Only show the compact title once mostly collapsed, so it doesn't
-    // fight the big header title.
-    return Opacity(
-      opacity: t > 0.7 ? (t - 0.7) / 0.3 : 0,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _StatusDot(status: status),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-          ),
-        ],
       ),
     );
   }

@@ -59,6 +59,17 @@ class BleSessionController extends Notifier<BleSessionState> {
   String? _connectedDeviceId;
   bool _active = false;
 
+  // Serialises scans: flutter_reactive_ble allows only one active scan,
+  // so a manual reconnect and the roam loop must not scan at once.
+  Future<void> _scanGate = Future<void>.value();
+
+  Future<List<MasterBeacon>> _scan() {
+    final result =
+        _scanGate.then((_) => ref.read(bleScannerProvider).collect(meshId: _meshId));
+    _scanGate = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
   @override
   BleSessionState build() {
     ref.onDispose(_teardown);
@@ -88,12 +99,24 @@ class BleSessionController extends Notifier<BleSessionState> {
     }
   }
 
+  /// Manual reconnect (the dashboard's refresh action). Stops roaming,
+  /// re-scans, and re-opens the client — safe to call while connected.
+  Future<void> reconnect() async {
+    if (!_active) {
+      await activate(meshId: _meshId);
+      return;
+    }
+    _roamTimer?.cancel();
+    _roam.clear();
+    await _connectNearest();
+    _startRoamLoop();
+  }
+
   Future<void> _connectNearest() async {
     if (!_active) return;
     state = state.copyWith(status: BleSessionStatus.scanning);
-    final scanner = ref.read(bleScannerProvider);
     try {
-      final beacons = await scanner.collect(meshId: _meshId);
+      final beacons = await _scan();
       if (beacons.isEmpty) {
         state = const BleSessionState(
           status: BleSessionStatus.failed,
@@ -160,8 +183,7 @@ class BleSessionController extends Notifier<BleSessionState> {
     _roamTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
       if (!_active || _meshId == null || _connectedDeviceId == null) return;
       try {
-        final beacons =
-            await ref.read(bleScannerProvider).collect(meshId: _meshId);
+        final beacons = await _scan();
         final now = DateTime.now().millisecondsSinceEpoch;
         for (final b in beacons) {
           _roam.observe(b, now);
