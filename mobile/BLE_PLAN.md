@@ -90,16 +90,27 @@ abstract interface class ControlTransport {
   built to the interface.
 - **`BleTransport`** — new; everything in §4–§8 feeds it.
 
-**Selection** (`activeTransportProvider`): prefer Wi-Fi when
-`WifiService.masterReachable()` succeeds (the LAN path is faster and
-unlocks the config-only features); otherwise use BLE if a paired master
-is in range. The existing `SwitchRepository`, session, and state
-providers are re-pointed at `activeTransportProvider` so **no UI
-changes** are needed for control.
+**Selection** (`activeTransportProvider`) honours a user preference
+(resolved open question #4):
+
+- **Auto (default):** prefer Wi-Fi when `WifiService.masterReachable()`
+  succeeds — the LAN path is faster and unlocks the config-only
+  features — otherwise BLE if a paired master is in range.
+- **Wi-Fi:** force the Wi-Fi path; if unreachable, show the
+  join-Wi-Fi prompt.
+- **Bluetooth:** stay on BLE even when Wi-Fi is reachable, so the phone
+  keeps its own network/internet. Config-only features surface the
+  §9 fallback.
+
+The preference lives in Settings (persisted via `shared_preferences`,
+like the theme). The dashboard status pill (§10 block 11) shows which
+transport is live and offers a one-tap switch. The existing
+`SwitchRepository`, session, and state providers are re-pointed at
+`activeTransportProvider` so **no UI changes** are needed for control.
 
 `tokenProvider` stays exactly as is — the token is shared, so switching
 transport mid-session needs no re-login (matches the firmware's whole
-premise).
+premise); this is what makes a user-facing Wi-Fi⇄BLE toggle seamless.
 
 **Why an interface, not a flag:** the two transports have genuinely
 different plumbing (HTTP status codes vs silent-timeout, `ch` param vs
@@ -113,8 +124,16 @@ the app.
 
 Pure Dart, the most testable piece.
 
-- `List<List<int>> encode(List<int> payload)` → chunks of
-  `[index, total, ...≤160 bytes]`.
+**Chunk sizing (resolved open question #1):** the payload per chunk is
+`min(negotiatedMtu − 5, 160)` — 3 bytes ATT write overhead + 2 framing
+header bytes — and never assumes the larger MTU is granted. If MTU
+negotiation is refused we fall back to the BLE default (23 → **18**
+payload bytes/chunk), which is slower but works on every stack. The
+firmware caps payload at 160 regardless, so that's the ceiling. Result:
+efficient when a big MTU is granted, correct when it isn't.
+
+- `List<List<int>> encode(List<int> payload, {int maxPayload})` → chunks
+  of `[index, total, ...≤maxPayload bytes]`.
 - A `ChunkReassembler` that accepts chunks, validates order, and yields
   a complete payload at `index == total-1`; resets/raises on
   out-of-order or index/total mismatch.
@@ -231,8 +250,10 @@ any device work.
 9. **Fallback UX** (§9) for Wi-Fi-only features.
 10. **Onboarding/pairing** — capture mesh id; BLE-first "add a switch"
     path when Wi-Fi isn't desired.
-11. **Dashboard polish** — a transport indicator (Wi-Fi vs BLE) in the
-    header status pill, so the user can see how they're connected.
+11. **Transport preference + indicator** — the Auto/Wi-Fi/Bluetooth
+    setting in Settings, and a transport indicator (Wi-Fi vs BLE) in the
+    dashboard status pill with a one-tap switch, so the user sees and
+    controls how they're connected.
 
 ---
 
@@ -271,17 +292,18 @@ after a hop (no login prompt).
 
 ## 13. Open questions for the team
 
-1. **MTU floor:** the spec says don't assume the requested MTU is
-   granted. Is there a guaranteed minimum (23?) we should size the
-   160-byte chunk assumption against, or can chunk size adapt to the
-   negotiated MTU?
+1. ~~**MTU floor.**~~ **Resolved:** adaptive chunk size
+   `min(negotiatedMtu − 5, 160)`, fallback to 18 bytes/chunk when MTU
+   negotiation is refused. Compatible on every stack, efficient when a
+   larger MTU is granted (§4).
 2. **Scan cadence vs battery:** acceptable background behaviour — stop
    scanning entirely when backgrounded, or a slow keep-alive?
 3. **Standalone roaming:** roaming is mesh-only (shared id). Confirm a
    standalone master never participates in hop logic.
-4. **Transport preference override:** should the user be able to force
-   BLE even when Wi-Fi is reachable (e.g. to stay on home internet),
-   or is "Wi-Fi when present" always right?
+4. ~~**Transport preference override.**~~ **Resolved:** the user gets a
+   transport preference — Auto (Wi-Fi when present), Wi-Fi, or
+   Bluetooth (stay on BLE / keep own network) — in Settings, plus a
+   one-tap switch from the dashboard status pill (§3, §10 block 11).
 
 ---
 
