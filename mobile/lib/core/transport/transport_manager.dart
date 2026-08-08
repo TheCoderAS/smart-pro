@@ -30,7 +30,12 @@ class TransportPreferenceNotifier extends Notifier<TransportPreference> {
     return TransportPreference.auto;
   }
 
-  Future<void> _restore() async {
+  Future<void> _restore() => ensureLoaded();
+
+  /// Reads (and applies) the persisted preference, returning it. The
+  /// coordinator awaits this before deciding a transport so a fresh
+  /// login doesn't race the async restore and read the default `auto`.
+  Future<TransportPreference> ensureLoaded() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString(key);
     final pref = TransportPreference.values.firstWhere(
@@ -38,6 +43,7 @@ class TransportPreferenceNotifier extends Notifier<TransportPreference> {
       orElse: () => TransportPreference.auto,
     );
     if (pref != state) state = pref;
+    return pref;
   }
 
   Future<void> set(TransportPreference pref) async {

@@ -13,6 +13,7 @@ import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../settings/presentation/master_switcher.dart';
@@ -67,8 +68,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ref.watch(bleSessionProvider).status == BleSessionStatus.failed;
 
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
+      body: RefreshIndicator(
+        // Pull down to force the latest switch state now — re-request
+        // over BLE, or reconnect the socket over Wi-Fi.
+        onRefresh: () =>
+            ref.read(transportCoordinatorProvider).refreshState(),
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
           _DashboardHeader(
             snapshot: snap,
             status: status,
@@ -94,7 +101,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             _SwitchGrid(switches: switches),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
           ],
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -136,11 +144,6 @@ class _DashboardHeader extends ConsumerWidget {
       ),
       title: _StatusPill(status: status, transport: transport),
       actions: [
-        IconButton(
-          tooltip: l10n.reconnect,
-          icon: const Icon(Icons.refresh_rounded),
-          onPressed: () => ref.read(transportCoordinatorProvider).reconnect(),
-        ),
         _OverflowMenu(),
         const SizedBox(width: 4),
       ],
@@ -354,67 +357,6 @@ String _prefDesc(AppLocalizations l10n, TransportPreference p) => switch (p) {
   TransportPreference.bluetooth => l10n.transportBluetoothDesc,
 };
 
-/// Returns true when the active transport can carry a setup/maintenance
-/// action (Wi-Fi). Over BLE, shows a sheet steering the user to Wi-Fi
-/// and returns false.
-bool _guardWifi(BuildContext context, WidgetRef ref) {
-  if (ref.read(currentTransportProvider) != TransportKind.ble) return true;
-  _showWifiNeeded(context, ref);
-  return false;
-}
-
-void _showWifiNeeded(BuildContext context, WidgetRef ref) {
-  final l10n = AppLocalizations.of(context)!;
-  showModalBottomSheet<void>(
-    context: context,
-    builder: (sheetContext) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.wifi_rounded,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    l10n.wifiOnlyTitle,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              l10n.wifiOnlyBody,
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 20),
-            Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton.icon(
-                onPressed: () {
-                  Navigator.of(sheetContext).pop();
-                  ref
-                      .read(transportCoordinatorProvider)
-                      .choose(TransportPreference.wifi);
-                },
-                icon: const Icon(Icons.wifi_rounded),
-                label: Text(l10n.joinWifi),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
 class _MeshBadge extends StatelessWidget {
   const _MeshBadge({required this.peerCount});
   final int peerCount;
@@ -464,7 +406,7 @@ class _OverflowMenu extends ConsumerWidget {
           case 'extensions':
             unawaited(context.push(Routes.extensions));
           case 'mesh':
-            if (_guardWifi(context, ref)) unawaited(context.push(Routes.mesh));
+            if (requireWifi(context, ref)) unawaited(context.push(Routes.mesh));
           case 'firmware':
             unawaited(context.push(Routes.firmware));
           case 'audit':
@@ -767,8 +709,8 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
           child: InkWell(
             onTap: online ? () => _toggle(on) : null,
             onLongPress: () {
-              // Rename is a Wi-Fi-only flow (BLE spec §Not supported).
-              if (_guardWifi(context, ref)) {
+              // Rename is a Wi-Fi-only flow (BLE spec v2 §9).
+              if (requireWifi(context, ref)) {
                 showRenameSwitchSheet(context, ref, sw);
               }
             },

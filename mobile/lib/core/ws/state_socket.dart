@@ -7,6 +7,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api/dio_client.dart';
 import '../api/endpoints.dart';
 import '../logging/log.dart';
+import '../transport/control_transport.dart';
+import '../transport/transport_manager.dart';
 import 'state_dto.dart';
 
 /// Connection status surfaced to the UI (the "reconnecting…" chip on
@@ -56,9 +58,13 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
   @override
   Stream<StateSnapshot> build() {
     final token = ref.watch(tokenProvider);
+    // Only run the Wi-Fi socket when Wi-Fi is the active transport —
+    // switching to Bluetooth disconnects it (and back reconnects), so
+    // the two transports never run at once (item: auto-switch on login).
+    final onWifi = ref.watch(currentTransportProvider) == TransportKind.wifi;
 
-    // Tear down any previous connection when the token changes or the
-    // provider is disposed.
+    // Tear down any previous connection when the token/transport changes
+    // or the provider is disposed.
     ref.onDispose(_teardown);
 
     // Closed in _teardown via _out — the lint can't see through the
@@ -72,9 +78,9 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
     // microtask later.
     Future.microtask(() {
       if (_out != out) return; // rebuilt/disposed meanwhile
-      if (token == null) {
-        // Not authenticated — no socket until a token appears and
-        // build() re-runs.
+      if (token == null || !onWifi) {
+        // Not authenticated, or Bluetooth is the active transport — no
+        // Wi-Fi socket until a token appears and Wi-Fi is selected.
         _status(SocketStatus.disconnected);
       } else {
         _connect(token);

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/ws/state_dto.dart';
 
@@ -53,8 +54,8 @@ class _ReorderScreenState extends ConsumerState<ReorderScreen> {
                 return ListTile(
                   key: ValueKey(sw.id),
                   leading: const Icon(Icons.drag_handle),
-                  title: Text(sw.name.isEmpty ? sw.id : sw.name),
-                  subtitle: Text(sw.id),
+                  // Friendly name only — never the internal id.
+                  title: Text(sw.name.isEmpty ? 'Unnamed switch' : sw.name),
                 );
               },
             ),
@@ -70,6 +71,9 @@ class _ReorderScreenState extends ConsumerState<ReorderScreen> {
       await ref
           .read(activeControlProvider)
           .reorder([for (final sw in order) sw.id]);
+      // Nudge a fresh snapshot so the dashboard shows the new order
+      // without waiting on the next spontaneous push.
+      await ref.read(transportCoordinatorProvider).refreshState();
       navigator.pop();
     } on Exception {
       messenger.showSnackBar(

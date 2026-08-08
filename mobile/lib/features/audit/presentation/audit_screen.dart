@@ -33,10 +33,7 @@ class AuditScreen extends ConsumerWidget {
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Text(
                   lines[i],
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.copyWith(fontFamily: 'monospace'),
+                  style: Theme.of(context).textTheme.bodyMedium,
                 ),
               ),
             ),

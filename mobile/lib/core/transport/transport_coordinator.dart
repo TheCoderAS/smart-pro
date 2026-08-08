@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../logging/log.dart';
 import '../storage/master_registry.dart';
 import '../wifi/wifi_service.dart';
+import '../ws/state_socket.dart';
 import 'ble_session.dart';
 import 'control_transport.dart';
 import 'transport_manager.dart';
@@ -27,7 +28,10 @@ class TransportCoordinator {
   /// preference change, or when the user taps the switch in the status
   /// pill.
   Future<void> reconcile() async {
-    final pref = _ref.read(transportPreferenceProvider);
+    // Await the persisted preference so a just-logged-in dashboard
+    // doesn't race the async restore and read the default `auto`.
+    final pref = await _ref.read(transportPreferenceProvider.notifier)
+        .ensureLoaded();
     final wifi = _ref.read(wifiServiceProvider);
 
     Future<void> useWifi() async {
@@ -68,6 +72,21 @@ class TransportCoordinator {
       await _ref.read(bleSessionProvider.notifier).reconnect();
     } else {
       await reconcile();
+    }
+  }
+
+  /// Force a fresh state snapshot now — the dashboard pull-to-refresh
+  /// and a post-reorder nudge. Over BLE, re-request `state`; over Wi-Fi,
+  /// reconnect the socket so the master re-pushes.
+  Future<void> refreshState() async {
+    try {
+      if (_ref.read(currentTransportProvider) == TransportKind.ble) {
+        await _ref.read(bleSessionProvider.notifier).refreshState();
+      } else {
+        _ref.invalidate(stateSocketProvider);
+      }
+    } on Object catch (e) {
+      log.w('refreshState failed: $e');
     }
   }
 

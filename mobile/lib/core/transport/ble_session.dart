@@ -206,6 +206,16 @@ class BleSessionController extends Notifier<BleSessionState> {
     });
   }
 
+  /// Re-request a full state snapshot now (pull-to-refresh / after a
+  /// reorder) and push it onto the stream.
+  Future<void> refreshState() async {
+    final client = _client;
+    final token = ref.read(tokenProvider);
+    if (client == null || token == null) return;
+    final map = await client.request(BleCommands.state(token));
+    _stateController.add(StateSnapshot.fromJson(map));
+  }
+
   Future<void> _rememberMesh(MasterBeacon beacon) async {
     try {
       final notifier = ref.read(masterRegistryProvider.notifier);

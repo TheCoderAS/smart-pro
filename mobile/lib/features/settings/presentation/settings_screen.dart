@@ -7,8 +7,11 @@ import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
+import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
+import '../../../core/ws/state_socket.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
 import '../application/theme_mode.dart';
@@ -113,6 +116,13 @@ class SettingsScreen extends ConsumerWidget {
               subtitle: Text('Firmware ${info.fw}'),
             ),
           ListTile(
+            leading: const Icon(Icons.drive_file_rename_outline),
+            title: const Text('Rename this master'),
+            subtitle: const Text('The name shown at the top of the dashboard.'),
+            enabled: info != null,
+            onTap: info == null ? null : () => _renameMaster(context, ref),
+          ),
+          ListTile(
             leading: const Icon(Icons.logout),
             title: const Text('Sign out'),
             subtitle: const Text('Only on this phone.'),
@@ -146,57 +156,52 @@ class SettingsScreen extends ConsumerWidget {
   }
 
   Future<void> _changePassword(BuildContext context, WidgetRef ref) async {
+    // Changing the password is a Wi-Fi-only flow (BLE spec v2 §9).
+    if (!requireWifi(context, ref)) return;
     final controller = TextEditingController();
     final confirmController = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Change password'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            PasswordField(
-              controller: controller,
-              label: 'New password',
-              helper: 'At least 8 characters. Every token everywhere '
-                  'stops working ("sign out all devices").',
-              helperMaxLines: 3,
-            ),
-            PasswordField(
-              controller: confirmController,
-              label: 'Repeat password',
-            ),
-          ],
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final fresh = controller.text;
+            final canSave = fresh.length >= 8 && fresh == confirmController.text;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                PasswordField(
+                  controller: controller,
+                  label: 'New password',
+                  helper: 'At least 8 characters. Every token everywhere '
+                      'stops working ("sign out all devices").',
+                  helperMaxLines: 3,
+                ),
+                PasswordField(
+                  controller: confirmController,
+                  label: 'Repeat password',
+                ),
+                const SizedBox(height: 16),
+                FormActions(
+                  saveLabel: 'Change',
+                  canSave: canSave,
+                  onCancel: () => Navigator.of(dialogContext).pop(false),
+                  onSave: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Change'),
-          ),
-        ],
       ),
     );
     final fresh = controller.text;
-    final confirmed = confirmController.text;
     controller.dispose();
     confirmController.dispose();
     if (!(ok ?? false)) return;
     if (!context.mounted) return;
 
     final messenger = ScaffoldMessenger.of(context);
-    if (fresh.length < 8 || fresh != confirmed) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Passwords must match and be at least 8 characters.'),
-        ),
-      );
-      return;
-    }
-
     try {
       // Reply first, Wi-Fi restart ~400 ms later (API §6).
       await ref.read(authRepositoryProvider).setPassword(fresh);
@@ -216,6 +221,57 @@ class SettingsScreen extends ConsumerWidget {
     await ref.read(sessionProvider.notifier).handlePasswordChanged(fresh);
   }
 
+  Future<void> _renameMaster(BuildContext context, WidgetRef ref) async {
+    // Renaming is a Wi-Fi-only flow (BLE spec v2 §9).
+    if (!requireWifi(context, ref)) return;
+    final current = switch (ref.read(sessionProvider).value) {
+      Authenticated(:final info) => info,
+      _ => null,
+    };
+    final controller = TextEditingController(
+      text: ref.read(stateSocketProvider).value?.masterName ?? '',
+    );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename master'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final value = controller.text.trim();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLength: 24,
+                  decoration: const InputDecoration(labelText: 'Name'),
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 8),
+                FormActions(
+                  canSave: value.isNotEmpty,
+                  onCancel: () => Navigator.of(dialogContext).pop(),
+                  onSave: () => Navigator.of(dialogContext).pop(value),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || current == null) return;
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(authRepositoryProvider).renameMaster(name);
+      messenger.showSnackBar(const SnackBar(content: Text('Master renamed.')));
+    } on ApiFailure catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    }
+  }
+
   Future<void> _removeMaster(
     BuildContext context,
     WidgetRef ref,
@@ -225,23 +281,22 @@ class SettingsScreen extends ConsumerWidget {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Remove this master?'),
-        content: const Text(
-          'Its saved sign-in is deleted from this phone. The switch '
-          'itself keeps working and can be added again any time.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Its saved sign-in is deleted from this phone. The switch '
+              'itself keeps working and can be added again any time.',
             ),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
+            const SizedBox(height: 16),
+            FormActions(
+              saveLabel: 'Remove',
+              destructive: true,
+              onCancel: () => Navigator.of(dialogContext).pop(false),
+              onSave: () => Navigator.of(dialogContext).pop(true),
+            ),
+          ],
+        ),
       ),
     );
     if (!(confirmed ?? false)) return;
