@@ -10,12 +10,14 @@ class SavedMaster {
     required this.uid,
     required this.name,
     this.ssid,
+    this.meshId,
   });
 
   factory SavedMaster.fromJson(Map<String, dynamic> json) => SavedMaster(
         uid: json['uid'] as String? ?? '',
         name: json['name'] as String? ?? '',
         ssid: json['ssid'] as String?,
+        meshId: json['meshId'] as int?,
       );
 
   final String uid;
@@ -24,10 +26,16 @@ class SavedMaster {
   /// The AP's SSID, when known — used to auto-join on switch.
   final String? ssid;
 
+  /// The BLE mesh id (BLE spec §Discovery), captured at pairing. Used
+  /// to filter BLE scans to this system. Null until learned; 0 =
+  /// standalone.
+  final int? meshId;
+
   Map<String, dynamic> toJson() => {
         'uid': uid,
         'name': name,
         if (ssid != null) 'ssid': ssid,
+        if (meshId != null) 'meshId': meshId,
       };
 }
 

@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
+import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_coordinator.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
@@ -15,6 +18,7 @@ class SettingsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeProvider);
+    final transportPref = ref.watch(transportPreferenceProvider);
     final session = ref.watch(sessionProvider).value;
     final info = switch (session) {
       Authenticated(:final info) => info,
@@ -46,6 +50,43 @@ class SettingsScreen extends ConsumerWidget {
                 RadioListTile<ThemeMode>(
                   value: ThemeMode.dark,
                   title: Text('Dark'),
+                ),
+              ],
+            ),
+          ),
+          const Divider(),
+          const _SectionHeader('Connection'),
+          RadioGroup<TransportPreference>(
+            groupValue: transportPref,
+            onChanged: (pref) {
+              if (pref != null) {
+                ref.read(transportCoordinatorProvider).choose(pref);
+              }
+            },
+            child: const Column(
+              children: [
+                RadioListTile<TransportPreference>(
+                  value: TransportPreference.auto,
+                  title: Text('Automatic'),
+                  subtitle: Text(
+                    "Wi-Fi when you're on the switch's network, "
+                    'Bluetooth otherwise.',
+                  ),
+                ),
+                RadioListTile<TransportPreference>(
+                  value: TransportPreference.wifi,
+                  title: Text('Wi-Fi only'),
+                  subtitle: Text(
+                    "Always use the switch's Wi-Fi. Unlocks setup and updates.",
+                  ),
+                ),
+                RadioListTile<TransportPreference>(
+                  value: TransportPreference.bluetooth,
+                  title: Text('Bluetooth'),
+                  subtitle: Text(
+                    'Control over Bluetooth so your phone keeps its own '
+                    'network.',
+                  ),
                 ),
               ],
             ),
