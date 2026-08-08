@@ -206,6 +206,16 @@ class BleSessionController extends Notifier<BleSessionState> {
     });
   }
 
+  /// Re-request a full state snapshot now (pull-to-refresh / after a
+  /// reorder) and push it onto the stream.
+  Future<void> refreshState() async {
+    final client = _client;
+    final token = ref.read(tokenProvider);
+    if (client == null || token == null) return;
+    final map = await client.request(BleCommands.state(token));
+    _stateController.add(StateSnapshot.fromJson(map));
+  }
+
   Future<void> _rememberMesh(MasterBeacon beacon) async {
     try {
       final notifier = ref.read(masterRegistryProvider.notifier);
@@ -298,6 +308,26 @@ class BleControlTransport implements ControlTransport {
     await client.request(
       BleCommands.reorder(token: token, order: orderedIds.join(',')),
     );
+  }
+
+  @override
+  Future<void> renameExtension({required int slot, required String name}) async {
+    final (:client, :token) = _live;
+    await client
+        .request(BleCommands.renameExtension(token: token, slot: slot, name: name));
+  }
+
+  @override
+  Future<void> renameSwitch({required String id, required String name}) async {
+    final (:client, :token) = _live;
+    await client
+        .request(BleCommands.renameSwitch(token: token, id: id, name: name));
+  }
+
+  @override
+  Future<void> renameMaster(String name) async {
+    final (:client, :token) = _live;
+    await client.request(BleCommands.renameMaster(token: token, name: name));
   }
 
   @override

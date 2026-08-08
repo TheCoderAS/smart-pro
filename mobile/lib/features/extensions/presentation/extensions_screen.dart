@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/form_actions.dart';
+import '../../../core/widgets/wifi_guard.dart';
 import '../data/extension_repository.dart';
 import '../domain/extension_models.dart';
 
@@ -110,6 +113,9 @@ class ExtensionTile extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     return Card(
       child: ListTile(
+        // Keep the icon and the ⋮ menu vertically centred against the
+        // multi-line subtitle.
+        titleAlignment: ListTileTitleAlignment.center,
         leading: Icon(
           ext.online ? Icons.extension : Icons.extension_off_outlined,
           color: ext.online ? scheme.primary : scheme.onSurfaceVariant,
@@ -140,9 +146,11 @@ class ExtensionTile extends ConsumerWidget {
           onSelected: (v) async {
             switch (v) {
               case 'rename':
+                // Rename works on either transport (firmware v11.18.0).
                 await _rename(context, ref);
               case 'remove':
-                await _remove(context, ref);
+                // Unpairing is assignment — Wi-Fi-only (changelog §9).
+                if (requireWifi(context, ref)) await _remove(context, ref);
             }
           },
           itemBuilder: (context) => const [
@@ -160,23 +168,33 @@ class ExtensionTile extends ConsumerWidget {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Rename extension'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 32,
-          decoration: const InputDecoration(labelText: 'Name'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final value = controller.text.trim();
+            final canSave = value.isNotEmpty && value != ext.name;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLength: 32,
+                  decoration: const InputDecoration(labelText: 'Name'),
+                  onChanged: (_) => setState(() {}),
+                  onSubmitted: (_) {
+                    if (canSave) Navigator.of(dialogContext).pop(value);
+                  },
+                ),
+                const SizedBox(height: 8),
+                FormActions(
+                  canSave: canSave,
+                  onCancel: () => Navigator.of(dialogContext).pop(),
+                  onSave: () => Navigator.of(dialogContext).pop(value),
+                ),
+              ],
+            );
+          },
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
     controller.dispose();
@@ -184,8 +202,8 @@ class ExtensionTile extends ConsumerWidget {
     if (!context.mounted) return;
     await _guard(context, ref, () async {
       await ref
-          .read(extensionRepositoryProvider)
-          .rename(slot: ext.slot, name: name);
+          .read(activeControlProvider)
+          .renameExtension(slot: ext.slot, name: name);
     });
   }
 
@@ -194,23 +212,22 @@ class ExtensionTile extends ConsumerWidget {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Remove this extension?'),
-        content: const Text(
-          'Its switches disappear from every device. '
-          'This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Its switches disappear from every device. '
+              'This cannot be undone.',
             ),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
+            const SizedBox(height: 16),
+            FormActions(
+              saveLabel: 'Remove',
+              destructive: true,
+              onCancel: () => Navigator.of(dialogContext).pop(false),
+              onSave: () => Navigator.of(dialogContext).pop(true),
+            ),
+          ],
+        ),
       ),
     );
     if (!(confirmed ?? false)) return;
@@ -229,8 +246,11 @@ class ExtensionTile extends ConsumerWidget {
     try {
       await action();
       await ref.read(extensionsProvider.notifier).refresh();
-    } on ApiFailure catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    } on Exception catch (e) {
+      final msg = e is ApiFailure
+          ? e.describe()
+          : "Couldn't complete that — check the connection.";
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 }

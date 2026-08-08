@@ -44,6 +44,17 @@ class WifiControlTransport implements ControlTransport {
   Future<void> reorder(List<String> orderedIds) => _switch.reorder(orderedIds);
 
   @override
+  Future<void> renameExtension({required int slot, required String name}) =>
+      _ext.rename(slot: slot, name: name);
+
+  @override
+  Future<void> renameSwitch({required String id, required String name}) =>
+      _switch.rename(id: id, name: name);
+
+  @override
+  Future<void> renameMaster(String name) => _auth.renameMaster(name);
+
+  @override
   Future<List<String>> audit() async {
     try {
       final res = await _dio.get<dynamic>(Api.audit);

@@ -24,6 +24,9 @@ List<String> parseAuditBody(dynamic data) {
       .toList();
 }
 
+/// Firmware v11.19.0 writes audit strings for display ("Signed in",
+/// "Turned all switches off") — the app renders them as-is, no mapping
+/// or reformatting (changelog: Action required #7).
 String _line(dynamic e) {
   if (e is Map) {
     final what = e['what'];

@@ -65,6 +65,16 @@ class AuthRepository {
     }
   }
 
+  /// Renames the master (POST /api/master/rename, TOKEN). Wi-Fi-only —
+  /// BLE cannot rename (spec v2 §9).
+  Future<void> renameMaster(String name) async {
+    try {
+      await _dio.post<dynamic>(Api.masterRename, data: {'name': name});
+    } on DioException catch (e) {
+      throw e.apiFailure;
+    }
+  }
+
   /// Cheapest TOKEN-authed call — used to validate a restored token.
   /// Returns true when the token is accepted.
   Future<bool> validateToken() async {

@@ -2,14 +2,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:unisync/features/audit/data/audit_parse.dart';
 
 void main() {
-  test('BLE v2 shape: {events:[{t,what}]} → the what strings', () {
+  // Firmware v11.19.0 writes audit strings for display; the app renders
+  // them verbatim (changelog: "Render audit strings as-is").
+  test('BLE v2 shape {events:[{t,what}]} → the what strings, verbatim', () {
     final lines = parseAuditBody({
       'events': [
-        {'t': 3812, 'what': 'login ok'},
-        {'t': 4000, 'what': 'relay ext0_1 on'},
+        {'t': 3812, 'what': 'Signed in'},
+        {'t': 4000, 'what': 'Turned all switches off'},
       ],
     });
-    expect(lines, ['login ok', 'relay ext0_1 on']);
+    expect(lines, ['Signed in', 'Turned all switches off']);
   });
 
   test('plain JSON array of strings', () {

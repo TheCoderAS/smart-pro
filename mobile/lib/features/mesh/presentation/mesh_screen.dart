@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
@@ -379,33 +380,36 @@ class _Actions extends ConsumerWidget {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Change mesh password'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            PasswordField(
-              controller: oldController,
-              label: 'Current password',
-            ),
-            PasswordField(
-              controller: newController,
-              label: 'New password',
-              helper: 'At least 8 characters. Every master takes '
-                  'the change; every signed-in device must sign in '
-                  'again.',
-              helperMaxLines: 3,
-            ),
-          ],
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final canSave = newController.text.length >= 8 &&
+                oldController.text.isNotEmpty;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                PasswordField(
+                  controller: oldController,
+                  label: 'Current password',
+                ),
+                PasswordField(
+                  controller: newController,
+                  label: 'New password',
+                  helper: 'At least 8 characters. Every master takes '
+                      'the change; every signed-in device must sign in '
+                      'again.',
+                  helperMaxLines: 3,
+                ),
+                const SizedBox(height: 16),
+                FormActions(
+                  saveLabel: 'Change',
+                  canSave: canSave,
+                  onCancel: () => Navigator.of(dialogContext).pop(false),
+                  onSave: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Change'),
-          ),
-        ],
       ),
     );
     final old = oldController.text;
