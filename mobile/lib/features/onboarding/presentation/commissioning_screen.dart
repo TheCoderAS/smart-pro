@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
+import '../../../core/widgets/password_field.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
 
@@ -64,25 +65,18 @@ class _CommissioningScreenState extends ConsumerState<CommissioningScreen> {
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                   const SizedBox(height: 24),
-                  TextField(
+                  PasswordField(
                     controller: _password,
-                    obscureText: true,
                     enabled: !_busy,
-                    decoration: const InputDecoration(
-                      labelText: 'New password',
-                      helperText: 'At least 8 characters.',
-                    ),
+                    label: 'New password',
+                    helper: 'At least 8 characters.',
                   ),
                   const SizedBox(height: 12),
-                  TextField(
+                  PasswordField(
                     controller: _confirm,
-                    obscureText: true,
                     enabled: !_busy,
-                    decoration: InputDecoration(
-                      labelText: 'Repeat password',
-                      errorText: _error,
-                      errorMaxLines: 3,
-                    ),
+                    label: 'Repeat password',
+                    errorText: _error,
                   ),
                   const SizedBox(height: 24),
                   FilledButton(

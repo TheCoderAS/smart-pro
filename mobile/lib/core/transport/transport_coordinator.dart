@@ -60,6 +60,17 @@ class TransportCoordinator {
     }
   }
 
+  /// Manual reconnect (the dashboard refresh). Over BLE, re-scan and
+  /// re-open the client; over Wi-Fi, re-run reachability + selection.
+  Future<void> reconnect() async {
+    final kind = _ref.read(currentTransportProvider);
+    if (kind == TransportKind.ble) {
+      await _ref.read(bleSessionProvider.notifier).reconnect();
+    } else {
+      await reconcile();
+    }
+  }
+
   /// Explicit user choice from the status pill — persist and apply.
   Future<void> choose(TransportPreference pref) async {
     await _ref.read(transportPreferenceProvider.notifier).set(pref);

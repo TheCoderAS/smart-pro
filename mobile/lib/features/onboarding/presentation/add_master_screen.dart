@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../core/logging/log.dart';
+import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
 
@@ -80,16 +81,11 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-              TextField(
+              PasswordField(
                 controller: _password,
                 enabled: !_busy,
-                obscureText: true,
-                autocorrect: false,
-                decoration: InputDecoration(
-                  labelText: 'Wi-Fi password',
-                  errorText: _error,
-                  errorMaxLines: 3,
-                ),
+                label: 'Wi-Fi password',
+                errorText: _error,
               ),
               const SizedBox(height: 24),
               FilledButton(

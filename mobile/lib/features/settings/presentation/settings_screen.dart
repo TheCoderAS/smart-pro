@@ -7,6 +7,7 @@ import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
@@ -154,22 +155,16 @@ class SettingsScreen extends ConsumerWidget {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            PasswordField(
               controller: controller,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'New password',
-                helperText: 'At least 8 characters. Every token everywhere '
-                    'stops working ("sign out all devices").',
-                helperMaxLines: 3,
-              ),
+              label: 'New password',
+              helper: 'At least 8 characters. Every token everywhere '
+                  'stops working ("sign out all devices").',
+              helperMaxLines: 3,
             ),
-            TextField(
+            PasswordField(
               controller: confirmController,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'Repeat password',
-              ),
+              label: 'Repeat password',
             ),
           ],
         ),
