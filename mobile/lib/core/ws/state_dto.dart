@@ -20,7 +20,9 @@ abstract class StateSnapshot with _$StateSnapshot {
     @JsonKey(name: 'boot_complete') @Default(true) bool bootComplete,
     @JsonKey(name: 'scan_active') @Default(false) bool scanActive,
     @Default(<SwitchState>[]) List<SwitchState> switches,
-    @Default(<PeerState>[]) List<PeerState> peers,
+    @JsonKey(name: 'mesh_peers')
+    @Default(<PeerState>[])
+    List<PeerState> peers,
   }) = _StateSnapshot;
 
   factory StateSnapshot.fromJson(Map<String, dynamic> json) =>
@@ -29,14 +31,19 @@ abstract class StateSnapshot with _$StateSnapshot {
 
 /// One relay/switch as reported in the snapshot's switch array.
 /// `id` is the wire identifier used by POST /api/relay (e.g. "ext0_1").
+///
+/// Wire-key note: the firmware's state document names the boolean
+/// `state` and the channel `channel` (see master_v2 `build_state_json`).
+/// The POST /api/relay endpoint, however, takes the channel as `ch` —
+/// so we read `channel` here but send `ch` in [SwitchRepository].
 @freezed
 abstract class SwitchState with _$SwitchState {
   const factory SwitchState({
     @Default('') String id,
     @Default('') String name,
-    @Default(false) bool on,
-    /// Channel parameter for multi-channel switches (API §5 relay `ch`).
-    @Default(0) int ch,
+    @JsonKey(name: 'state') @Default(false) bool on,
+    /// Channel for multi-channel switches. Wire key is `channel`.
+    @JsonKey(name: 'channel') @Default(0) int ch,
     /// Whether the extension backing this switch is currently online.
     @Default(true) bool online,
   }) = _SwitchState;

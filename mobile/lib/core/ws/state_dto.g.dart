@@ -18,7 +18,7 @@ _StateSnapshot _$StateSnapshotFromJson(Map<String, dynamic> json) =>
               .toList() ??
           const <SwitchState>[],
       peers:
-          (json['peers'] as List<dynamic>?)
+          (json['mesh_peers'] as List<dynamic>?)
               ?.map((e) => PeerState.fromJson(e as Map<String, dynamic>))
               .toList() ??
           const <PeerState>[],
@@ -31,14 +31,14 @@ Map<String, dynamic> _$StateSnapshotToJson(_StateSnapshot instance) =>
       'boot_complete': instance.bootComplete,
       'scan_active': instance.scanActive,
       'switches': instance.switches,
-      'peers': instance.peers,
+      'mesh_peers': instance.peers,
     };
 
 _SwitchState _$SwitchStateFromJson(Map<String, dynamic> json) => _SwitchState(
   id: json['id'] as String? ?? '',
   name: json['name'] as String? ?? '',
-  on: json['on'] as bool? ?? false,
-  ch: (json['ch'] as num?)?.toInt() ?? 0,
+  on: json['state'] as bool? ?? false,
+  ch: (json['channel'] as num?)?.toInt() ?? 0,
   online: json['online'] as bool? ?? true,
 );
 
@@ -46,8 +46,8 @@ Map<String, dynamic> _$SwitchStateToJson(_SwitchState instance) =>
     <String, dynamic>{
       'id': instance.id,
       'name': instance.name,
-      'on': instance.on,
-      'ch': instance.ch,
+      'state': instance.on,
+      'channel': instance.ch,
       'online': instance.online,
     };
 
