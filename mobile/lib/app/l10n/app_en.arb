@@ -42,9 +42,20 @@
   "dashboardEmptyTitle": "No switches yet",
   "dashboardEmptyBody": "Snap an Extension onto the bus next to your Master and it will appear here.",
   "reconnecting": "Reconnecting",
+  "connected": "Connected",
   "switchOn": "On",
   "switchOff": "Off",
   "switchOffline": "Offline",
+  "onOfTotal": "{on} of {total} on",
+  "@onOfTotal": {
+    "placeholders": {
+      "on": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+  "allOn": "All on",
+  "allOff": "All off",
+  "meshBadge": "Mesh",
   "menuReorder": "Reorder switches",
   "menuExtensions": "Extensions",
   "menuMesh": "Mesh",

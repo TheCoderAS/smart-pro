@@ -220,6 +220,12 @@ abstract class AppLocalizations {
   /// **'Reconnecting'**
   String get reconnecting;
 
+  /// No description provided for @connected.
+  ///
+  /// In en, this message translates to:
+  /// **'Connected'**
+  String get connected;
+
   /// No description provided for @switchOn.
   ///
   /// In en, this message translates to:
@@ -237,6 +243,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Offline'**
   String get switchOffline;
+
+  /// No description provided for @onOfTotal.
+  ///
+  /// In en, this message translates to:
+  /// **'{on} of {total} on'**
+  String onOfTotal(int on, int total);
+
+  /// No description provided for @allOn.
+  ///
+  /// In en, this message translates to:
+  /// **'All on'**
+  String get allOn;
+
+  /// No description provided for @allOff.
+  ///
+  /// In en, this message translates to:
+  /// **'All off'**
+  String get allOff;
+
+  /// No description provided for @meshBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'Mesh'**
+  String get meshBadge;
 
   /// No description provided for @menuReorder.
   ///
