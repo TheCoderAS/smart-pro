@@ -180,9 +180,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get menuFirmware => 'Firmware';
 
   @override
-  String get menuAudit => 'Activity log';
-
-  @override
   String get menuSettings => 'Settings';
 
   @override

@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart' show ScanMode;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../features/audit/data/audit_parse.dart';
 import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/domain/firmware_models.dart';
 import '../api/dio_client.dart';
@@ -357,13 +356,6 @@ class BleControlTransport implements ControlTransport {
   Future<void> renameMaster(String name) async {
     final (:client, :token) = _live;
     await client.request(BleCommands.renameMaster(token: token, name: name));
-  }
-
-  @override
-  Future<List<String>> audit() async {
-    final (:client, :token) = _live;
-    final map = await client.request(BleCommands.audit(token));
-    return parseAuditBody(map);
   }
 
   @override

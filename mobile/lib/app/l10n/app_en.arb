@@ -78,7 +78,6 @@
   "menuExtensions": "Extensions",
   "menuMesh": "Mesh",
   "menuFirmware": "Firmware",
-  "menuAudit": "Activity log",
   "menuSettings": "Settings",
   "menuKillAll": "Turn everything off",
   "killAllTitle": "Turn everything off?",
