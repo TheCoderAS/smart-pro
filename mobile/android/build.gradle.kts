@@ -15,13 +15,13 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
-subprojects {
-    project.evaluationDependsOn(":app")
-}
-
 // Some plugin subprojects pin stale compileSdks (reactive_ble_mobile
 // compiles at 33) while modern androidx artifacts require 34+. Force
 // every Android subproject up to the app's compileSdk.
+// NOTE: must be registered BEFORE the evaluationDependsOn(":app")
+// block below — that block force-evaluates :app (and transitively all
+// plugin subprojects) during root configuration, after which
+// afterEvaluate can no longer be scheduled.
 subprojects {
     afterEvaluate {
         extensions.findByName("android")?.let { ext ->
@@ -32,6 +32,11 @@ subprojects {
         }
     }
 }
+
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
 
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
