@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter_reactive_ble/flutter_reactive_ble.dart' show ScanMode;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/audit/data/audit_parse.dart';
@@ -60,16 +61,31 @@ class BleSessionController extends Notifier<BleSessionState> {
   int? _meshId;
   String? _connectedDeviceId;
   bool _active = false;
+  // Whether the connected master reports peers. No peers ⇒ nothing to
+  // roam to ⇒ the roam loop skips scanning entirely, so a single-master
+  // system never runs the radio-hungry background scan.
+  bool _hasPeers = false;
 
   // Serialises scans: flutter_reactive_ble allows only one active scan,
   // so a manual reconnect and the roam loop must not scan at once.
   Future<void> _scanGate = Future<void>.value();
 
-  Future<List<MasterBeacon>> _scan() {
-    final result =
-        _scanGate.then((_) => ref.read(bleScannerProvider).collect(meshId: _meshId));
+  Future<List<MasterBeacon>> _scan({
+    Duration window = const Duration(seconds: 4),
+    ScanMode mode = ScanMode.lowLatency,
+  }) {
+    final result = _scanGate.then((_) => ref
+        .read(bleScannerProvider)
+        .collect(meshId: _meshId, window: window, mode: mode));
     _scanGate = result.then((_) {}, onError: (_) {});
     return result;
+  }
+
+  /// Pushes a snapshot to consumers and tracks whether roaming is even
+  /// worth scanning for.
+  void _emit(StateSnapshot snap) {
+    _hasPeers = snap.peers.isNotEmpty;
+    _stateController.add(snap);
   }
 
   @override
@@ -162,7 +178,7 @@ class BleSessionController extends Notifier<BleSessionState> {
     await client.connect();
     _client = client;
     _connectedDeviceId = deviceId;
-    _stateSub = client.stateStream.listen(_stateController.add);
+    _stateSub = client.stateStream.listen(_emit);
     state = state.copyWith(
       status: BleSessionStatus.connected,
       masterName: name,
@@ -173,7 +189,7 @@ class BleSessionController extends Notifier<BleSessionState> {
     if (token != null) {
       try {
         final map = await client.request(BleCommands.state(token));
-        _stateController.add(StateSnapshot.fromJson(map));
+        _emit(StateSnapshot.fromJson(map));
       } on Exception catch (e) {
         log.w('initial ble state fetch failed: $e');
       }
@@ -183,9 +199,22 @@ class BleSessionController extends Notifier<BleSessionState> {
   void _startRoamLoop() {
     _roamTimer?.cancel();
     _roamTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
-      if (!_active || _meshId == null || _connectedDeviceId == null) return;
+      // Only scan when roaming is actually possible: an active mesh
+      // session with peers to roam to. A single-master system never
+      // scans in the background — that was the "app feels slow" cause.
+      if (!_active ||
+          _meshId == null ||
+          _connectedDeviceId == null ||
+          !_hasPeers) {
+        return;
+      }
       try {
-        final beacons = await _scan();
+        // Balanced (not lowLatency) so background roaming doesn't
+        // saturate the radio the live connection is sharing.
+        final beacons = await _scan(
+          window: const Duration(seconds: 3),
+          mode: ScanMode.balanced,
+        );
         final now = DateTime.now().millisecondsSinceEpoch;
         for (final b in beacons) {
           _roam.observe(b, now);
@@ -213,7 +242,7 @@ class BleSessionController extends Notifier<BleSessionState> {
     final token = ref.read(tokenProvider);
     if (client == null || token == null) return;
     final map = await client.request(BleCommands.state(token));
-    _stateController.add(StateSnapshot.fromJson(map));
+    _emit(StateSnapshot.fromJson(map));
   }
 
   Future<void> _rememberMesh(MasterBeacon beacon) async {
