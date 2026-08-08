@@ -222,8 +222,7 @@ class SettingsScreen extends ConsumerWidget {
   }
 
   Future<void> _renameMaster(BuildContext context, WidgetRef ref) async {
-    // Renaming is a Wi-Fi-only flow (BLE spec v2 §9).
-    if (!requireWifi(context, ref)) return;
+    // Rename works on either transport (firmware v11.18.0).
     final current = switch (ref.read(sessionProvider).value) {
       Authenticated(:final info) => info,
       _ => null,
@@ -265,10 +264,13 @@ class SettingsScreen extends ConsumerWidget {
     if (!context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await ref.read(authRepositoryProvider).renameMaster(name);
+      await ref.read(activeControlProvider).renameMaster(name);
       messenger.showSnackBar(const SnackBar(content: Text('Master renamed.')));
-    } on ApiFailure catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    } on Exception catch (e) {
+      final msg = e is ApiFailure
+          ? e.describe()
+          : "Couldn't rename — check the connection.";
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 

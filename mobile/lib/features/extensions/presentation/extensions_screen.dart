@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../data/extension_repository.dart';
@@ -143,13 +144,13 @@ class ExtensionTile extends ConsumerWidget {
         isThreeLine: true,
         trailing: PopupMenuButton<String>(
           onSelected: (v) async {
-            // Renaming and unpairing are Wi-Fi-only (BLE spec v2 §9).
-            if (!requireWifi(context, ref)) return;
             switch (v) {
               case 'rename':
+                // Rename works on either transport (firmware v11.18.0).
                 await _rename(context, ref);
               case 'remove':
-                await _remove(context, ref);
+                // Unpairing is assignment — Wi-Fi-only (changelog §9).
+                if (requireWifi(context, ref)) await _remove(context, ref);
             }
           },
           itemBuilder: (context) => const [
@@ -201,8 +202,8 @@ class ExtensionTile extends ConsumerWidget {
     if (!context.mounted) return;
     await _guard(context, ref, () async {
       await ref
-          .read(extensionRepositoryProvider)
-          .rename(slot: ext.slot, name: name);
+          .read(activeControlProvider)
+          .renameExtension(slot: ext.slot, name: name);
     });
   }
 
@@ -245,8 +246,11 @@ class ExtensionTile extends ConsumerWidget {
     try {
       await action();
       await ref.read(extensionsProvider.notifier).refresh();
-    } on ApiFailure catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    } on Exception catch (e) {
+      final msg = e is ApiFailure
+          ? e.describe()
+          : "Couldn't complete that — check the connection.";
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 }

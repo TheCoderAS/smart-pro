@@ -311,6 +311,26 @@ class BleControlTransport implements ControlTransport {
   }
 
   @override
+  Future<void> renameExtension({required int slot, required String name}) async {
+    final (:client, :token) = _live;
+    await client
+        .request(BleCommands.renameExtension(token: token, slot: slot, name: name));
+  }
+
+  @override
+  Future<void> renameSwitch({required String id, required String name}) async {
+    final (:client, :token) = _live;
+    await client
+        .request(BleCommands.renameSwitch(token: token, id: id, name: name));
+  }
+
+  @override
+  Future<void> renameMaster(String name) async {
+    final (:client, :token) = _live;
+    await client.request(BleCommands.renameMaster(token: token, name: name));
+  }
+
+  @override
   Future<List<String>> audit() async {
     final (:client, :token) = _live;
     final map = await client.request(BleCommands.audit(token));

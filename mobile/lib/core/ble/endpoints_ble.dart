@@ -66,6 +66,39 @@ abstract final class BleCommands {
     'c': 'fwlist',
   };
 
+  /// Renames — added over BLE in firmware v11.18.0. All reply
+  /// `{"ok":true}` (or `{"err":…}`), persist to NVS, and push state.
+  static Map<String, Object?> renameExtension({
+    required String token,
+    required int slot,
+    required String name,
+  }) => {
+    't': token,
+    'c': 'rename_ext',
+    'slot': slot,
+    'name': name,
+  };
+
+  static Map<String, Object?> renameSwitch({
+    required String token,
+    required String id,
+    required String name,
+  }) => {
+    't': token,
+    'c': 'rename_sw',
+    'id': id,
+    'name': name,
+  };
+
+  static Map<String, Object?> renameMaster({
+    required String token,
+    required String name,
+  }) => {
+    't': token,
+    'c': 'rename_master',
+    'name': name,
+  };
+
   static Map<String, Object?> mesh(String token) => {
     't': token,
     'c': 'mesh',

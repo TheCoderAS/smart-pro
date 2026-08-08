@@ -36,6 +36,13 @@ abstract interface class ControlTransport {
   /// Persist a new switch order (comma-joined ids on the wire).
   Future<void> reorder(List<String> orderedIds);
 
+  /// Renames — work on either transport since firmware v11.18.0
+  /// (`rename_ext` / `rename_sw` / `rename_master`). Assignment
+  /// (assign/reject/replace/remove) is still Wi-Fi-only.
+  Future<void> renameExtension({required int slot, required String name});
+  Future<void> renameSwitch({required String id, required String name});
+  Future<void> renameMaster(String name);
+
   /// The activity log as display lines.
   Future<List<String>> audit();
 

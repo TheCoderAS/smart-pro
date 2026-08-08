@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/ws/state_dto.dart';
-import '../data/switch_repository.dart';
 
 /// Long-press affordance on a switch tile. The new name lands via
 /// POST /api/switch/rename; the next snapshot repaints every consumer.
@@ -32,8 +32,8 @@ Future<void> showRenameSwitchSheet(
             Navigator.of(sheetContext).pop();
             try {
               await ref
-                  .read(switchRepositoryProvider)
-                  .rename(id: sw.id, name: name);
+                  .read(activeControlProvider)
+                  .renameSwitch(id: sw.id, name: name);
             } on Exception {
               messenger.showSnackBar(
                 const SnackBar(

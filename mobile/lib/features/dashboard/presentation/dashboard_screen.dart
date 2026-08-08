@@ -708,12 +708,8 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: online ? () => _toggle(on) : null,
-            onLongPress: () {
-              // Rename is a Wi-Fi-only flow (BLE spec v2 §9).
-              if (requireWifi(context, ref)) {
-                showRenameSwitchSheet(context, ref, sw);
-              }
-            },
+            // Rename works on either transport (firmware v11.18.0).
+            onLongPress: () => showRenameSwitchSheet(context, ref, sw),
             onTapDown: online ? (_) => setState(() => _pressed = true) : null,
             onTapUp: online ? (_) => setState(() => _pressed = false) : null,
             onTapCancel: () => setState(() => _pressed = false),
