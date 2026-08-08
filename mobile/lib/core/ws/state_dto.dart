@@ -16,6 +16,7 @@ part 'state_dto.g.dart';
 abstract class StateSnapshot with _$StateSnapshot {
   const factory StateSnapshot({
     @JsonKey(name: 'master_name') @Default('') String masterName,
+    @JsonKey(name: 'self_uid') @Default('') String selfUid,
     @Default(0) int uptime,
     @JsonKey(name: 'boot_complete') @Default(true) bool bootComplete,
     @JsonKey(name: 'scan_active') @Default(false) bool scanActive,

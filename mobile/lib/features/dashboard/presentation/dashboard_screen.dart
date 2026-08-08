@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../app/theme.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
@@ -42,10 +43,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final transport = ref.watch(currentTransportProvider);
 
     // Every snapshot is authoritative (API §4) — clear optimistic
-    // overrides the moment one lands, confirmed or contradicted.
+    // overrides the moment one lands, confirmed or contradicted. Also
+    // record the master (uid + name) so the BLE cold-start path can find
+    // it later even if the user only ever signed in (never commissioned).
     ref.listen(activeStateProvider, (prev, next) {
-      if (next.hasValue) {
+      final snap = next.value;
+      if (snap != null) {
         ref.read(switchOverridesProvider.notifier).clearAll();
+        ref.read(masterRegistryProvider.notifier).ensure(
+              uid: snap.selfUid,
+              name: snap.masterName,
+            );
       }
     });
 
@@ -116,13 +124,18 @@ class _DashboardHeader extends ConsumerWidget {
 
     return SliverAppBar(
       pinned: true,
-      expandedHeight: 172,
+      expandedHeight: 200,
       leading: IconButton(
         tooltip: l10n.yourSwitches,
         icon: const Icon(Icons.grid_view_rounded),
         onPressed: () => showMasterSwitcher(context, ref),
       ),
       actions: [
+        IconButton(
+          tooltip: l10n.reconnect,
+          icon: const Icon(Icons.refresh_rounded),
+          onPressed: () => ref.read(transportCoordinatorProvider).reconcile(),
+        ),
         _OverflowMenu(),
         const SizedBox(width: 4),
       ],
@@ -146,7 +159,10 @@ class _DashboardHeader extends ConsumerWidget {
           ),
           child: SafeArea(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 52),
+              // Top clears the pinned toolbar (leading/actions) so the
+              // status pill never sits under the grid/menu icons; bottom
+              // keeps the title off the content below.
+              padding: const EdgeInsets.fromLTRB(20, kToolbarHeight + 4, 20, 16),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,

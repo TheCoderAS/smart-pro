@@ -15,7 +15,7 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$StateSnapshot {
 
-@JsonKey(name: 'master_name') String get masterName; int get uptime;@JsonKey(name: 'boot_complete') bool get bootComplete;@JsonKey(name: 'scan_active') bool get scanActive; List<SwitchState> get switches;@JsonKey(name: 'mesh_peers') List<PeerState> get peers;
+@JsonKey(name: 'master_name') String get masterName;@JsonKey(name: 'self_uid') String get selfUid; int get uptime;@JsonKey(name: 'boot_complete') bool get bootComplete;@JsonKey(name: 'scan_active') bool get scanActive; List<SwitchState> get switches;@JsonKey(name: 'mesh_peers') List<PeerState> get peers;
 /// Create a copy of StateSnapshot
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -28,16 +28,16 @@ $StateSnapshotCopyWith<StateSnapshot> get copyWith => _$StateSnapshotCopyWithImp
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is StateSnapshot&&(identical(other.masterName, masterName) || other.masterName == masterName)&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.bootComplete, bootComplete) || other.bootComplete == bootComplete)&&(identical(other.scanActive, scanActive) || other.scanActive == scanActive)&&const DeepCollectionEquality().equals(other.switches, switches)&&const DeepCollectionEquality().equals(other.peers, peers));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is StateSnapshot&&(identical(other.masterName, masterName) || other.masterName == masterName)&&(identical(other.selfUid, selfUid) || other.selfUid == selfUid)&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.bootComplete, bootComplete) || other.bootComplete == bootComplete)&&(identical(other.scanActive, scanActive) || other.scanActive == scanActive)&&const DeepCollectionEquality().equals(other.switches, switches)&&const DeepCollectionEquality().equals(other.peers, peers));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,masterName,uptime,bootComplete,scanActive,const DeepCollectionEquality().hash(switches),const DeepCollectionEquality().hash(peers));
+int get hashCode => Object.hash(runtimeType,masterName,selfUid,uptime,bootComplete,scanActive,const DeepCollectionEquality().hash(switches),const DeepCollectionEquality().hash(peers));
 
 @override
 String toString() {
-  return 'StateSnapshot(masterName: $masterName, uptime: $uptime, bootComplete: $bootComplete, scanActive: $scanActive, switches: $switches, peers: $peers)';
+  return 'StateSnapshot(masterName: $masterName, selfUid: $selfUid, uptime: $uptime, bootComplete: $bootComplete, scanActive: $scanActive, switches: $switches, peers: $peers)';
 }
 
 
@@ -48,7 +48,7 @@ abstract mixin class $StateSnapshotCopyWith<$Res>  {
   factory $StateSnapshotCopyWith(StateSnapshot value, $Res Function(StateSnapshot) _then) = _$StateSnapshotCopyWithImpl;
 @useResult
 $Res call({
-@JsonKey(name: 'master_name') String masterName, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches,@JsonKey(name: 'mesh_peers') List<PeerState> peers
+@JsonKey(name: 'master_name') String masterName,@JsonKey(name: 'self_uid') String selfUid, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches,@JsonKey(name: 'mesh_peers') List<PeerState> peers
 });
 
 
@@ -65,9 +65,10 @@ class _$StateSnapshotCopyWithImpl<$Res>
 
 /// Create a copy of StateSnapshot
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? masterName = null,Object? uptime = null,Object? bootComplete = null,Object? scanActive = null,Object? switches = null,Object? peers = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? masterName = null,Object? selfUid = null,Object? uptime = null,Object? bootComplete = null,Object? scanActive = null,Object? switches = null,Object? peers = null,}) {
   return _then(_self.copyWith(
 masterName: null == masterName ? _self.masterName : masterName // ignore: cast_nullable_to_non_nullable
+as String,selfUid: null == selfUid ? _self.selfUid : selfUid // ignore: cast_nullable_to_non_nullable
 as String,uptime: null == uptime ? _self.uptime : uptime // ignore: cast_nullable_to_non_nullable
 as int,bootComplete: null == bootComplete ? _self.bootComplete : bootComplete // ignore: cast_nullable_to_non_nullable
 as bool,scanActive: null == scanActive ? _self.scanActive : scanActive // ignore: cast_nullable_to_non_nullable
@@ -158,10 +159,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName, @JsonKey(name: 'self_uid')  String selfUid,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _StateSnapshot() when $default != null:
-return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
+return $default(_that.masterName,_that.selfUid,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
   return orElse();
 
 }
@@ -179,10 +180,10 @@ return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActiv
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function(@JsonKey(name: 'master_name')  String masterName, @JsonKey(name: 'self_uid')  String selfUid,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)  $default,) {final _that = this;
 switch (_that) {
 case _StateSnapshot():
-return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
+return $default(_that.masterName,_that.selfUid,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -199,10 +200,10 @@ return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActiv
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'master_name')  String masterName,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function(@JsonKey(name: 'master_name')  String masterName, @JsonKey(name: 'self_uid')  String selfUid,  int uptime, @JsonKey(name: 'boot_complete')  bool bootComplete, @JsonKey(name: 'scan_active')  bool scanActive,  List<SwitchState> switches, @JsonKey(name: 'mesh_peers')  List<PeerState> peers)?  $default,) {final _that = this;
 switch (_that) {
 case _StateSnapshot() when $default != null:
-return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
+return $default(_that.masterName,_that.selfUid,_that.uptime,_that.bootComplete,_that.scanActive,_that.switches,_that.peers);case _:
   return null;
 
 }
@@ -214,10 +215,11 @@ return $default(_that.masterName,_that.uptime,_that.bootComplete,_that.scanActiv
 @JsonSerializable()
 
 class _StateSnapshot implements StateSnapshot {
-  const _StateSnapshot({@JsonKey(name: 'master_name') this.masterName = '', this.uptime = 0, @JsonKey(name: 'boot_complete') this.bootComplete = true, @JsonKey(name: 'scan_active') this.scanActive = false, final  List<SwitchState> switches = const <SwitchState>[], @JsonKey(name: 'mesh_peers') final  List<PeerState> peers = const <PeerState>[]}): _switches = switches,_peers = peers;
+  const _StateSnapshot({@JsonKey(name: 'master_name') this.masterName = '', @JsonKey(name: 'self_uid') this.selfUid = '', this.uptime = 0, @JsonKey(name: 'boot_complete') this.bootComplete = true, @JsonKey(name: 'scan_active') this.scanActive = false, final  List<SwitchState> switches = const <SwitchState>[], @JsonKey(name: 'mesh_peers') final  List<PeerState> peers = const <PeerState>[]}): _switches = switches,_peers = peers;
   factory _StateSnapshot.fromJson(Map<String, dynamic> json) => _$StateSnapshotFromJson(json);
 
 @override@JsonKey(name: 'master_name') final  String masterName;
+@override@JsonKey(name: 'self_uid') final  String selfUid;
 @override@JsonKey() final  int uptime;
 @override@JsonKey(name: 'boot_complete') final  bool bootComplete;
 @override@JsonKey(name: 'scan_active') final  bool scanActive;
@@ -249,16 +251,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _StateSnapshot&&(identical(other.masterName, masterName) || other.masterName == masterName)&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.bootComplete, bootComplete) || other.bootComplete == bootComplete)&&(identical(other.scanActive, scanActive) || other.scanActive == scanActive)&&const DeepCollectionEquality().equals(other._switches, _switches)&&const DeepCollectionEquality().equals(other._peers, _peers));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _StateSnapshot&&(identical(other.masterName, masterName) || other.masterName == masterName)&&(identical(other.selfUid, selfUid) || other.selfUid == selfUid)&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.bootComplete, bootComplete) || other.bootComplete == bootComplete)&&(identical(other.scanActive, scanActive) || other.scanActive == scanActive)&&const DeepCollectionEquality().equals(other._switches, _switches)&&const DeepCollectionEquality().equals(other._peers, _peers));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,masterName,uptime,bootComplete,scanActive,const DeepCollectionEquality().hash(_switches),const DeepCollectionEquality().hash(_peers));
+int get hashCode => Object.hash(runtimeType,masterName,selfUid,uptime,bootComplete,scanActive,const DeepCollectionEquality().hash(_switches),const DeepCollectionEquality().hash(_peers));
 
 @override
 String toString() {
-  return 'StateSnapshot(masterName: $masterName, uptime: $uptime, bootComplete: $bootComplete, scanActive: $scanActive, switches: $switches, peers: $peers)';
+  return 'StateSnapshot(masterName: $masterName, selfUid: $selfUid, uptime: $uptime, bootComplete: $bootComplete, scanActive: $scanActive, switches: $switches, peers: $peers)';
 }
 
 
@@ -269,7 +271,7 @@ abstract mixin class _$StateSnapshotCopyWith<$Res> implements $StateSnapshotCopy
   factory _$StateSnapshotCopyWith(_StateSnapshot value, $Res Function(_StateSnapshot) _then) = __$StateSnapshotCopyWithImpl;
 @override @useResult
 $Res call({
-@JsonKey(name: 'master_name') String masterName, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches,@JsonKey(name: 'mesh_peers') List<PeerState> peers
+@JsonKey(name: 'master_name') String masterName,@JsonKey(name: 'self_uid') String selfUid, int uptime,@JsonKey(name: 'boot_complete') bool bootComplete,@JsonKey(name: 'scan_active') bool scanActive, List<SwitchState> switches,@JsonKey(name: 'mesh_peers') List<PeerState> peers
 });
 
 
@@ -286,9 +288,10 @@ class __$StateSnapshotCopyWithImpl<$Res>
 
 /// Create a copy of StateSnapshot
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? masterName = null,Object? uptime = null,Object? bootComplete = null,Object? scanActive = null,Object? switches = null,Object? peers = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? masterName = null,Object? selfUid = null,Object? uptime = null,Object? bootComplete = null,Object? scanActive = null,Object? switches = null,Object? peers = null,}) {
   return _then(_StateSnapshot(
 masterName: null == masterName ? _self.masterName : masterName // ignore: cast_nullable_to_non_nullable
+as String,selfUid: null == selfUid ? _self.selfUid : selfUid // ignore: cast_nullable_to_non_nullable
 as String,uptime: null == uptime ? _self.uptime : uptime // ignore: cast_nullable_to_non_nullable
 as int,bootComplete: null == bootComplete ? _self.bootComplete : bootComplete // ignore: cast_nullable_to_non_nullable
 as bool,scanActive: null == scanActive ? _self.scanActive : scanActive // ignore: cast_nullable_to_non_nullable

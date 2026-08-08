@@ -244,6 +244,12 @@ abstract class AppLocalizations {
   /// **'Reconnecting'**
   String get reconnecting;
 
+  /// No description provided for @reconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnect'**
+  String get reconnect;
+
   /// No description provided for @connected.
   ///
   /// In en, this message translates to:

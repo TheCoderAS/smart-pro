@@ -72,6 +72,32 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     state = AsyncValue.data(masters);
   }
 
+  /// Records a master seen on a live connection (any transport),
+  /// keeping any existing `ssid`/`meshId` and only refreshing the name.
+  /// Called from the dashboard on every state snapshot so a master the
+  /// user signed into — not just one commissioned from scratch — is
+  /// known to the BLE cold-start path. No-op when nothing changes.
+  Future<void> ensure({required String uid, String? name}) async {
+    if (uid.isEmpty) return;
+    final current = [...state.value ?? await _load()];
+    final i = current.indexWhere((m) => m.uid == uid);
+    if (i >= 0) {
+      final m = current[i];
+      if (name == null || name.isEmpty || name == m.name) return;
+      current[i] = SavedMaster(
+        uid: m.uid,
+        name: name,
+        ssid: m.ssid,
+        meshId: m.meshId,
+      );
+    } else {
+      current.add(
+        SavedMaster(uid: uid, name: (name?.isNotEmpty ?? false) ? name! : 'Master'),
+      );
+    }
+    await _persist(current);
+  }
+
   /// Adds or updates (by uid).
   Future<void> upsert(SavedMaster master) async {
     final current = [...state.value ?? await _load()];

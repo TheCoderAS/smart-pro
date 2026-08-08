@@ -96,6 +96,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get reconnecting => 'Reconnecting';
 
   @override
+  String get reconnect => 'Reconnect';
+
+  @override
   String get connected => 'Connected';
 
   @override
