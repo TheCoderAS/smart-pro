@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
 import '../application/session.dart';
@@ -36,6 +37,10 @@ class _UnreachableScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context)!;
+    // Only a paired master can be reached over Bluetooth (it needs the
+    // saved token) — hide the option otherwise.
+    final hasPairedMaster =
+        (ref.watch(masterRegistryProvider).value ?? const []).isNotEmpty;
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -75,6 +80,26 @@ class _UnreachableScreen extends ConsumerWidget {
                   icon: const Icon(Icons.add),
                   label: Text(l10n.addASwitch),
                 ),
+                if (hasPairedMaster) ...[
+                  const SizedBox(height: 8),
+                  // Control the master over Bluetooth without joining its
+                  // Wi-Fi — uses the saved token, no re-login.
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      final ok = await ref
+                          .read(sessionProvider.notifier)
+                          .connectOverBle();
+                      if (!ok) {
+                        messenger.showSnackBar(
+                          SnackBar(content: Text(l10n.bleNoSavedSession)),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.bluetooth_rounded),
+                    label: Text(l10n.controlOverBluetooth),
+                  ),
+                ],
                 const SizedBox(height: 8),
                 // A user who lost the password can't join the master's
                 // Wi-Fi (the password IS the Wi-Fi key), so they land

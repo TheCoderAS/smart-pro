@@ -1,9 +1,13 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/dio_client.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/logging/log.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
+import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../data/auth_repository.dart';
 import '../domain/models.dart';
 
@@ -65,6 +69,18 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     try {
       info = await _repo.info();
     } on Unreachable {
+      // Off the master's Wi-Fi. If the user prefers Bluetooth and we
+      // have a saved token, open the dashboard over BLE instead of
+      // dead-ending on the unreachable screen. Guarded so a plain
+      // unreachable bootstrap (and the tests) still fall through.
+      try {
+        if (await _blePreferred()) {
+          final ble = await _bleSession();
+          if (ble != null) return ble;
+        }
+      } on Object catch (e) {
+        log.w('ble auto-start skipped: $e');
+      }
       return const MasterUnreachable();
     }
 
@@ -127,6 +143,68 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
         return NeedsLogin(info, failure: e);
       }
     });
+  }
+
+  /// Explicit "Control over Bluetooth" from the unreachable screen.
+  /// Enters the dashboard over BLE using a saved token. Returns false
+  /// (leaving the current state untouched) when no saved token exists —
+  /// the UI then tells the user to pair over Wi-Fi once.
+  Future<bool> connectOverBle() async {
+    try {
+      final ble = await _bleSession();
+      if (ble == null) return false;
+      state = AsyncValue.data(ble);
+      return true;
+    } on Object catch (e) {
+      log.w('connectOverBle failed: $e');
+      return false;
+    }
+  }
+
+  /// Sets up a Bluetooth-carried session from a saved token and forces
+  /// the transport preference to Bluetooth, so the dashboard's reconcile
+  /// activates BLE. The token is valid on any master in the mesh with no
+  /// re-login (BLE spec §Auth). Returns null when there is no saved
+  /// token to use.
+  Future<Authenticated?> _bleSession() async {
+    final cand = await _bleCandidate();
+    if (cand == null) return null;
+    ref.read(tokenProvider.notifier).set(cand.token);
+    await ref
+        .read(transportPreferenceProvider.notifier)
+        .set(TransportPreference.bluetooth);
+    // fw is unknown until a BLE state push arrives; uid comes from the
+    // saved registry.
+    return Authenticated(
+      DeviceInfo(uptime: 0, freeHeap: 0, uid: cand.uid, fw: '—', auth: true),
+      mesh: false,
+    );
+  }
+
+  /// A saved master we can drive over Bluetooth — one with a stored
+  /// token, preferring the last-used master. Null when nothing is
+  /// paired or no token is stored.
+  Future<({String uid, int? meshId, String token})?> _bleCandidate() async {
+    final masters = await ref.read(masterRegistryProvider.future);
+    if (masters.isEmpty) return null;
+    final lastUid = await ref.read(masterRegistryProvider.notifier).lastUsed();
+    final ordered = [
+      ...masters.where((m) => m.uid == lastUid),
+      ...masters.where((m) => m.uid != lastUid),
+    ];
+    for (final m in ordered) {
+      final token = await _store.readToken(m.uid);
+      if (token != null) {
+        return (uid: m.uid, meshId: m.meshId, token: token);
+      }
+    }
+    return null;
+  }
+
+  Future<bool> _blePreferred() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(TransportPreferenceNotifier.key) ==
+        TransportPreference.bluetooth.name;
   }
 
   /// Local sign-out (API §2: "does nothing server side; discard the

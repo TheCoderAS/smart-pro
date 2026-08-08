@@ -28,6 +28,20 @@ class AppLocalizationsEn extends AppLocalizations {
   String get addASwitch => 'Add a switch';
 
   @override
+  String get controlOverBluetooth => 'Control over Bluetooth';
+
+  @override
+  String get bleNoSavedSession =>
+      'No saved Bluetooth sign-in yet. Connect over Wi-Fi once to pair this phone.';
+
+  @override
+  String get bleTroubleTitle => 'Can’t reach it over Bluetooth';
+
+  @override
+  String get bleTroubleBody =>
+      'Move closer to the switch and make sure Bluetooth is on.';
+
+  @override
   String get forgotPasswordRecover => 'Forgot the password? Recover it';
 
   @override

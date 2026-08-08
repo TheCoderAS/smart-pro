@@ -52,6 +52,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final snap = snapshot.value;
     final switches = snap?.switches ?? const <SwitchState>[];
 
+    // Over BLE, a failed scan/connect would otherwise spin forever —
+    // surface it with a retry instead.
+    final bleFailed = transport == TransportKind.ble &&
+        ref.watch(bleSessionProvider).status == BleSessionStatus.failed;
+
     return Scaffold(
       body: CustomScrollView(
         slivers: [
@@ -60,7 +65,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             status: status,
             transport: transport,
           ),
-          if (snapshot.isLoading && snap == null)
+          if (snap == null && bleFailed)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: _BleTrouble(),
+            )
+          else if (snapshot.isLoading && snap == null)
             const SliverFillRemaining(
               hasScrollBody: false,
               child: Center(child: CircularProgressIndicator()),
@@ -607,6 +617,49 @@ class _QuickButton extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown when the BLE transport is active but the session failed to
+/// find/connect to a master — offers a retry and a switch to Wi-Fi.
+class _BleTrouble extends ConsumerWidget {
+  const _BleTrouble();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context)!;
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.bluetooth_disabled_rounded,
+                size: 44, color: scheme.onSurfaceVariant),
+            const SizedBox(height: 16),
+            Text(l10n.bleTroubleTitle,
+                style: Theme.of(context).textTheme.titleLarge,
+                textAlign: TextAlign.center),
+            const SizedBox(height: 8),
+            Text(
+              l10n.bleTroubleBody,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: () =>
+                  ref.read(transportCoordinatorProvider).reconcile(),
+              icon: const Icon(Icons.refresh_rounded),
+              label: Text(l10n.tryAgain),
+            ),
+          ],
         ),
       ),
     );

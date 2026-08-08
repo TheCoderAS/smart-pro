@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/core/api/dio_client.dart';
 import 'package:unisync/core/api/failure.dart';
 import 'package:unisync/core/storage/secure_store.dart';
@@ -25,10 +28,15 @@ void main() {
   late MockSecureStore store;
 
   setUp(() {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    // Default: no persisted prefs (no masters, no transport preference)
+    // so the BLE cold-start paths stay dormant unless a test seeds them.
+    SharedPreferences.setMockInitialValues({});
     repo = MockAuthRepository();
     store = MockSecureStore();
     when(() => store.writeToken(any(), any())).thenAnswer((_) async {});
     when(() => store.deleteToken(any())).thenAnswer((_) async {});
+    when(() => store.readToken(any())).thenAnswer((_) async => null);
     when(() => repo.logout()).thenAnswer((_) async {});
   });
 
@@ -189,5 +197,66 @@ void main() {
     expect(c.read(sessionProvider).value, isA<NeedsLogin>());
     expect(c.read(tokenProvider), isNull);
     verify(() => store.deleteToken('C5F77720')).called(1);
+  });
+
+  // ---- Cold-start over Bluetooth (unreachable-screen entry) ----
+
+  void seedPairedMaster({String? preference}) {
+    final values = <String, Object>{
+      'masters': jsonEncode([
+        {'uid': 'C5F77720', 'name': 'Living Room', 'meshId': 4660},
+      ]),
+    };
+    if (preference != null) values['transport.preference'] = preference;
+    SharedPreferences.setMockInitialValues(values);
+  }
+
+  test('connectOverBle with a saved token → Authenticated over BLE', () async {
+    when(() => repo.info()).thenThrow(const Unreachable());
+    seedPairedMaster();
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => 'cafebabe');
+    final c = makeContainer();
+    expect(await bootstrap(c), isA<MasterUnreachable>());
+
+    final ok = await c.read(sessionProvider.notifier).connectOverBle();
+
+    expect(ok, isTrue);
+    expect(c.read(sessionProvider).value, isA<Authenticated>());
+    expect(c.read(tokenProvider), 'cafebabe');
+  });
+
+  test('connectOverBle without a saved token → false, state unchanged',
+      () async {
+    when(() => repo.info()).thenThrow(const Unreachable());
+    seedPairedMaster();
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => null);
+    final c = makeContainer();
+    expect(await bootstrap(c), isA<MasterUnreachable>());
+
+    final ok = await c.read(sessionProvider.notifier).connectOverBle();
+
+    expect(ok, isFalse);
+    expect(c.read(sessionProvider).value, isA<MasterUnreachable>());
+  });
+
+  test('unreachable + bluetooth preference + saved token → auto BLE',
+      () async {
+    when(() => repo.info()).thenThrow(const Unreachable());
+    seedPairedMaster(preference: 'bluetooth');
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => 'cafebabe');
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<Authenticated>());
+    expect(c.read(tokenProvider), 'cafebabe');
+  });
+
+  test('unreachable + bluetooth preference but no token → MasterUnreachable',
+      () async {
+    when(() => repo.info()).thenThrow(const Unreachable());
+    seedPairedMaster(preference: 'bluetooth');
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => null);
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<MasterUnreachable>());
   });
 }
