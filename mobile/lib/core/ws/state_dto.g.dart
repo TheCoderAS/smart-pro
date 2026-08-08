@@ -9,6 +9,7 @@ part of 'state_dto.dart';
 _StateSnapshot _$StateSnapshotFromJson(Map<String, dynamic> json) =>
     _StateSnapshot(
       masterName: json['master_name'] as String? ?? '',
+      selfUid: json['self_uid'] as String? ?? '',
       uptime: (json['uptime'] as num?)?.toInt() ?? 0,
       bootComplete: json['boot_complete'] as bool? ?? true,
       scanActive: json['scan_active'] as bool? ?? false,
@@ -27,6 +28,7 @@ _StateSnapshot _$StateSnapshotFromJson(Map<String, dynamic> json) =>
 Map<String, dynamic> _$StateSnapshotToJson(_StateSnapshot instance) =>
     <String, dynamic>{
       'master_name': instance.masterName,
+      'self_uid': instance.selfUid,
       'uptime': instance.uptime,
       'boot_complete': instance.bootComplete,
       'scan_active': instance.scanActive,

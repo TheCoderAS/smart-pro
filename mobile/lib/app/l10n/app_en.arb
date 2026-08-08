@@ -46,6 +46,7 @@
   "dashboardEmptyTitle": "No switches yet",
   "dashboardEmptyBody": "Snap an Extension onto the bus next to your Master and it will appear here.",
   "reconnecting": "Reconnecting",
+  "reconnect": "Reconnect",
   "connected": "Connected",
   "switchOn": "On",
   "switchOff": "Off",

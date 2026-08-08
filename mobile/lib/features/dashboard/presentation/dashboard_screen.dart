@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../app/theme.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
@@ -42,10 +43,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final transport = ref.watch(currentTransportProvider);
 
     // Every snapshot is authoritative (API §4) — clear optimistic
-    // overrides the moment one lands, confirmed or contradicted.
+    // overrides the moment one lands, confirmed or contradicted. Also
+    // record the master (uid + name) so the BLE cold-start path can find
+    // it later even if the user only ever signed in (never commissioned).
     ref.listen(activeStateProvider, (prev, next) {
-      if (next.hasValue) {
+      final snap = next.value;
+      if (snap != null) {
         ref.read(switchOverridesProvider.notifier).clearAll();
+        ref.read(masterRegistryProvider.notifier).ensure(
+              uid: snap.selfUid,
+              name: snap.masterName,
+            );
       }
     });
 
@@ -116,13 +124,18 @@ class _DashboardHeader extends ConsumerWidget {
 
     return SliverAppBar(
       pinned: true,
-      expandedHeight: 172,
+      expandedHeight: 200,
       leading: IconButton(
         tooltip: l10n.yourSwitches,
         icon: const Icon(Icons.grid_view_rounded),
         onPressed: () => showMasterSwitcher(context, ref),
       ),
       actions: [
+        IconButton(
+          tooltip: l10n.reconnect,
+          icon: const Icon(Icons.refresh_rounded),
+          onPressed: () => ref.read(transportCoordinatorProvider).reconcile(),
+        ),
         _OverflowMenu(),
         const SizedBox(width: 4),
       ],
@@ -146,7 +159,10 @@ class _DashboardHeader extends ConsumerWidget {
           ),
           child: SafeArea(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 52),
+              // Top clears the pinned toolbar (leading/actions) so the
+              // status pill never sits under the grid/menu icons; bottom
+              // keeps the title off the content below.
+              padding: const EdgeInsets.fromLTRB(20, kToolbarHeight + 4, 20, 16),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -526,8 +542,9 @@ class _OverflowMenu extends ConsumerWidget {
   }
 }
 
-/// Handy quick tools — one-tap All on / All off across every online
-/// switch. Optimistic, like the tiles.
+/// Handy quick tool — one-tap "All off". Fires the single kill-all
+/// command (turns off every switch on every master in the mesh) rather
+/// than looping per switch. Optimistic, like the tiles.
 class _QuickTools extends ConsumerWidget {
   const _QuickTools({required this.switches});
   final List<SwitchState> switches;
@@ -537,46 +554,28 @@ class _QuickTools extends ConsumerWidget {
     final l10n = AppLocalizations.of(context)!;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-      child: Row(
-        children: [
-          Expanded(
-            child: _QuickButton(
-              icon: Icons.flash_on_rounded,
-              label: l10n.allOn,
-              onTap: () => _setAll(ref, true),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: _QuickButton(
-              icon: Icons.flash_off_rounded,
-              label: l10n.allOff,
-              onTap: () => _confirmAllOff(context, ref),
-            ),
-          ),
-        ],
+      child: _QuickButton(
+        icon: Icons.flash_off_rounded,
+        label: l10n.allOff,
+        onTap: () => _killAll(ref),
       ),
     ).animate().fadeIn(duration: 300.ms).slideY(begin: 0.2, curve: Curves.easeOut);
   }
 
-  Future<void> _setAll(WidgetRef ref, bool on) async {
+  Future<void> _killAll(WidgetRef ref) async {
     final overrides = ref.read(switchOverridesProvider.notifier);
-    final repo = ref.read(activeControlProvider);
+    // Optimistic: show every switch off immediately. One kill-all
+    // command does the work — no per-switch loop.
     for (final sw in switches) {
-      if (!sw.online || sw.on == on) continue;
-      overrides.set(sw.id, on);
-      try {
-        await repo.setRelay(id: sw.id, on: on, ch: sw.ch);
-      } on Exception {
+      if (sw.online && sw.on) overrides.set(sw.id, false);
+    }
+    try {
+      await ref.read(activeControlProvider).killAll();
+    } on Exception {
+      for (final sw in switches) {
         overrides.clear(sw.id);
       }
     }
-  }
-
-  Future<void> _confirmAllOff(BuildContext context, WidgetRef ref) async {
-    // "All off" here means only this master's switches — no mesh-wide
-    // confirm needed (that's the overflow's kill-all). Fire directly.
-    await _setAll(ref, false);
   }
 }
 
