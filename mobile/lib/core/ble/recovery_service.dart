@@ -7,6 +7,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/endpoints.dart';
 import '../crypto/recovery_hmac.dart';
 import '../logging/log.dart';
+import '../permissions/scan_permissions.dart';
+
+/// Thrown when the OS denies the Bluetooth permissions a scan needs, so
+/// the UI can tell the user to grant them rather than showing a raw
+/// plugin error.
+class BlePermissionDenied implements Exception {
+  const BlePermissionDenied();
+}
 
 final reactiveBleProvider = Provider<FlutterReactiveBle>(
   (ref) => FlutterReactiveBle(),
@@ -49,7 +57,15 @@ class RecoveryService {
   Uuid get _service => Uuid.parse(RecoveryBle.service);
 
   /// Scans for advertising Unisync masters for [scanWindow].
+  ///
+  /// Requests the runtime BLE permissions first — Android 12+ needs
+  /// BLUETOOTH_SCAN granted at runtime or the scan fails with a
+  /// location-permission error. Throws [BlePermissionDenied] when the
+  /// user declines.
   Future<List<RecoveryDevice>> scan() async {
+    if (!await ensureBlePermissions()) {
+      throw const BlePermissionDenied();
+    }
     final found = <String, RecoveryDevice>{};
     final done = Completer<void>();
     late final StreamSubscription<DiscoveredDevice> sub;

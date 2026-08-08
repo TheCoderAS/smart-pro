@@ -7,6 +7,7 @@ import 'package:wifi_scan/wifi_scan.dart';
 
 import '../api/endpoints.dart';
 import '../logging/log.dart';
+import '../permissions/scan_permissions.dart';
 
 final wifiServiceProvider = Provider<WifiService>((ref) => WifiService());
 
@@ -92,6 +93,12 @@ class WifiService {
   Future<List<String>> scanSsids({String? ssidPrefix}) async {
     if (!Platform.isAndroid) {
       throw UnsupportedError('Wi-Fi scanning is Android-only');
+    }
+    // Android 13+ needs NEARBY_WIFI_DEVICES (or location below 13)
+    // granted at runtime, or the scan returns nothing.
+    if (!await ensureWifiScanPermissions()) {
+      log.w('Wi-Fi scan permission denied');
+      return const [];
     }
     final can = await WiFiScan.instance.canStartScan();
     if (can != CanStartScan.yes) {

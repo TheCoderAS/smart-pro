@@ -218,6 +218,14 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
           _error = 'No switches found nearby. Move closer and try again.';
         }
       });
+    } on BlePermissionDenied {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.idle;
+        _error = 'Unisync needs Bluetooth permission to find your switch. '
+            'Please allow it and try again — you can grant it in Settings '
+            'if the prompt doesn’t appear.';
+      });
     } on Exception catch (e) {
       if (!mounted) return;
       setState(() {
