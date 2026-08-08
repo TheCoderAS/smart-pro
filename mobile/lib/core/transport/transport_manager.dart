@@ -21,7 +21,9 @@ final transportPreferenceProvider =
 );
 
 class TransportPreferenceNotifier extends Notifier<TransportPreference> {
-  static const _key = 'transport.preference';
+  /// SharedPreferences key — public so a cold-start bootstrap can read
+  /// the persisted preference before this notifier has restored.
+  static const key = 'transport.preference';
 
   @override
   TransportPreference build() {
@@ -31,7 +33,7 @@ class TransportPreferenceNotifier extends Notifier<TransportPreference> {
 
   Future<void> _restore() async {
     final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_key);
+    final saved = prefs.getString(key);
     final pref = TransportPreference.values.firstWhere(
       (p) => p.name == saved,
       orElse: () => TransportPreference.auto,
@@ -42,7 +44,7 @@ class TransportPreferenceNotifier extends Notifier<TransportPreference> {
   Future<void> set(TransportPreference pref) async {
     state = pref;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, pref.name);
+    await prefs.setString(key, pref.name);
   }
 }
 

@@ -9,6 +9,10 @@
   "unreachableBody": "Join the switch’s Wi-Fi network and try again. The network name is on the card in the box.",
   "tryAgain": "Try again",
   "addASwitch": "Add a switch",
+  "controlOverBluetooth": "Control over Bluetooth",
+  "bleNoSavedSession": "No saved Bluetooth sign-in yet. Connect over Wi-Fi once to pair this phone.",
+  "bleTroubleTitle": "Can’t reach it over Bluetooth",
+  "bleTroubleBody": "Move closer to the switch and make sure Bluetooth is on.",
   "forgotPasswordRecover": "Forgot the password? Recover it",
 
   "signInTitle": "Sign in",

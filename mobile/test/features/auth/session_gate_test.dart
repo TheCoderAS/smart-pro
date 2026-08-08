@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/app/l10n/app_localizations.dart';
 import 'package:unisync/app/router.dart';
 import 'package:unisync/core/api/failure.dart';
@@ -30,6 +31,9 @@ void main() {
   testWidgets(
       'unreachable screen offers BLE recovery and routes to it '
       '(lost-password escape hatch)', (tester) async {
+    // No paired master, so the Bluetooth-control button stays hidden and
+    // only the recovery affordance is present.
+    SharedPreferences.setMockInitialValues({});
     final container = ProviderContainer(
       overrides: [
         authRepositoryProvider.overrideWithValue(_UnreachableRepo()),

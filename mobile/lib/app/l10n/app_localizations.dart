@@ -130,6 +130,30 @@ abstract class AppLocalizations {
   /// **'Add a switch'**
   String get addASwitch;
 
+  /// No description provided for @controlOverBluetooth.
+  ///
+  /// In en, this message translates to:
+  /// **'Control over Bluetooth'**
+  String get controlOverBluetooth;
+
+  /// No description provided for @bleNoSavedSession.
+  ///
+  /// In en, this message translates to:
+  /// **'No saved Bluetooth sign-in yet. Connect over Wi-Fi once to pair this phone.'**
+  String get bleNoSavedSession;
+
+  /// No description provided for @bleTroubleTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Can’t reach it over Bluetooth'**
+  String get bleTroubleTitle;
+
+  /// No description provided for @bleTroubleBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Move closer to the switch and make sure Bluetooth is on.'**
+  String get bleTroubleBody;
+
   /// No description provided for @forgotPasswordRecover.
   ///
   /// In en, this message translates to:
