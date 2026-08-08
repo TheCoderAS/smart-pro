@@ -1,7 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../features/audit/presentation/audit_screen.dart';
 import '../features/auth/presentation/session_gate.dart';
 import '../features/extensions/presentation/extensions_screen.dart';
 import '../features/firmware/presentation/firmware_screen.dart';
@@ -21,7 +20,6 @@ abstract final class Routes {
   static const extensions = '/extensions';
   static const mesh = '/mesh';
   static const firmware = '/firmware';
-  static const audit = '/audit';
   static const settings = '/settings';
 }
 
@@ -56,10 +54,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.firmware,
         builder: (context, state) => const FirmwareScreen(),
-      ),
-      GoRoute(
-        path: Routes.audit,
-        builder: (context, state) => const AuditScreen(),
       ),
       GoRoute(
         path: Routes.settings,

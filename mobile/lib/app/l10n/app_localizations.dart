@@ -400,12 +400,6 @@ abstract class AppLocalizations {
   /// **'Firmware'**
   String get menuFirmware;
 
-  /// No description provided for @menuAudit.
-  ///
-  /// In en, this message translates to:
-  /// **'Activity log'**
-  String get menuAudit;
-
   /// No description provided for @menuSettings.
   ///
   /// In en, this message translates to:

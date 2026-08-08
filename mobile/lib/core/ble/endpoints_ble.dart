@@ -52,13 +52,6 @@ abstract final class BleCommands {
     'order': order,
   };
 
-  /// Activity log (BLE spec v2 §audit). Returns `{events:[{t,what}]}`
-  /// where `t` is uptime seconds.
-  static Map<String, Object?> audit(String token) => {
-    't': token,
-    'c': 'audit',
-  };
-
   /// Firmware images already staged on the master + its own version
   /// (BLE spec v2 §fwlist). Transfer still needs Wi-Fi.
   static Map<String, Object?> fwList(String token) => {

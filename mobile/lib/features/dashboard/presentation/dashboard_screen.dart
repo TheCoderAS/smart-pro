@@ -409,8 +409,6 @@ class _OverflowMenu extends ConsumerWidget {
             if (requireWifi(context, ref)) unawaited(context.push(Routes.mesh));
           case 'firmware':
             unawaited(context.push(Routes.firmware));
-          case 'audit':
-            unawaited(context.push(Routes.audit));
           case 'settings':
             unawaited(context.push(Routes.settings));
         }
@@ -420,7 +418,6 @@ class _OverflowMenu extends ConsumerWidget {
         _menuItem('mesh', Icons.hub_rounded, l10n.menuMesh),
         _menuItem('firmware', Icons.system_update_rounded, l10n.menuFirmware),
         _menuItem('reorder', Icons.swap_vert_rounded, l10n.menuReorder),
-        _menuItem('audit', Icons.receipt_long_rounded, l10n.menuAudit),
         _menuItem('settings', Icons.settings_rounded, l10n.menuSettings),
       ],
     );
