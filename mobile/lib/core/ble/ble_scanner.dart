@@ -27,16 +27,22 @@ class BleScanner {
   ///
   /// Throws [BlePermissionDenied] if the OS refuses Bluetooth
   /// permissions.
-  Stream<MasterBeacon> scan({int? meshId}) async* {
+  Stream<MasterBeacon> scan({
+    int? meshId,
+    ScanMode mode = ScanMode.lowLatency,
+  }) async* {
     if (!await ensureBlePermissions()) {
       throw const BlePermissionDenied();
     }
     // Scan everything (no service filter): the Unisync service UUID is
     // in the scan response, which some stacks omit from a service-
     // filtered scan, and we filter on manufacturer data anyway.
+    // `mode` is lowLatency for a fast first connect, but the roam loop
+    // passes `balanced` so continuous background scanning doesn't starve
+    // the live connection.
     final stream = _ble.scanForDevices(
       withServices: const [],
-      scanMode: ScanMode.lowLatency,
+      scanMode: mode,
     );
     await for (final d in stream) {
       final beacon = MasterBeacon.fromScan(
@@ -57,9 +63,10 @@ class BleScanner {
   Future<List<MasterBeacon>> collect({
     int? meshId,
     Duration window = const Duration(seconds: 4),
+    ScanMode mode = ScanMode.lowLatency,
   }) async {
     final best = <String, MasterBeacon>{};
-    final sub = scan(meshId: meshId).listen((b) {
+    final sub = scan(meshId: meshId, mode: mode).listen((b) {
       final prev = best[b.deviceId];
       if (prev == null || b.rssi > prev.rssi) best[b.deviceId] = b;
     }, onError: (Object e) => log.w('scan error: $e'));
