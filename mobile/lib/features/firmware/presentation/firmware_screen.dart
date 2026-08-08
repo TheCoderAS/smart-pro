@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_coordinator.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../../extensions/data/extension_repository.dart';
 import '../../extensions/domain/extension_models.dart';
 import '../data/firmware_repository.dart';
@@ -9,12 +12,25 @@ import '../domain/firmware_models.dart';
 
 /// Published manifests from the CDN. Unreachable CDN (normal while
 /// glued to the master's AP) resolves to an empty list, not an error.
+/// Over Bluetooth the phone keeps its own internet, so this is more
+/// likely to succeed than on the master's Wi-Fi (BLE spec v2 §7).
 final manifestsProvider =
     FutureProvider<List<FirmwareManifest>>((ref) async {
   try {
     return await ref.watch(firmwareRepositoryProvider).fetchManifests();
   } on Exception {
     return const [];
+  }
+});
+
+/// The master's running version + staged images, over whichever
+/// transport is active (BLE `fwlist` or HTTP). Best-effort — an error
+/// (e.g. not yet connected) resolves to empty, never throws.
+final firmwareStatusProvider = FutureProvider<FwStatus>((ref) async {
+  try {
+    return await ref.watch(activeControlProvider).fwStatus();
+  } on Object {
+    return const FwStatus();
   }
 });
 
@@ -25,6 +41,7 @@ class FirmwareScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final manifests = ref.watch(manifestsProvider);
     final extensions = ref.watch(extensionsProvider);
+    final master = ref.watch(firmwareStatusProvider).value?.master ?? '';
 
     // Highest published version per extension type.
     final latestByType = <int, FirmwareManifest>{};
@@ -40,12 +57,21 @@ class FirmwareScreen extends ConsumerWidget {
       body: RefreshIndicator(
         onRefresh: () async {
           ref.invalidate(manifestsProvider);
+          ref.invalidate(firmwareStatusProvider);
           await ref.read(extensionsProvider.notifier).refresh();
         },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(16),
           children: [
+            if (master.isNotEmpty)
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.router_outlined),
+                  title: const Text('This master'),
+                  subtitle: Text('Firmware $master'),
+                ),
+              ),
             if (manifests.value?.isEmpty ?? true)
               Card(
                 child: Padding(
@@ -143,6 +169,13 @@ class _ManifestCardState extends ConsumerState<_ManifestCard> {
                   : 'Installed: ${widget.installedVersions.isEmpty ? "none on this master" : widget.installedVersions.toSet().join(", ")}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (m.changelog.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                m.changelog,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
             const SizedBox(height: 12),
             if (_progress != null)
               LinearProgressIndicator(value: _progress)
@@ -161,8 +194,24 @@ class _ManifestCardState extends ConsumerState<_ManifestCard> {
   }
 
   Future<void> _run() async {
-    final repo = ref.read(firmwareRepositoryProvider);
     final messenger = ScaffoldMessenger.of(context);
+    // Firmware *transfer* is Wi-Fi-only (BLE spec v2 §9). Info shows over
+    // Bluetooth, but installing needs the master's Wi-Fi.
+    if (ref.read(currentTransportProvider) == TransportKind.ble) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('Installing updates needs the switch’s Wi-Fi.'),
+          action: SnackBarAction(
+            label: 'Use Wi-Fi',
+            onPressed: () => ref
+                .read(transportCoordinatorProvider)
+                .choose(TransportPreference.wifi),
+          ),
+        ),
+      );
+      return;
+    }
+    final repo = ref.read(firmwareRepositoryProvider);
     setState(() => _progress = 0);
     try {
       final bytes = await repo.download(

@@ -455,23 +455,20 @@ class _OverflowMenu extends ConsumerWidget {
       icon: const Icon(Icons.more_vert_rounded),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
       onSelected: (v) async {
-        // Setup/maintenance flows aren't available over Bluetooth (BLE
-        // spec §Not supported) — steer to Wi-Fi instead of a dead end.
+        // Reorder, extensions, activity log and firmware *info* all work
+        // over Bluetooth (BLE spec v2). Only mesh admin stays Wi-Fi-only
+        // here; firmware *transfer* is guarded inside its own screen.
         switch (v) {
           case 'reorder':
-            if (_guardWifi(context, ref)) unawaited(context.push(Routes.reorder));
+            unawaited(context.push(Routes.reorder));
           case 'extensions':
-            if (_guardWifi(context, ref)) {
-              unawaited(context.push(Routes.extensions));
-            }
+            unawaited(context.push(Routes.extensions));
           case 'mesh':
             if (_guardWifi(context, ref)) unawaited(context.push(Routes.mesh));
           case 'firmware':
-            if (_guardWifi(context, ref)) {
-              unawaited(context.push(Routes.firmware));
-            }
+            unawaited(context.push(Routes.firmware));
           case 'audit':
-            if (_guardWifi(context, ref)) unawaited(context.push(Routes.audit));
+            unawaited(context.push(Routes.audit));
           case 'settings':
             unawaited(context.push(Routes.settings));
         }

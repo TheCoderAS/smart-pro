@@ -14,6 +14,7 @@ _FirmwareManifest _$FirmwareManifestFromJson(Map<String, dynamic> json) =>
       size: (json['size'] as num?)?.toInt() ?? 0,
       sig: json['sig'] as String? ?? '',
       url: json['url'] as String? ?? '',
+      changelog: json['changelog'] as String? ?? '',
     );
 
 Map<String, dynamic> _$FirmwareManifestToJson(_FirmwareManifest instance) =>
@@ -24,11 +25,12 @@ Map<String, dynamic> _$FirmwareManifestToJson(_FirmwareManifest instance) =>
       'size': instance.size,
       'sig': instance.sig,
       'url': instance.url,
+      'changelog': instance.changelog,
     };
 
 _StoredImage _$StoredImageFromJson(Map<String, dynamic> json) => _StoredImage(
   type: (json['type'] as num?)?.toInt() ?? 0,
-  version: json['version'] as String? ?? '',
+  version: _readVersion(json, 'version') as String? ?? '',
   size: (json['size'] as num?)?.toInt() ?? 0,
 );
 
@@ -38,3 +40,17 @@ Map<String, dynamic> _$StoredImageToJson(_StoredImage instance) =>
       'version': instance.version,
       'size': instance.size,
     };
+
+_FwStatus _$FwStatusFromJson(Map<String, dynamic> json) => _FwStatus(
+  master: json['master'] as String? ?? '',
+  images:
+      (json['images'] as List<dynamic>?)
+          ?.map((e) => StoredImage.fromJson(e as Map<String, dynamic>))
+          .toList() ??
+      const <StoredImage>[],
+);
+
+Map<String, dynamic> _$FwStatusToJson(_FwStatus instance) => <String, dynamic>{
+  'master': instance.master,
+  'images': instance.images,
+};

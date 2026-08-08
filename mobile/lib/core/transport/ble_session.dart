@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-
+import '../../features/audit/data/audit_parse.dart';
+import '../../features/extensions/domain/extension_models.dart';
+import '../../features/firmware/domain/firmware_models.dart';
 import '../api/dio_client.dart';
 import '../ble/advert.dart';
 import '../ble/ble_control_client.dart';
@@ -244,34 +246,71 @@ class BleSessionController extends Notifier<BleSessionState> {
 }
 
 /// BLE control path — issues commands over the active [BleControlClient]
-/// using the shared token.
+/// using the shared token. Reads (`exts`, `audit`, `fwlist`) and the
+/// `reorder` write all work over BLE per the v2 contract; only firmware
+/// transfer stays Wi-Fi.
 class BleControlTransport implements ControlTransport {
   const BleControlTransport(this._client, this._token);
 
   final BleControlClient? _client;
   final String? _token;
 
-  @override
-  TransportKind get kind => TransportKind.ble;
-
-  @override
-  Future<void> setRelay({required String id, required bool on, int? ch}) async {
+  ({BleControlClient client, String token}) get _live {
     final client = _client;
     final token = _token;
     if (client == null || token == null) {
       throw StateError('BLE not connected');
     }
+    return (client: client, token: token);
+  }
+
+  @override
+  TransportKind get kind => TransportKind.ble;
+
+  @override
+  Future<void> setRelay({required String id, required bool on, int? ch}) async {
+    final (:client, :token) = _live;
     // id already carries the channel suffix over BLE; ch is ignored.
     await client.request(BleCommands.relay(token: token, id: id, on: on));
   }
 
   @override
   Future<void> killAll() async {
-    final client = _client;
-    final token = _token;
-    if (client == null || token == null) {
-      throw StateError('BLE not connected');
-    }
+    final (:client, :token) = _live;
     await client.request(BleCommands.killAll(token));
+  }
+
+  @override
+  Future<List<ExtensionInfo>> extensions() async {
+    final (:client, :token) = _live;
+    final map = await client.request(BleCommands.extensions(token));
+    final list = map['extensions'];
+    if (list is! List) return const [];
+    return [
+      for (final e in list)
+        if (e is Map<String, dynamic>) ExtensionInfo.fromJson(e),
+    ];
+  }
+
+  @override
+  Future<void> reorder(List<String> orderedIds) async {
+    final (:client, :token) = _live;
+    await client.request(
+      BleCommands.reorder(token: token, order: orderedIds.join(',')),
+    );
+  }
+
+  @override
+  Future<List<String>> audit() async {
+    final (:client, :token) = _live;
+    final map = await client.request(BleCommands.audit(token));
+    return parseAuditBody(map);
+  }
+
+  @override
+  Future<FwStatus> fwStatus() async {
+    final (:client, :token) = _live;
+    final map = await client.request(BleCommands.fwList(token));
+    return FwStatus.fromJson(Map<String, dynamic>.from(map));
   }
 }

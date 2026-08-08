@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 
-import '../../features/switches/data/switch_repository.dart';
 import '../api/dio_client.dart';
 import '../ws/state_dto.dart';
 import '../ws/state_socket.dart';
@@ -75,7 +74,7 @@ final activeControlProvider = Provider<ControlTransport>((ref) {
     final token = ref.watch(tokenProvider);
     return BleControlTransport(session.client, token);
   }
-  return WifiControlTransport(ref.watch(switchRepositoryProvider));
+  return WifiControlTransport(ref);
 });
 
 /// The active state stream — WebSocket (Wi-Fi) or BLE push. Both deliver

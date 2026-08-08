@@ -41,6 +41,31 @@ abstract final class BleCommands {
     'c': 'exts',
   };
 
+  /// Reorder switches — `order` is the comma-separated id list, same as
+  /// the HTTP endpoint (BLE spec v2 §reorder).
+  static Map<String, Object?> reorder({
+    required String token,
+    required String order,
+  }) => {
+    't': token,
+    'c': 'reorder',
+    'order': order,
+  };
+
+  /// Activity log (BLE spec v2 §audit). Returns `{events:[{t,what}]}`
+  /// where `t` is uptime seconds.
+  static Map<String, Object?> audit(String token) => {
+    't': token,
+    'c': 'audit',
+  };
+
+  /// Firmware images already staged on the master + its own version
+  /// (BLE spec v2 §fwlist). Transfer still needs Wi-Fi.
+  static Map<String, Object?> fwList(String token) => {
+    't': token,
+    'c': 'fwlist',
+  };
+
   static Map<String, Object?> mesh(String token) => {
     't': token,
     'c': 'mesh',
