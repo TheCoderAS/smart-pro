@@ -8,24 +8,42 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../app/theme.dart';
+import '../../../core/transport/ble_session.dart';
+import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_coordinator.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../settings/presentation/master_switcher.dart';
-import '../../switches/data/switch_repository.dart';
 import '../../switches/presentation/rename_sheet.dart';
 import '../application/switch_overrides.dart';
 
-class DashboardScreen extends ConsumerWidget {
+class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final snapshot = ref.watch(stateSocketProvider);
+  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Decide Wi-Fi vs BLE from the user's preference + reachability.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(transportCoordinatorProvider).reconcile();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final snapshot = ref.watch(activeStateProvider);
     final status = ref.watch(socketStatusProvider);
+    final transport = ref.watch(currentTransportProvider);
 
     // Every snapshot is authoritative (API §4) — clear optimistic
     // overrides the moment one lands, confirmed or contradicted.
-    ref.listen(stateSocketProvider, (prev, next) {
+    ref.listen(activeStateProvider, (prev, next) {
       if (next.hasValue) {
         ref.read(switchOverridesProvider.notifier).clearAll();
       }
@@ -37,7 +55,11 @@ class DashboardScreen extends ConsumerWidget {
     return Scaffold(
       body: CustomScrollView(
         slivers: [
-          _DashboardHeader(snapshot: snap, status: status),
+          _DashboardHeader(
+            snapshot: snap,
+            status: status,
+            transport: transport,
+          ),
           if (snapshot.isLoading && snap == null)
             const SliverFillRemaining(
               hasScrollBody: false,
@@ -62,10 +84,15 @@ class DashboardScreen extends ConsumerWidget {
 /// Branded hero header: master identity, live connection pill, and the
 /// on/total summary. Collapses into a compact app bar on scroll.
 class _DashboardHeader extends ConsumerWidget {
-  const _DashboardHeader({required this.snapshot, required this.status});
+  const _DashboardHeader({
+    required this.snapshot,
+    required this.status,
+    required this.transport,
+  });
 
   final StateSnapshot? snapshot;
   final SocketStatus status;
+  final TransportKind transport;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -114,7 +141,7 @@ class _DashboardHeader extends ConsumerWidget {
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _StatusPill(status: status),
+                  _StatusPill(status: status, transport: transport),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -211,44 +238,196 @@ class _StatusDot extends StatelessWidget {
   }
 }
 
-/// Live connection status as a soft pill. Public-feeling, not an error.
-class _StatusPill extends StatelessWidget {
-  const _StatusPill({required this.status});
+/// Live connection status as a soft pill — shows the transport
+/// (Wi-Fi/Bluetooth) and, on tap, offers to switch. Public-feeling,
+/// not an error.
+class _StatusPill extends ConsumerWidget {
+  const _StatusPill({required this.status, required this.transport});
   final SocketStatus status;
+  final TransportKind transport;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context)!;
     final scheme = Theme.of(context).colorScheme;
-    final connected = status == SocketStatus.connected;
+    // Over BLE, "connected" is the BLE session being connected; the WS
+    // status only reflects the Wi-Fi path.
+    final bleConnected =
+        ref.watch(bleSessionProvider).status == BleSessionStatus.connected;
+    final connected = transport == TransportKind.ble
+        ? bleConnected
+        : status == SocketStatus.connected;
     final label = connected ? l10n.connected : l10n.reconnecting;
     final color = connected ? UnisyncColors.success : scheme.error;
+    final via = transport == TransportKind.ble
+        ? l10n.viaBluetooth
+        : l10n.viaWifi;
+    final viaIcon = transport == TransportKind.ble
+        ? Icons.bluetooth_rounded
+        : Icons.wifi_rounded;
 
     return Semantics(
       liveRegion: !connected,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
+      button: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
           borderRadius: BorderRadius.circular(999),
+          onTap: () => _showTransportSheet(context, ref),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _StatusDot(status: connected
+                    ? SocketStatus.connected
+                    : SocketStatus.connecting),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(viaIcon, size: 13, color: color),
+                const SizedBox(width: 3),
+                Text(
+                  via,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: color,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
-        child: Row(
+      ),
+    );
+  }
+
+  Future<void> _showTransportSheet(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context)!;
+    final coordinator = ref.read(transportCoordinatorProvider);
+    final current = ref.read(transportPreferenceProvider);
+    return showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _StatusDot(status: status),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: color,
-                fontWeight: FontWeight.w600,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  l10n.switchTransport,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
               ),
             ),
+            for (final entry in const [
+              (TransportPreference.auto, Icons.autorenew_rounded),
+              (TransportPreference.wifi, Icons.wifi_rounded),
+              (TransportPreference.bluetooth, Icons.bluetooth_rounded),
+            ])
+              ListTile(
+                leading: Icon(entry.$2),
+                title: Text(_prefLabel(l10n, entry.$1)),
+                subtitle: Text(_prefDesc(l10n, entry.$1)),
+                trailing: current == entry.$1
+                    ? const Icon(Icons.check_rounded)
+                    : null,
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  coordinator.choose(entry.$1);
+                },
+              ),
+            const SizedBox(height: 8),
           ],
         ),
       ),
     );
   }
+}
+
+String _prefLabel(AppLocalizations l10n, TransportPreference p) =>
+    switch (p) {
+      TransportPreference.auto => l10n.transportAuto,
+      TransportPreference.wifi => l10n.transportWifi,
+      TransportPreference.bluetooth => l10n.transportBluetooth,
+    };
+
+String _prefDesc(AppLocalizations l10n, TransportPreference p) => switch (p) {
+  TransportPreference.auto => l10n.transportAutoDesc,
+  TransportPreference.wifi => l10n.transportWifiDesc,
+  TransportPreference.bluetooth => l10n.transportBluetoothDesc,
+};
+
+/// Returns true when the active transport can carry a setup/maintenance
+/// action (Wi-Fi). Over BLE, shows a sheet steering the user to Wi-Fi
+/// and returns false.
+bool _guardWifi(BuildContext context, WidgetRef ref) {
+  if (ref.read(currentTransportProvider) != TransportKind.ble) return true;
+  _showWifiNeeded(context, ref);
+  return false;
+}
+
+void _showWifiNeeded(BuildContext context, WidgetRef ref) {
+  final l10n = AppLocalizations.of(context)!;
+  showModalBottomSheet<void>(
+    context: context,
+    builder: (sheetContext) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.wifi_rounded,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    l10n.wifiOnlyTitle,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              l10n.wifiOnlyBody,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 20),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: () {
+                  Navigator.of(sheetContext).pop();
+                  ref
+                      .read(transportCoordinatorProvider)
+                      .choose(TransportPreference.wifi);
+                },
+                icon: const Icon(Icons.wifi_rounded),
+                label: Text(l10n.joinWifi),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _MeshBadge extends StatelessWidget {
@@ -291,17 +470,23 @@ class _OverflowMenu extends ConsumerWidget {
       icon: const Icon(Icons.more_vert_rounded),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
       onSelected: (v) async {
+        // Setup/maintenance flows aren't available over Bluetooth (BLE
+        // spec §Not supported) — steer to Wi-Fi instead of a dead end.
         switch (v) {
           case 'reorder':
-            unawaited(context.push(Routes.reorder));
+            if (_guardWifi(context, ref)) unawaited(context.push(Routes.reorder));
           case 'extensions':
-            unawaited(context.push(Routes.extensions));
+            if (_guardWifi(context, ref)) {
+              unawaited(context.push(Routes.extensions));
+            }
           case 'mesh':
-            unawaited(context.push(Routes.mesh));
+            if (_guardWifi(context, ref)) unawaited(context.push(Routes.mesh));
           case 'firmware':
-            unawaited(context.push(Routes.firmware));
+            if (_guardWifi(context, ref)) {
+              unawaited(context.push(Routes.firmware));
+            }
           case 'audit':
-            unawaited(context.push(Routes.audit));
+            if (_guardWifi(context, ref)) unawaited(context.push(Routes.audit));
           case 'settings':
             unawaited(context.push(Routes.settings));
         }
@@ -366,7 +551,7 @@ class _QuickTools extends ConsumerWidget {
 
   Future<void> _setAll(WidgetRef ref, bool on) async {
     final overrides = ref.read(switchOverridesProvider.notifier);
-    final repo = ref.read(switchRepositoryProvider);
+    final repo = ref.read(activeControlProvider);
     for (final sw in switches) {
       if (!sw.online || sw.on == on) continue;
       overrides.set(sw.id, on);
@@ -573,7 +758,12 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: online ? () => _toggle(on) : null,
-            onLongPress: () => showRenameSwitchSheet(context, ref, sw),
+            onLongPress: () {
+              // Rename is a Wi-Fi-only flow (BLE spec §Not supported).
+              if (_guardWifi(context, ref)) {
+                showRenameSwitchSheet(context, ref, sw);
+              }
+            },
             onTapDown: online ? (_) => setState(() => _pressed = true) : null,
             onTapUp: online ? (_) => setState(() => _pressed = false) : null,
             onTapCancel: () => setState(() => _pressed = false),
@@ -629,7 +819,7 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
     overrides.set(sw.id, next);
     try {
       await ref
-          .read(switchRepositoryProvider)
+          .read(activeControlProvider)
           .setRelay(id: sw.id, on: next, ch: sw.ch);
       // Leave the override in place; the next snapshot clears it.
     } on Exception {

@@ -108,6 +108,49 @@ class AppLocalizationsEn extends AppLocalizations {
   String get meshBadge => 'Mesh';
 
   @override
+  String get viaWifi => 'Wi-Fi';
+
+  @override
+  String get viaBluetooth => 'Bluetooth';
+
+  @override
+  String get connectionSection => 'Connection';
+
+  @override
+  String get transportAuto => 'Automatic';
+
+  @override
+  String get transportAutoDesc =>
+      'Wi-Fi when you\'re on the switch\'s network, Bluetooth otherwise.';
+
+  @override
+  String get transportWifi => 'Wi-Fi only';
+
+  @override
+  String get transportWifiDesc =>
+      'Always use the switch\'s Wi-Fi. Unlocks setup and updates.';
+
+  @override
+  String get transportBluetooth => 'Bluetooth';
+
+  @override
+  String get transportBluetoothDesc =>
+      'Control over Bluetooth so your phone keeps its own network.';
+
+  @override
+  String get switchTransport => 'Switch connection';
+
+  @override
+  String get wifiOnlyTitle => 'Wi-Fi needed for this';
+
+  @override
+  String get wifiOnlyBody =>
+      'This action isn\'t available over Bluetooth. Join the switch\'s Wi-Fi network to continue.';
+
+  @override
+  String get joinWifi => 'Add / join Wi-Fi';
+
+  @override
   String get menuReorder => 'Reorder switches';
 
   @override
