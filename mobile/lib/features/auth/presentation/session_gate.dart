@@ -75,6 +75,18 @@ class _UnreachableScreen extends ConsumerWidget {
                   icon: const Icon(Icons.add),
                   label: Text(l10n.addASwitch),
                 ),
+                const SizedBox(height: 8),
+                // A user who lost the password can't join the master's
+                // Wi-Fi (the password IS the Wi-Fi key), so they land
+                // here rather than on the login screen. BLE recovery
+                // works over Bluetooth without the password, so it must
+                // be reachable from this screen too — not only from
+                // login (API §8: "reachable from a logged-out app").
+                TextButton.icon(
+                  onPressed: () => context.push(Routes.recovery),
+                  icon: const Icon(Icons.bluetooth_searching),
+                  label: Text(l10n.forgotPasswordRecover),
+                ),
               ],
             ),
           ),
