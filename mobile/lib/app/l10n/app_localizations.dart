@@ -268,6 +268,84 @@ abstract class AppLocalizations {
   /// **'Mesh'**
   String get meshBadge;
 
+  /// No description provided for @viaWifi.
+  ///
+  /// In en, this message translates to:
+  /// **'Wi-Fi'**
+  String get viaWifi;
+
+  /// No description provided for @viaBluetooth.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth'**
+  String get viaBluetooth;
+
+  /// No description provided for @connectionSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Connection'**
+  String get connectionSection;
+
+  /// No description provided for @transportAuto.
+  ///
+  /// In en, this message translates to:
+  /// **'Automatic'**
+  String get transportAuto;
+
+  /// No description provided for @transportAutoDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Wi-Fi when you\'re on the switch\'s network, Bluetooth otherwise.'**
+  String get transportAutoDesc;
+
+  /// No description provided for @transportWifi.
+  ///
+  /// In en, this message translates to:
+  /// **'Wi-Fi only'**
+  String get transportWifi;
+
+  /// No description provided for @transportWifiDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Always use the switch\'s Wi-Fi. Unlocks setup and updates.'**
+  String get transportWifiDesc;
+
+  /// No description provided for @transportBluetooth.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth'**
+  String get transportBluetooth;
+
+  /// No description provided for @transportBluetoothDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Control over Bluetooth so your phone keeps its own network.'**
+  String get transportBluetoothDesc;
+
+  /// No description provided for @switchTransport.
+  ///
+  /// In en, this message translates to:
+  /// **'Switch connection'**
+  String get switchTransport;
+
+  /// No description provided for @wifiOnlyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Wi-Fi needed for this'**
+  String get wifiOnlyTitle;
+
+  /// No description provided for @wifiOnlyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This action isn\'t available over Bluetooth. Join the switch\'s Wi-Fi network to continue.'**
+  String get wifiOnlyBody;
+
+  /// No description provided for @joinWifi.
+  ///
+  /// In en, this message translates to:
+  /// **'Add / join Wi-Fi'**
+  String get joinWifi;
+
   /// No description provided for @menuReorder.
   ///
   /// In en, this message translates to:
