@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/transport/transport_manager.dart';
 import '../../../core/ws/state_dto.dart';
-import '../../../core/ws/state_socket.dart';
-import '../data/switch_repository.dart';
 
 /// Drag-to-reorder. Local order is kept while dragging; "Save" commits
 /// the id order via POST /api/switch/reorder and the next snapshot
@@ -20,7 +19,7 @@ class _ReorderScreenState extends ConsumerState<ReorderScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final snapshot = ref.watch(stateSocketProvider).value;
+    final snapshot = ref.watch(activeStateProvider).value;
     final switches = _working ?? snapshot?.switches ?? const <SwitchState>[];
     final dirty = _working != null;
 
@@ -69,7 +68,7 @@ class _ReorderScreenState extends ConsumerState<ReorderScreen> {
     final navigator = Navigator.of(context);
     try {
       await ref
-          .read(switchRepositoryProvider)
+          .read(activeControlProvider)
           .reorder([for (final sw in order) sw.id]);
       navigator.pop();
     } on Exception {

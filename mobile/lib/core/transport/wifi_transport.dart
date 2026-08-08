@@ -1,21 +1,68 @@
+import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../features/audit/data/audit_parse.dart';
+import '../../features/auth/data/auth_repository.dart';
+import '../../features/extensions/data/extension_repository.dart';
+import '../../features/extensions/domain/extension_models.dart';
+import '../../features/firmware/data/firmware_repository.dart';
+import '../../features/firmware/domain/firmware_models.dart';
 import '../../features/switches/data/switch_repository.dart';
+import '../api/dio_client.dart';
+import '../api/endpoints.dart';
+import '../api/failure.dart';
 import 'control_transport.dart';
 
 /// Wi-Fi control path — a thin adapter over the existing HTTP
-/// `SwitchRepository`. No behaviour change: this is what the app has
-/// always done, now reachable through the transport interface.
+/// repositories. No behaviour change: this is what the app has always
+/// done, now reachable through the transport interface.
 class WifiControlTransport implements ControlTransport {
-  const WifiControlTransport(this._repo);
+  WifiControlTransport(this._ref);
 
-  final SwitchRepository _repo;
+  final Ref _ref;
+
+  SwitchRepository get _switch => _ref.read(switchRepositoryProvider);
+  ExtensionRepository get _ext => _ref.read(extensionRepositoryProvider);
+  FirmwareRepository get _fw => _ref.read(firmwareRepositoryProvider);
+  AuthRepository get _auth => _ref.read(authRepositoryProvider);
+  Dio get _dio => _ref.read(dioProvider);
 
   @override
   TransportKind get kind => TransportKind.wifi;
 
   @override
   Future<void> setRelay({required String id, required bool on, int? ch}) =>
-      _repo.setRelay(id: id, on: on, ch: ch);
+      _switch.setRelay(id: id, on: on, ch: ch);
 
   @override
-  Future<void> killAll() => _repo.killAll();
+  Future<void> killAll() => _switch.killAll();
+
+  @override
+  Future<List<ExtensionInfo>> extensions() => _ext.list();
+
+  @override
+  Future<void> reorder(List<String> orderedIds) => _switch.reorder(orderedIds);
+
+  @override
+  Future<List<String>> audit() async {
+    try {
+      final res = await _dio.get<dynamic>(Api.audit);
+      return parseAuditBody(res.data);
+    } on DioException catch (e) {
+      throw e.apiFailure;
+    }
+  }
+
+  @override
+  Future<FwStatus> fwStatus() async {
+    final images = await _fw.storedImages();
+    // The master's own version isn't in fw/list — /api/info carries it.
+    var master = '';
+    try {
+      master = (await _auth.info()).fw;
+    } on ApiFailure {
+      // Non-fatal: staged images are still useful without the version.
+    }
+    return FwStatus(master: master, images: images);
+  }
 }

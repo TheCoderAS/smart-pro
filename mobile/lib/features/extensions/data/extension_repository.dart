@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/dio_client.dart';
 import '../../../core/api/endpoints.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../domain/extension_models.dart';
 
 final extensionRepositoryProvider = Provider<ExtensionRepository>((ref) {
@@ -17,15 +18,17 @@ final extensionsProvider =
 );
 
 class ExtensionsNotifier extends AsyncNotifier<List<ExtensionInfo>> {
+  // Reads go through the active transport, so the list works over
+  // Bluetooth too (BLE `exts`). Mutations (rename/assign) stay Wi-Fi.
   @override
   Future<List<ExtensionInfo>> build() {
-    return ref.watch(extensionRepositoryProvider).list();
+    return ref.watch(activeControlProvider).extensions();
   }
 
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(
-      () => ref.read(extensionRepositoryProvider).list(),
+      () => ref.read(activeControlProvider).extensions(),
     );
   }
 }

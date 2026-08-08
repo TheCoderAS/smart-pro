@@ -1,43 +1,15 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/api/dio_client.dart';
-import '../../../core/api/endpoints.dart';
 import '../../../core/api/failure.dart';
+import '../../../core/transport/transport_manager.dart';
 
-/// GET /api/audit rendered read-only. The exact body shape is
-/// firmware-defined, so parsing is tolerant: a JSON array becomes
-/// entries; a JSON object with a known list field is unwrapped; plain
-/// text splits on newlines.
-final auditProvider = FutureProvider<List<String>>((ref) async {
-  final dio = ref.watch(dioProvider);
-  try {
-    final res = await dio.get<dynamic>(Api.audit);
-    return _parseAudit(res.data);
-  } on DioException catch (e) {
-    throw e.apiFailure;
-  }
+/// The activity log, read-only, over whichever transport is active —
+/// `GET /api/audit` on Wi-Fi or the `audit` command over BLE (spec v2).
+/// Parsing is tolerant and lives in the transport layer.
+final auditProvider = FutureProvider<List<String>>((ref) {
+  return ref.watch(activeControlProvider).audit();
 });
-
-List<String> _parseAudit(dynamic data) {
-  if (data == null) return const [];
-  if (data is List) {
-    return [for (final e in data) e.toString()];
-  }
-  if (data is Map<String, dynamic>) {
-    for (final key in const ['audit', 'log', 'entries', 'lines']) {
-      final inner = data[key];
-      if (inner is List) return [for (final e in inner) e.toString()];
-    }
-    return [data.toString()];
-  }
-  return data
-      .toString()
-      .split('\n')
-      .where((l) => l.trim().isNotEmpty)
-      .toList();
-}
 
 class AuditScreen extends ConsumerWidget {
   const AuditScreen({super.key});
