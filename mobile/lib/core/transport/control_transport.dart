@@ -43,9 +43,6 @@ abstract interface class ControlTransport {
   Future<void> renameSwitch({required String id, required String name});
   Future<void> renameMaster(String name);
 
-  /// The activity log as display lines.
-  Future<List<String>> audit();
-
   /// The master's running version + the images staged in its library.
   /// Firmware *transfer* still requires Wi-Fi.
   Future<FwStatus> fwStatus();
