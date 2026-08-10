@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.24.0"
+#define MASTER_FW_VERSION  "11.25.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -197,7 +197,19 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 #define UART_BAUD         250000
 #define MAX_EXTENSIONS    5
 #define POLL_MS           200
-#define MISSED_MAX        5
+/* Presence (UX story, Epic 2). A "check-in" is one second of bus polling,
+ * not a single 200 ms poll -- one dropped frame on a shared RS-485 bus is
+ * noise, not an outage. Offline is declared after three missed check-ins. */
+#define CHECKIN_MS        1000UL
+#define CHECKIN_MISSES    3
+#define MISSED_MAX        ((int)((CHECKIN_MS/POLL_MS)*CHECKIN_MISSES))  /* 15 polls = 3 s */
+/* Coming back is not instant: an extension that has dropped only returns to
+ * the dashboard after a solid minute of presence. Until then it reports as
+ * "intermittent" so its switches don't blink in and out. */
+#define PRESENCE_SETTLE_MS 60000UL
+/* How long a drop is remembered. Two drops inside the window mark the board
+ * intermittent while it is down, rather than plainly offline. */
+#define PRESENCE_FLAP_MS   600000UL
 #define BUS_RESP_MS       20
 #define LISTEN_WINDOW_MS  30
 #define LISTEN_INTERVAL_MS 200
@@ -239,7 +251,12 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
  * 10 KB of SRAM; raise together with the mesh-status JSON buffer below. */
 #define MAX_MESH_MASTERS   16     /* OTA-updatable */
 #define MESH_GOSSIP_MS     500   /* state broadcast interval */
-#define MESH_PEER_TIMEOUT  10000 /* ms before peer marked offline */
+/* Mesh presence reuses the extension pattern (three missed check-ins), but a
+ * mesh check-in is four gossip intervals: ESP-NOW shares the air with Wi-Fi
+ * and loses frames the wired bus never does. 3 x 2 s = 6 s to declare a peer
+ * offline. */
+#define MESH_CHECKIN_MS    2000UL
+#define MESH_PEER_TIMEOUT  (MESH_CHECKIN_MS * CHECKIN_MISSES)
 #define MESH_PIN_VALID_MS  300000 /* PIN expires after 5 minutes */
 
 /* Mesh packet types */
@@ -277,7 +294,22 @@ static const char *SLOT_COLORS[] = {
 /* ================================================================
  * DATA TYPES
  * ================================================================ */
+/* Bus liveness. This drives polling and command routing and is NOT what the
+ * app sees -- see presence_t below. */
 typedef enum { EXT_EMPTY=0, EXT_ONLINE, EXT_OFFLINE } ext_state_t;
+
+/* What apps see. Deliberately a separate layer from bus liveness: a board can
+ * be answering the bus (so we keep polling and controlling it) while still
+ * reporting "intermittent" because it hasn't been solid for a minute yet. */
+typedef enum { PRES_OFFLINE=0, PRES_ONLINE, PRES_INTERMITTENT } presence_t;
+
+static const char *presence_str(presence_t p) {
+    switch (p) {
+        case PRES_ONLINE:       return "online";
+        case PRES_INTERMITTENT: return "intermittent";
+        default:                return "offline";
+    }
+}
 
 /* Mesh switch state (for gossip) */
 typedef struct {
@@ -294,8 +326,12 @@ typedef struct {
     uint8_t       uid[4];
     uint8_t       mac[6];
     char          name[24];
-    bool          online;
+    bool          online;          /* link liveness -- routing, not UI */
     uint32_t      last_seen_ms;
+    /* Presence debounce, mirroring extension_t below. */
+    uint32_t      settle_until_ms; /* 0 = settled; else back but not solid yet */
+    uint32_t      last_drop_ms;
+    uint8_t       drops;
     mesh_switch_t switches[12];
     uint8_t       switch_count;
     uint8_t       fw[3];          /* peer's master firmware version */
@@ -356,6 +392,12 @@ typedef struct {
     bool        relay2;
     uint8_t     missed;
     uint32_t    last_seen_ms;
+    /* Presence debounce. Zero means "never dropped" -- a freshly adopted
+     * board appears on the dashboard at once; only a *return* has to serve
+     * the settle window. */
+    uint32_t    settle_until_ms;
+    uint32_t    last_drop_ms;
+    uint8_t     drops;               /* drops inside PRESENCE_FLAP_MS */
     uint32_t    last_relay1_cmd_ms;  /* rate limiting */
     uint32_t    last_relay2_cmd_ms;
     bool        polled_once;         /* for boot overlay */
@@ -366,6 +408,83 @@ typedef struct {
     uint8_t     ota_fail_ver[3];     /* which version those failures were for */
     uint32_t    ota_next_try_ms;     /* backoff gate */
 } extension_t;
+
+/* ---- Presence ---------------------------------------------------------
+ * One rule, applied to extensions and to mesh peers alike. Callers pass the
+ * raw liveness flag plus the debounce fields; the result is what apps see.
+ *
+ *   down  + flapping recently  -> intermittent (diagnostic, not a plain outage)
+ *   down                       -> offline
+ *   up    + inside settle win  -> intermittent (back, but not trusted yet)
+ *   up                         -> online
+ *
+ * Millis comparisons are signed differences so a 49-day rollover can't strand
+ * a board in the wrong state. */
+static presence_t presence_of(bool up, uint32_t settle_until_ms,
+                              uint32_t last_drop_ms, uint8_t drops,
+                              uint32_t now) {
+    if (!up) {
+        bool recent = last_drop_ms && (now - last_drop_ms) < PRESENCE_FLAP_MS;
+        return (drops >= 2 && recent) ? PRES_INTERMITTENT : PRES_OFFLINE;
+    }
+    if (settle_until_ms && (int32_t)(now - settle_until_ms) < 0)
+        return PRES_INTERMITTENT;
+    return PRES_ONLINE;
+}
+
+/* Bookkeeping for a transition, shared by both presence users. `up` is the
+ * new liveness. Returns nothing; the caller owns the mutex. */
+static void presence_note_drop(uint32_t *settle_until_ms,
+                               uint32_t *last_drop_ms, uint8_t *drops,
+                               uint32_t now) {
+    if (*last_drop_ms && (now - *last_drop_ms) >= PRESENCE_FLAP_MS) *drops = 0;
+    if (*drops < 255) (*drops)++;
+    *last_drop_ms = now ? now : 1;
+    *settle_until_ms = 0;
+}
+
+/* `last_drop_ms` of 0 means this thing has no history of leaving -- a
+ * first-ever appearance (fresh adoption, a master joining the mesh). Those
+ * show up immediately; the settle window exists for a *return*. */
+static void presence_note_return(uint32_t *settle_until_ms,
+                                 uint32_t last_drop_ms, uint32_t now) {
+    if (!last_drop_ms) { *settle_until_ms = 0; return; }
+    uint32_t until = now + PRESENCE_SETTLE_MS;
+    *settle_until_ms = until ? until : 1;   /* 0 is reserved for "settled" */
+}
+
+/* Called on every successful check-in: retires the settle window once it has
+ * elapsed, and forgets an old flap run. */
+static void presence_tick_up(uint32_t *settle_until_ms,
+                             uint32_t *last_drop_ms, uint8_t *drops,
+                             uint32_t now) {
+    if (*settle_until_ms && (int32_t)(now - *settle_until_ms) >= 0)
+        *settle_until_ms = 0;
+    if (*last_drop_ms && (now - *last_drop_ms) >= PRESENCE_FLAP_MS) {
+        *last_drop_ms = 0;
+        *drops = 0;
+    }
+}
+
+/* Seconds since this thing was last heard from. 0 while it is being heard
+ * from right now, and 0 during a post-welcome grace window (last_seen_ms is
+ * parked in the future there). */
+static uint32_t seconds_since(uint32_t last_seen_ms, uint32_t now) {
+    if (last_seen_ms == 0) return 0;
+    if ((int32_t)(now - last_seen_ms) < 0) return 0;
+    return (now - last_seen_ms) / 1000UL;
+}
+
+static presence_t ext_presence(const extension_t *e, uint32_t now) {
+    if (e->state == EXT_EMPTY) return PRES_OFFLINE;
+    return presence_of(e->state == EXT_ONLINE, e->settle_until_ms,
+                       e->last_drop_ms, e->drops, now);
+}
+
+static presence_t peer_presence(const mesh_peer_t *p, uint32_t now) {
+    return presence_of(p->online, p->settle_until_ms,
+                       p->last_drop_ms, p->drops, now);
+}
 
 /* Pending challenge tracking */
 #define MAX_CHALLENGES 5
@@ -992,6 +1111,7 @@ static void mesh_gossip(void) {
     s2["color"]=SLOT_COLORS[0]; s2["state"]=r2; s2["online"]=true;
 
     /* Add extension switches */
+    uint32_t now_ms = millis();
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     for (int i=0;i<MAX_EXTENSIONS;i++) {
         if (extensions[i].state==EXT_EMPTY) continue;
@@ -1004,7 +1124,7 @@ static void mesh_gossip(void) {
                       ("Switch "+String(ch+i*2+2)):sw_name;
             s["color"]=SLOT_COLORS[i+1<6?i+1:5];
             s["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
-            s["online"]=(extensions[i].state==EXT_ONLINE);
+            s["online"]=(ext_presence(&extensions[i],now_ms)==PRES_ONLINE);
         }
     }
     xSemaphoreGive(state_mutex);
@@ -1148,6 +1268,9 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         }
 
         xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (!mesh_peers[idx].online)
+            presence_note_return(&mesh_peers[idx].settle_until_ms,
+                                 mesh_peers[idx].last_drop_ms, millis());
         mesh_peers[idx].online       = true;
         mesh_peers[idx].last_seen_ms = millis();
         /* If a peer reports a newer credential version we missed a change
@@ -1552,6 +1675,9 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         if (idx >= 0) {
             xSemaphoreTake(state_mutex, portMAX_DELAY);
             mesh_peers[idx].last_seen_ms = millis();
+            if (!mesh_peers[idx].online)
+                presence_note_return(&mesh_peers[idx].settle_until_ms,
+                                     mesh_peers[idx].last_drop_ms, millis());
             mesh_peers[idx].online = true;
             xSemaphoreGive(state_mutex);
         }
@@ -1714,7 +1840,22 @@ static void mesh_check_timeouts(void) {
         if (!mesh_peers[i].online) continue;
         if ((now - mesh_peers[i].last_seen_ms) > MESH_PEER_TIMEOUT) {
             mesh_peers[i].online = false;
+            presence_note_drop(&mesh_peers[i].settle_until_ms,
+                               &mesh_peers[i].last_drop_ms,
+                               &mesh_peers[i].drops, now);
             Serial.printf("[MESH] Peer offline: %s\n", mesh_peers[i].name);
+            xSemaphoreGive(state_mutex);
+            notify_ui();
+            xSemaphoreTake(state_mutex, portMAX_DELAY);
+            continue;
+        }
+        /* A returning peer's card only goes green after a solid minute; that
+         * moment has to push a state update of its own. */
+        uint32_t before = mesh_peers[i].settle_until_ms;
+        presence_tick_up(&mesh_peers[i].settle_until_ms,
+                         &mesh_peers[i].last_drop_ms,
+                         &mesh_peers[i].drops, now);
+        if (before && mesh_peers[i].settle_until_ms == 0) {
             xSemaphoreGive(state_mutex);
             notify_ui();
             xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -2231,6 +2372,12 @@ static void handle_response(const uint8_t *frame) {
                     extensions[existing].relay2);
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         extensions[existing].polled_once=true;
+        /* A board that had gone offline and re-announced is a *return*, so it
+         * serves the settle window like any other; one that never left keeps
+         * whatever presence it already had. */
+        if (extensions[existing].state==EXT_OFFLINE)
+            presence_note_return(&extensions[existing].settle_until_ms,
+                                 extensions[existing].last_drop_ms,millis());
         extensions[existing].state=EXT_ONLINE;
         extensions[existing].missed=0;
         /* Grace period: wait 1s before polling to let extension save state */
@@ -2347,6 +2494,13 @@ static void ext_query_info(int i) {
  * master believe the newcomer is already up to date and it would never be
  * offered an update. A stale ota_fails would blacklist it outright. */
 static void ext_reset_identity(extension_t *e) {
+    /* Every caller means "this slot now holds a different board, or none":
+     * fresh adoption, slot replace, NVS restore, removal, boot init. A board
+     * with no history is present from the moment it answers -- the settle
+     * window is for a *return*, not a first appearance. */
+    e->settle_until_ms = 0;
+    e->last_drop_ms    = 0;
+    e->drops           = 0;
     e->hw_type = 0;
     e->hw_rev  = 0;
     e->fw_ver[0] = e->fw_ver[1] = e->fw_ver[2] = 0;
@@ -2379,6 +2533,9 @@ static void poll_extension(int i) {
         extensions[i].missed++;
         if (extensions[i].missed>=MISSED_MAX&&extensions[i].state==EXT_ONLINE) {
             extensions[i].state=EXT_OFFLINE;
+            presence_note_drop(&extensions[i].settle_until_ms,
+                               &extensions[i].last_drop_ms,
+                               &extensions[i].drops, millis());
             Serial.printf("[OFFLINE] %s\n",extensions[i].name);
             xSemaphoreGive(state_mutex); notify_ui(); return;
         }
@@ -2399,9 +2556,24 @@ static void poll_extension(int i) {
     extensions[i].last_seen_ms=millis();
     extensions[i].polled_once=true;
     bool was_offline=(extensions[i].state==EXT_OFFLINE);
-    if (was_offline) extensions[i].state=EXT_ONLINE;
+    bool was_settling=(extensions[i].settle_until_ms!=0);
+    if (was_offline) {
+        extensions[i].state=EXT_ONLINE;
+        /* Back on the bus, but its switches stay off the dashboard until it
+         * has been solid for a minute. */
+        presence_note_return(&extensions[i].settle_until_ms,
+                             extensions[i].last_drop_ms, millis());
+    } else {
+        presence_tick_up(&extensions[i].settle_until_ms,
+                         &extensions[i].last_drop_ms,
+                         &extensions[i].drops, millis());
+    }
+    /* The settle window expiring is a visible event -- it is what puts the
+     * switches back on the dashboard -- so it has to push, not wait for the
+     * next unrelated change. */
+    bool settled_now=(was_settling && extensions[i].settle_until_ms==0);
 
-    bool changed=was_offline;
+    bool changed=was_offline||settled_now;
     if (resp[3]==CMD_STATE_RESP&&resp[4]>=3) {
         uint8_t flags=resp[5],evts=resp[7];
         bool r1=(flags>>0)&0x01, r2=(flags>>1)&0x01;
@@ -2703,7 +2875,12 @@ static String build_state_json(void) {
     xSemaphoreGive(state_mutex);
 
     /* Now build JSON without holding mutex */
-    StaticJsonDocument<6144> doc;
+    /* Heap, not stack. task_web is created with an 8192-byte stack and this
+     * function already parks a 6 KB document plus a full extension snapshot
+     * on it -- there was almost nothing left, and the presence fields added
+     * below would have tipped it over. */
+    DynamicJsonDocument doc(8192);
+    uint32_t now_ms = millis();
     doc["uptime"]=millis()/1000;
     doc["boot_complete"]=snap_boot;
     doc["master_name"]=snap_mname;
@@ -2771,7 +2948,7 @@ static String build_state_json(void) {
             sw["color"]=SLOT_COLORS[slot+1<6?slot+1:5];
             sw["channel"]=ch;
             sw["state"]=(ch==1)?snap_ext[slot].relay1:snap_ext[slot].relay2;
-            sw["online"]=(snap_ext[slot].state==EXT_ONLINE);
+            sw["online"]=(ext_presence(&snap_ext[slot],now_ms)==PRES_ONLINE);
         }
     }
 
@@ -2794,7 +2971,7 @@ static String build_state_json(void) {
                 sw["color"]=SLOT_COLORS[i+1<6?i+1:5];
                 sw["channel"]=ch;
                 sw["state"]=(ch==1)?snap_ext[i].relay1:snap_ext[i].relay2;
-                sw["online"]=(snap_ext[i].state==EXT_ONLINE);
+                sw["online"]=(ext_presence(&snap_ext[i],now_ms)==PRES_ONLINE);
             }
         }
     }
@@ -2809,6 +2986,23 @@ static String build_state_json(void) {
                  snap_pend[i].uid[0],snap_pend[i].uid[1],
                  snap_pend[i].uid[2],snap_pend[i].uid[3]);
         p["uid"]=uid_str;
+    }
+
+    /* Extension presence travels in the state stream, not just in the
+     * /api/extensions poll: the story requires apps to learn presence from
+     * the master rather than infer it from their own failures, and the
+     * extension list has to show offline/intermittent + last-seen the moment
+     * it changes. `last_seen` is seconds ago -- the master has no clock. */
+    JsonArray exts=doc.createNestedArray("extensions");
+    for(int i=0;i<MAX_EXTENSIONS;i++) {
+        if(snap_ext[i].state==EXT_EMPTY) continue;
+        JsonObject ex=exts.createNestedObject();
+        presence_t pr=ext_presence(&snap_ext[i],now_ms);
+        ex["slot"]=i;
+        ex["name"]=snap_ext[i].name;
+        ex["online"]=(pr==PRES_ONLINE);
+        ex["presence"]=presence_str(pr);
+        ex["last_seen"]=seconds_since(snap_ext[i].last_seen_ms,now_ms);
     }
 
     /* Offline slots for replace option */
@@ -2840,9 +3034,13 @@ static String build_state_json(void) {
         snprintf(puid,sizeof(puid),"%02X%02X%02X%02X",
                  mesh_peers[i].uid[0],mesh_peers[i].uid[1],
                  mesh_peers[i].uid[2],mesh_peers[i].uid[3]);
-        p["uid"]    = puid;
-        p["name"]   = mesh_peers[i].name;
-        p["online"] = mesh_peers[i].online;
+        presence_t ppr = peer_presence(&mesh_peers[i], now_ms);
+        p["uid"]       = puid;
+        p["name"]      = mesh_peers[i].name;
+        /* Same debounce as extensions, so a master card doesn't flap. */
+        p["online"]    = (ppr == PRES_ONLINE);
+        p["presence"]  = presence_str(ppr);
+        p["last_seen"] = seconds_since(mesh_peers[i].last_seen_ms, now_ms);
         JsonArray psw = p.createNestedArray("switches");
         for (int j=0;j<mesh_peers[i].switch_count;j++) {
             JsonObject s = psw.createNestedObject();
@@ -3287,15 +3485,22 @@ static void setup_web(void) {
         /* -- Extensions API -- */
     server.on("/api/extensions", HTTP_GET, [](){
         if (!auth_ok()) return;
-        StaticJsonDocument<1024> doc;
+        StaticJsonDocument<1536> doc;
         JsonArray arr = doc.createNestedArray("extensions");
+        uint32_t now_ms = millis();
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         for (int i=0; i<MAX_EXTENSIONS; i++) {
             if (extensions[i].state == EXT_EMPTY) continue;
             JsonObject e = arr.createNestedObject();
+            presence_t pr = ext_presence(&extensions[i], now_ms);
             e["slot"]   = i;
             e["addr"]   = extensions[i].address;
-            e["online"] = (extensions[i].state == EXT_ONLINE);
+            /* "online" is presence, not bus liveness: a board that has just
+             * come back is still settling and must not put its switches back
+             * on the dashboard yet. */
+            e["online"] = (pr == PRES_ONLINE);
+            e["presence"]  = presence_str(pr);
+            e["last_seen"] = seconds_since(extensions[i].last_seen_ms, now_ms);
             e["type"]   = extensions[i].hw_type;
             e["rev"]    = extensions[i].hw_rev;
             char vbuf[16];
@@ -4256,24 +4461,45 @@ static void setup_web(void) {
     /* Mesh status */
     server.on("/api/mesh/status", HTTP_GET, [](){
         if (!auth_ok()) return;
-        StaticJsonDocument<3072> doc;   /* holds MAX_MESH_MASTERS peer entries */
+        /* Heap: 16 members with uid, name, presence, last-seen and firmware
+         * no longer fit in a stack document task_web can afford. */
+        DynamicJsonDocument doc(4096);
         doc["active"]    = mesh_active;
         doc["mesh_name"] = mesh_name;
         doc["pin_valid"] = mesh_pin_valid;
         if (mesh_pin_valid) doc["pin"] = mesh_pin;
+        /* Counted on presence, so the number matches the green cards in
+         * the list below rather than disagreeing with them for a minute. */
         int online_count = 0;
         for (int i=0;i<MAX_MESH_MASTERS;i++)
-            if (mesh_peers[i].online) online_count++;
+            if (peer_presence(&mesh_peers[i], millis()) == PRES_ONLINE)
+                online_count++;
         doc["peer_count"] = online_count;
         /* Version of every node, so convergence is visible in the UI. */
         doc["fw"] = MASTER_FW_VERSION;
         doc["syncing"] = master_pull_active || master_serve_busy;
         doc["cred_stale"] = cred_stale;
+        /* Every member, not just the reachable ones. The Mesh details screen
+         * lists offline masters too (with a last-seen time and Remove
+         * greyed out) -- a master that vanishes from the list is exactly the
+         * flapping the story rules out. */
         JsonArray pv = doc.createNestedArray("peers");
+        uint32_t now_ms = millis();
         for (int i=0;i<MAX_MESH_MASTERS;i++) {
-            if (!mesh_peers[i].online) continue;
+            bool has_uid=false;
+            for (int k=0;k<4;k++) if (mesh_peers[i].uid[k]) { has_uid=true; break; }
+            if (!has_uid) continue;
             JsonObject o = pv.createNestedObject();
+            char puid[12];
+            snprintf(puid,sizeof(puid),"%02X%02X%02X%02X",
+                     mesh_peers[i].uid[0],mesh_peers[i].uid[1],
+                     mesh_peers[i].uid[2],mesh_peers[i].uid[3]);
+            presence_t ppr = peer_presence(&mesh_peers[i], now_ms);
+            o["uid"]  = puid;
             o["name"] = mesh_peers[i].name;
+            o["online"]    = (ppr == PRES_ONLINE);
+            o["presence"]  = presence_str(ppr);
+            o["last_seen"] = seconds_since(mesh_peers[i].last_seen_ms, now_ms);
             char vb[16];
             snprintf(vb,sizeof(vb),"%u.%u.%u",
                      mesh_peers[i].fw[0],mesh_peers[i].fw[1],mesh_peers[i].fw[2]);
@@ -5471,7 +5697,10 @@ static void ble_handle_request(const char *json) {
     Serial.printf("[BLE] cmd='%s' ctr=%lu\n", cmd,
                   (unsigned long)(req["k"] | 0));
 
-    StaticJsonDocument<2048> res;
+    /* Heap: the "exts" reply now carries presence and last-seen per slot on
+     * top of names, versions and available images, and this runs on the BLE
+     * task's stack. */
+    DynamicJsonDocument res(3072);
 
     /* There is no login here, by design: the password must never cross
      * Bluetooth. Every command carries a proof of a token obtained over
@@ -5505,13 +5734,17 @@ static void ble_handle_request(const char *json) {
          * not yet uploaded is invisible here, so the app decides what is
          * available by comparing its own manifest against "fw". */
         JsonArray a = res.createNestedArray("extensions");
+        uint32_t now_ms = millis();
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         for (int i = 0; i < MAX_EXTENSIONS; i++) {
             if (extensions[i].state == EXT_EMPTY) continue;
             JsonObject o = a.createNestedObject();
+            presence_t pr = ext_presence(&extensions[i], now_ms);
             o["slot"]   = i;
             o["addr"]   = extensions[i].address;
-            o["online"] = (extensions[i].state == EXT_ONLINE);
+            o["online"] = (pr == PRES_ONLINE);
+            o["presence"]  = presence_str(pr);
+            o["last_seen"] = seconds_since(extensions[i].last_seen_ms, now_ms);
             o["type"]   = extensions[i].hw_type;
             o["rev"]    = extensions[i].hw_rev;
             o["name"]   = extensions[i].name;
