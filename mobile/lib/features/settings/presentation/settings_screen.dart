@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app/l10n/app_localizations.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
@@ -9,6 +10,7 @@ import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
+import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../../core/ws/state_socket.dart';
@@ -62,10 +64,13 @@ class SettingsScreen extends ConsumerWidget {
           const _SectionHeader('Connection'),
           RadioGroup<TransportPreference>(
             groupValue: transportPref,
-            onChanged: (pref) {
-              if (pref != null) {
-                ref.read(transportCoordinatorProvider).choose(pref);
-              }
+            onChanged: (pref) async {
+              if (pref == null) return;
+              final messenger = ScaffoldMessenger.of(context);
+              final l10n = AppLocalizations.of(context)!;
+              final result =
+                  await ref.read(transportCoordinatorProvider).choose(pref);
+              showTransportRefusal(messenger, l10n, result);
             },
             child: const Column(
               children: [

@@ -71,6 +71,17 @@
   "transportBluetooth": "Bluetooth",
   "transportBluetoothDesc": "Control over Bluetooth so your phone keeps its own network.",
   "switchTransport": "Switch connection",
+  "btNeedsWifiLogin": "Sign in over Wi-Fi first — Bluetooth mode uses that sign-in.",
+  "btPermissionDenied": "Bluetooth permission is needed for this mode.",
+  "openSettings": "Open settings",
+  "accessResetTitle": "Your access was reset",
+  "accessResetBody": "The password was changed, so this phone was signed out. Connect to {network} to sign in again.",
+  "@accessResetBody": {
+    "placeholders": {
+      "network": {"type": "String"}
+    }
+  },
+  "accessResetBodyGeneric": "The password was changed, so this phone was signed out. Connect to the switch's Wi-Fi to sign in again.",
   "wifiOnlyTitle": "Wi-Fi needed for this",
   "wifiOnlyBody": "This action isn't available over Bluetooth. Join the switch's Wi-Fi network to continue.",
   "joinWifi": "Add / join Wi-Fi",
