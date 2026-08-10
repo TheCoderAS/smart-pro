@@ -547,6 +547,7 @@ typedef struct {
     uint32_t opened_ms;
     uint32_t last_ms;
     uint32_t last_counter;   /* replay guard: must strictly increase */
+    uint8_t  snonce[8];      /* this connection's session nonce */
 } ble_conn_t;
 static ble_conn_t   ble_conns[BLE_MAX_CONN];
 static uint8_t      ble_conn_count = 0;
@@ -5176,12 +5177,30 @@ static void task_fwsync(void *arg) {
 /* ================================================================
  * BLE RECOVERY SERVICE
  * ================================================================ */
-static void ble_new_session_nonce(void) {
+/* The nonce is per connection, not global. It used to be one shared
+ * buffer regenerated on every onConnect, so a second phone connecting
+ * silently invalidated the first phone's proofs; the first would re-read
+ * the nonce, restart its counter at 1, and then be rejected by the replay
+ * guard as stale -- two clients permanently broke each other, even though
+ * the firmware allows three and the spec requires concurrent control. */
+static void ble_fill_nonce(uint8_t *dst) {
     for (int i = 0; i < 8; i += 4) {
         uint32_t r = esp_random();
-        ble_snonce[i]=r&0xFF; ble_snonce[i+1]=(r>>8)&0xFF;
-        ble_snonce[i+2]=(r>>16)&0xFF; ble_snonce[i+3]=(r>>24)&0xFF;
+        dst[i]=r&0xFF; dst[i+1]=(r>>8)&0xFF;
+        dst[i+2]=(r>>16)&0xFF; dst[i+3]=(r>>24)&0xFF;
     }
+}
+
+/* Index of the connection owning a handle, or -1. */
+static int ble_conn_index(uint16_t handle) {
+    for (int i = 0; i < BLE_MAX_CONN; i++)
+        if (ble_conns[i].used && ble_conns[i].handle == handle) return i;
+    return -1;
+}
+
+/* Placeholder only: each reader is served its own nonce by BleSNonceCB. */
+static void ble_new_session_nonce(void) {
+    ble_fill_nonce(ble_snonce);
     if (ble_snonce_char) ble_snonce_char->setValue(ble_snonce, 8);
 }
 
@@ -5240,6 +5259,17 @@ class BleRespCB : public NimBLECharacteristicCallbacks {
         }
         ble_recover_ready = true;
         ble_new_nonce();
+    }
+};
+
+/* Serves the calling connection its own nonce. Without this the single
+ * stored characteristic value would hand every client whichever nonce was
+ * generated last. */
+class BleSNonceCB : public NimBLECharacteristicCallbacks {
+    void onRead(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        int idx = ble_conn_index(info.getConnHandle());
+        if (idx >= 0) ch->setValue(ble_conns[idx].snonce, 8);
+        else          ch->setValue(ble_snonce, 8);
     }
 };
 
@@ -5392,9 +5422,17 @@ static bool ble_proof_ok(JsonDocument &req) {
     for (int i = 0; i < 8; i++) sprintf(token + 16 + i*2, "%02x", mac[i]);
     token[32] = 0;
 
-    /* Expected proof over this connection's nonce and the counter. */
+    /* Expected proof over THIS connection's nonce and the counter. An
+     * unknown handle is rejected outright: previously the replay-guard
+     * loop simply fell through and returned true, skipping the counter
+     * check whenever the connection table and handle disagreed. */
+    int ci = ble_conn_index(ble_req_handle);
+    if (ci < 0) {
+        Serial.println("[BLE] request from an untracked connection, rejected");
+        return false;
+    }
     uint8_t msg[12];
-    memcpy(msg, ble_snonce, 8);
+    memcpy(msg, ble_conns[ci].snonce, 8);
     msg[8]=(ctr>>24)&0xFF; msg[9]=(ctr>>16)&0xFF;
     msg[10]=(ctr>>8)&0xFF; msg[11]=ctr&0xFF;
     uint8_t want[32];
@@ -5402,17 +5440,13 @@ static bool ble_proof_ok(JsonDocument &req) {
     if (!ct_equal(want, given, 8)) return false;
 
     /* Replay guard for this connection. */
-    for (int i = 0; i < BLE_MAX_CONN; i++) {
-        if (!ble_conns[i].used || ble_conns[i].handle != ble_req_handle) continue;
-        if (ctr <= ble_conns[i].last_counter) {
-            Serial.printf("[BLE] replayed counter %lu, rejected\n",
-                          (unsigned long)ctr);
-            return false;
-        }
-        ble_conns[i].last_counter = ctr;
-        ble_conns[i].authed = true;
-        break;
+    if (ctr <= ble_conns[ci].last_counter) {
+        Serial.printf("[BLE] replayed counter %lu, rejected\n",
+                      (unsigned long)ctr);
+        return false;
     }
+    ble_conns[ci].last_counter = ctr;
+    ble_conns[ci].authed = true;
     return true;
 }
 
@@ -5675,13 +5709,13 @@ class BleSrvCB : public NimBLEServerCallbacks {
             ble_conns[i].opened_ms = millis();
             ble_conns[i].last_ms   = millis();
             ble_conns[i].last_counter = 0;
+            ble_fill_nonce(ble_conns[i].snonce);
             ble_conn_count++;
             break;
         }
         ble_connected = (ble_conn_count > 0);
-        /* A new session nonce per connection: a proof recorded on an
-         * earlier connection cannot be replayed on this one. */
-        ble_new_session_nonce();
+        /* The nonce for this connection was generated as its slot was
+         * claimed above; other clients' nonces are untouched. */
         /* A new client never inherits a previous client's recovery result. */
         ble_clear_recovery_result();
         Serial.printf("[BLE] client connected (handle %u), %u open\n",
@@ -5822,6 +5856,8 @@ static void ble_recovery_begin(void) {
     /* Fresh per connection; the app reads it and binds every proof to it. */
     ble_snonce_char = svc->createCharacteristic(
         BLE_SNONCE_UUID, NIMBLE_PROPERTY::READ);
+    /* Each reader gets its OWN connection's nonce, not one shared value. */
+    ble_snonce_char->setCallbacks(new BleSNonceCB());
     ble_new_session_nonce();
 
     ble_new_nonce();
