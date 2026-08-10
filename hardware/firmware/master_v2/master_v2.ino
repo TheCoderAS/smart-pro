@@ -210,6 +210,9 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 /* How long a drop is remembered. Two drops inside the window mark the board
  * intermittent while it is down, rather than plainly offline. */
 #define PRESENCE_FLAP_MS   600000UL
+/* Restore pushes are spaced this far apart, per channel, so a whole house
+ * coming back after an outage doesn't slam every relay closed at once. */
+#define RESTORE_STAGGER_MS 40UL
 #define BUS_RESP_MS       20
 #define LISTEN_WINDOW_MS  30
 #define LISTEN_INTERVAL_MS 200
@@ -318,6 +321,8 @@ typedef struct {
     char     color[8];
     bool     state;
     bool     online;
+    bool     restore; /* per-switch restore policy, gossiped so a peer's
+                       * card can show and change it like a local one */
     uint8_t  ch;      /* relay channel (1 or 2) */
 } mesh_switch_t;
 
@@ -771,6 +776,9 @@ static uint32_t fwrx_last_ms = 0;
  * callback and the bus task far above; Arduino's auto-prototype pass is
  * not reliable enough to depend on here. */
 static void     ext_reset_identity(extension_t *e);
+static bool     switch_id_valid(const String &id);
+static bool     nvs_load_restore(const char *id);
+static void     nvs_save_restore(const char *id, bool restore);
 static void     master_ver_parse(const char *s, uint8_t *v);
 static void     task_fwsync(void *arg);
 static void     hmac_sha256(const uint8_t *key, const uint8_t *msg,
@@ -1103,12 +1111,14 @@ static void mesh_gossip(void) {
     nvs_load_switch_name("master_1",sw_name,sizeof(sw_name));
     s1["name"]=(String(sw_name)=="Switch")?"Switch 1":sw_name;
     s1["color"]=SLOT_COLORS[0]; s1["state"]=r1; s1["online"]=true;
+    s1["restore"]=nvs_load_restore("master_1");
 
     JsonObject s2=sw.createNestedObject();
     s2["id"]="master_2"; s2["ch"]=2;
     nvs_load_switch_name("master_2",sw_name,sizeof(sw_name));
     s2["name"]=(String(sw_name)=="Switch")?"Switch 2":sw_name;
     s2["color"]=SLOT_COLORS[0]; s2["state"]=r2; s2["online"]=true;
+    s2["restore"]=nvs_load_restore("master_2");
 
     /* Add extension switches */
     uint32_t now_ms = millis();
@@ -1125,6 +1135,7 @@ static void mesh_gossip(void) {
             s["color"]=SLOT_COLORS[i+1<6?i+1:5];
             s["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
             s["online"]=(ext_presence(&extensions[i],now_ms)==PRES_ONLINE);
+            s["restore"]=nvs_load_restore(id);
         }
     }
     xSemaphoreGive(state_mutex);
@@ -1312,6 +1323,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                     s["color"]|"#444", sizeof(mesh_peers[idx].switches[i].color)-1);
             mesh_peers[idx].switches[i].state  = s["state"]|false;
             mesh_peers[idx].switches[i].online = s["online"]|false;
+            mesh_peers[idx].switches[i].restore = s["restore"]|false;
             mesh_peers[idx].switches[i].ch     = s["ch"]|1;
             mesh_peers[idx].switch_count++;
         }
@@ -1729,6 +1741,19 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 }
             }
 
+        /* Restore policy -- only apply if this is the target. `name` holds
+         * the switch id, `slot` the 0/1 policy. */
+        } else if (strcmp(cmd, "set_restore") == 0 && strlen(name) > 0) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0 && switch_id_valid(String(name))) {
+                nvs_save_restore(name, slot != 0);
+                Serial.printf("[MESH] %s restore policy -> %s\n",
+                              name, slot ? "restore" : "start off");
+                notify_ui();
+            }
+
         /* Reorder switches -- only apply if this is the target */
         } else if (strcmp(cmd, "reorder_switches") == 0 && strlen(order) > 0) {
             char self_uid[12];
@@ -1979,6 +2004,50 @@ static void nvs_load_switch_name(const char *id, char *name, int nlen) {
     else snprintf(name, nlen, "Switch");
 }
 
+/* Per-switch restore policy: true = restore last state after a power cut,
+ * false = always start off. The default is FALSE on purpose -- the story
+ * says the house comes back dark unless the owner opted that one switch in.
+ * Stored in "sw_names" so a factory reset wipes policies with the names. */
+static bool nvs_load_restore(const char *id) {
+    char key[20]; snprintf(key, sizeof(key), "rs:%s", id);
+    prefs.begin("sw_names", true);
+    bool v = prefs.getBool(key, false);
+    prefs.end();
+    return v;
+}
+
+static void nvs_save_restore(const char *id, bool restore) {
+    char key[20]; snprintf(key, sizeof(key), "rs:%s", id);
+    prefs.begin("sw_names", false);
+    prefs.putBool(key, restore);
+    prefs.end();
+}
+
+/* True for "master_1", "master_2", and "extN_1"/"extN_2" naming a slot that
+ * actually holds a board. Keeps a typo from silently creating an NVS key
+ * that nothing will ever read back. */
+static bool switch_id_valid(const String &id) {
+    if (id == "master_1" || id == "master_2") return true;
+    if (!id.startsWith("ext")) return false;
+    int us = id.indexOf('_');
+    if (us < 4) return false;
+    int slot = id.substring(3, us).toInt();
+    int ch   = id.substring(us + 1).toInt();
+    if (slot < 0 || slot >= MAX_EXTENSIONS) return false;
+    if (ch != 1 && ch != 2) return false;
+    return extensions[slot].state != EXT_EMPTY;
+}
+
+/* Spaces restore pushes out. Shared by the master's own two channels and by
+ * every extension channel, so the stagger holds across the whole board and
+ * not just within one device. */
+static uint32_t restore_last_ms = 0;
+static void restore_stagger(void) {
+    uint32_t since = millis() - restore_last_ms;
+    if (since < RESTORE_STAGGER_MS) delay(RESTORE_STAGGER_MS - since);
+    restore_last_ms = millis();
+}
+
 static void nvs_save_master_name(const char *name) {
     prefs.begin("sw_names", false);
     prefs.putString("master_name", name);
@@ -2139,19 +2208,18 @@ static void relay_state_save(void) {
     prefs.end();
 }
 
-static void relay_state_load(void) {
-    prefs.begin("relay_state",true);
-    master_relay1=prefs.getBool("m_r1",false);
-    master_relay2=prefs.getBool("m_r2",false);
-    /* Load extension relay states */
-    for (int i=0;i<MAX_EXTENSIONS;i++) {
-        char k1[8],k2[8];
-        snprintf(k1,sizeof(k1),"e%d_r1",i);
-        snprintf(k2,sizeof(k2),"e%d_r2",i);
-        extensions[i].relay1=prefs.getBool(k1,false);
-        extensions[i].relay2=prefs.getBool(k2,false);
-    }
-    prefs.end();
+/* Applies each channel's restore policy to the state just read from NVS.
+ * Channels set to "always start off" are zeroed here, which is what makes
+ * the rest of the boot path safe by construction: everything downstream (the
+ * master's own GPIO writes, the first-poll push to each extension) works from
+ * these values, so a restore can only ever take a channel from off to on --
+ * never the reverse -- and a "start off" channel is never pushed at all.
+ *
+ * `slot` is -1 for the master's own board. */
+static void apply_restore_policy(int slot, bool *r1, bool *r2) {
+    char id[16];
+    switch_id(id,sizeof(id),slot,1); if (!nvs_load_restore(id)) *r1=false;
+    switch_id(id,sizeof(id),slot,2); if (!nvs_load_restore(id)) *r2=false;
 }
 
 /* ================================================================
@@ -2578,15 +2646,36 @@ static void poll_extension(int i) {
         uint8_t flags=resp[5],evts=resp[7];
         bool r1=(flags>>0)&0x01, r2=(flags>>1)&0x01;
         if (was_first_poll) {
-            /* First successful poll -- extension boots OFF.
-             * Send master's saved state if different. */
+            /* First successful poll -- a registered extension boots with
+             * both relays off. Only restore-enabled channels carry a saved
+             * ON here (apply_restore_policy zeroed the rest), so this push can
+             * only ever go off -> on, and a board whose channels are all
+             * "start off" is never written to at all.
+             *
+             * One frame per channel, spaced by the restore stagger, so a
+             * whole house coming back doesn't close every relay at once. */
             bool want_r1=extensions[i].relay1;
             bool want_r2=extensions[i].relay2;
             if (want_r1!=r1 || want_r2!=r2) {
-                uint8_t relay_byte=(want_r1?0x01:0x00)|(want_r2?0x02:0x00);
                 xSemaphoreGive(state_mutex);
-                bus_send(addr, CMD_SET_RELAY, &relay_byte, 1);
-                bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                /* Walk the board to the wanted state one channel at a time,
+                 * leaving the other channel where it is, so each closing
+                 * relay is separated by the stagger interval. A channel that
+                 * already matches costs no frame at all -- which is the
+                 * common case for "always start off", since the board boots
+                 * off and apply_restore_policy zeroed its wanted state. */
+                if (want_r1!=r1) {
+                    uint8_t mask=(want_r1?0x01:0x00)|(r2?0x02:0x00);
+                    restore_stagger();
+                    bus_send(addr, CMD_SET_RELAY, &mask, 1);
+                    bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                }
+                if (want_r2!=r2) {
+                    uint8_t mask=(want_r1?0x01:0x00)|(want_r2?0x02:0x00);
+                    restore_stagger();
+                    bus_send(addr, CMD_SET_RELAY, &mask, 1);
+                    bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                }
                 xSemaphoreTake(state_mutex, portMAX_DELAY);
                 extensions[i].relay1=want_r1;
                 extensions[i].relay2=want_r2;
@@ -2932,6 +3021,9 @@ static String build_state_json(void) {
             sw["channel"]=ch;
             sw["state"]=(ch==1)?snap_r1:snap_r2;
             sw["online"]=true;
+            /* Per-switch restore policy travels in the state stream so every
+             * connected phone updates together (story Epic 2). */
+            sw["restore"]=nvs_load_restore(id.c_str());
         } else if(id.startsWith("ext")) {
             /* parse extN_ch */
             int us=id.indexOf('_');
@@ -2949,6 +3041,7 @@ static String build_state_json(void) {
             sw["channel"]=ch;
             sw["state"]=(ch==1)?snap_ext[slot].relay1:snap_ext[slot].relay2;
             sw["online"]=(ext_presence(&snap_ext[slot],now_ms)==PRES_ONLINE);
+            sw["restore"]=nvs_load_restore(id.c_str());
         }
     }
 
@@ -2972,6 +3065,7 @@ static String build_state_json(void) {
                 sw["channel"]=ch;
                 sw["state"]=(ch==1)?snap_ext[i].relay1:snap_ext[i].relay2;
                 sw["online"]=(ext_presence(&snap_ext[i],now_ms)==PRES_ONLINE);
+                sw["restore"]=nvs_load_restore(sw_id);
             }
         }
     }
@@ -3049,6 +3143,7 @@ static String build_state_json(void) {
             s["color"]  = mesh_peers[i].switches[j].color;
             s["state"]  = mesh_peers[i].switches[j].state;
             s["online"] = mesh_peers[i].switches[j].online;
+            s["restore"] = mesh_peers[i].switches[j].restore;
             s["ch"]     = mesh_peers[i].switches[j].ch;
         }
     }
@@ -3357,6 +3452,24 @@ static void setup_web(void) {
         if (id.length()==0||name.length()==0) {
             server.send(400,"application/json","{\"ok\":false}"); return; }
         nvs_save_switch_name(id.c_str(), name.c_str());
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
+    /* Per-switch restore policy: "restore last state" vs "always start off".
+     * Lives in the same menu as rename, and the same endpoint shape. */
+    server.on("/api/switch/restore", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        String id = server.arg("id");
+        String rs = server.arg("restore");
+        if (id.length()==0 || rs.length()==0) {
+            server.send(400,"application/json",
+                "{\"error\":\"id and restore are required\"}"); return; }
+        if (!switch_id_valid(id)) {
+            server.send(400,"application/json",
+                "{\"error\":\"unknown switch\"}"); return; }
+        bool on = (rs=="1"||rs=="true"||rs=="on");
+        nvs_save_restore(id.c_str(), on);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -4452,6 +4565,20 @@ static void setup_web(void) {
             } else {
                 mesh_send_config("reorder_switches", target_uid.c_str(),
                                  nullptr, order.c_str(), -1);
+            }
+
+        } else if (cmd == "set_restore") {
+            /* "name" carries the switch id and "slot" the policy (0/1), so
+             * this rides the existing config packet unchanged -- peers on
+             * older firmware simply ignore a command they don't know. */
+            if (is_self) {
+                if (switch_id_valid(name)) {
+                    nvs_save_restore(name.c_str(), slot != 0);
+                    notify_ui();
+                }
+            } else {
+                mesh_send_config("set_restore", target_uid.c_str(),
+                                 name.c_str(), nullptr, slot);
             }
         }
 
@@ -5800,6 +5927,16 @@ static void ble_handle_request(const char *json) {
             notify_ui();
             res["ok"] = true;
         }
+    } else if (!strcmp(cmd, "set_restore")) {
+        /* Per-switch restore policy, same shape as rename_sw. Bluetooth is
+         * a full control path, so the setting is reachable there too. */
+        const char *id = req["id"] | "";
+        if (!id[0] || !switch_id_valid(String(id))) { res["err"] = "bad id"; }
+        else {
+            nvs_save_restore(id, req["restore"] | false);
+            notify_ui();
+            res["ok"] = true;
+        }
     } else if (!strcmp(cmd, "rename_master")) {
         const char *nm = req["name"] | "";
         if (!nm[0]) { res["err"] = "bad name"; }
@@ -6349,8 +6486,13 @@ void setup() {
     master_relay1=prefs.getBool("m_r1",false);
     master_relay2=prefs.getBool("m_r2",false);
     prefs.end();
-    digitalWrite(RELAY1_PIN, master_relay1?LOW:HIGH);
-    digitalWrite(RELAY2_PIN, master_relay2?LOW:HIGH);
+    /* Nothing energizes unless the owner opted that channel into restore. */
+    apply_restore_policy(-1, &master_relay1, &master_relay2);
+    /* Both pins are already HIGH (off) from the pinMode block above, so these
+     * writes can only close a relay, never open one. Staggered so a whole
+     * house coming back doesn't switch everything in the same millisecond. */
+    if (master_relay1) { restore_stagger(); digitalWrite(RELAY1_PIN, LOW); }
+    if (master_relay2) { restore_stagger(); digitalWrite(RELAY2_PIN, LOW); }
     Serial.printf("[RELAY] Restored: CH1=%s CH2=%s\n",
                   master_relay1?"ON":"OFF", master_relay2?"ON":"OFF");
 
@@ -6381,6 +6523,11 @@ void setup() {
           extensions[i].relay2=prefs.getBool(k2,false);
       }
       prefs.end();
+      /* Registered extensions boot with their relays off and are pushed
+       * state on their first poll. Zeroing "start off" channels here means
+       * those channels are never pushed at all. */
+      for (int i=0;i<MAX_EXTENSIONS;i++)
+          apply_restore_policy(i, &extensions[i].relay1, &extensions[i].relay2);
     }
 
     /* Load master name and switch order */
