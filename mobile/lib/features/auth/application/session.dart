@@ -141,6 +141,18 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       return NeedsCommissioning(info);
     }
 
+    // The app opens on the last-used master, subject to the same checks as
+    // any switch. Something else answering means the phone is on another
+    // master's network — say which one to join rather than quietly opening
+    // a dashboard the user didn't ask for.
+    //
+    // Ahead of the token check on purpose: we have no session for a master
+    // we aren't talking to, and showing a login form for that would be the
+    // exact mix-up the story calls a bug. Only when more than one master
+    // is set up; with one, whoever answers is the one.
+    final wrong = await _wrongMasterAnswered(info.uid);
+    if (wrong != null) return wrong;
+
     final stored = await _store.readToken(info.uid);
     if (stored == null) return NeedsLogin(info);
 
@@ -172,6 +184,35 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     ref.read(tokenProvider.notifier).set(null);
     await _store.deleteToken(info.uid);
     return NeedsLogin(info);
+  }
+
+  /// [WrongNetwork] when a master answered that isn't the one the app was
+  /// last on, or null to carry on with whoever did answer.
+  Future<WrongNetwork?> _wrongMasterAnswered(String answeredUid) async {
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      if (masters.length < 2) return null;
+      final lastUid =
+          await ref.read(masterRegistryProvider.notifier).lastUsed();
+      if (lastUid == null || lastUid == answeredUid) return null;
+      for (final m in masters) {
+        if (m.uid != lastUid) continue;
+        // Meshed masters are one home: any member answering is the right
+        // answer, and the vault keys them on a shared mesh id.
+        final answered = masters.where((x) => x.uid == answeredUid);
+        if (answered.isNotEmpty &&
+            m.meshId != null &&
+            m.meshId != 0 &&
+            answered.first.meshId == m.meshId) {
+          return null;
+        }
+        final name = answered.isEmpty ? null : answered.first.name;
+        return WrongNetwork(wanted: m, found: name);
+      }
+    } on Object catch (e) {
+      log.w('last-used check skipped: $e');
+    }
+    return null;
   }
 
   /// Attempts a login. On success persists the token (keyed by master
