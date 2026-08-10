@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 
-import '../api/dio_client.dart';
 import '../ws/state_dto.dart';
 import '../ws/state_socket.dart';
 import 'ble_session.dart';
@@ -76,9 +75,12 @@ class CurrentTransportNotifier extends Notifier<TransportKind> {
 final activeControlProvider = Provider<ControlTransport>((ref) {
   final kind = ref.watch(currentTransportProvider);
   if (kind == TransportKind.ble) {
+    // Rebuild when the session changes (connect / roam / teardown) so
+    // the transport always holds the live client. The token isn't
+    // passed — it lives inside the client and only derives proofs.
+    ref.watch(bleSessionProvider);
     final session = ref.watch(bleSessionProvider.notifier);
-    final token = ref.watch(tokenProvider);
-    return BleControlTransport(session.client, token);
+    return BleControlTransport(session.client);
   }
   return WifiControlTransport(ref);
 });

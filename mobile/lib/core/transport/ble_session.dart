@@ -173,7 +173,18 @@ class BleSessionController extends Notifier<BleSessionState> {
 
   Future<void> _openClient(String deviceId, String name) async {
     await _closeClient();
-    final client = BleControlClient(ref.read(reactiveBleProvider), deviceId);
+    // BLE carries no login (v5.1 Epic 5) — a Wi-Fi-issued token is
+    // required before any command can be proved.
+    final token = ref.read(tokenProvider);
+    if (token == null) {
+      state = const BleSessionState(
+        status: BleSessionStatus.failed,
+        error: 'Sign in over Wi-Fi first.',
+      );
+      return;
+    }
+    final client =
+        BleControlClient(ref.read(reactiveBleProvider), deviceId, token);
     await client.connect();
     _client = client;
     _connectedDeviceId = deviceId;
@@ -184,14 +195,11 @@ class BleSessionController extends Notifier<BleSessionState> {
     );
 
     // Pull an initial full state so the dashboard fills immediately.
-    final token = ref.read(tokenProvider);
-    if (token != null) {
-      try {
-        final map = await client.request(BleCommands.state(token));
-        _emit(StateSnapshot.fromJson(map));
-      } on Exception catch (e) {
-        log.w('initial ble state fetch failed: $e');
-      }
+    try {
+      final map = await client.request((p) => BleCommands.state(p));
+      _emit(StateSnapshot.fromJson(map));
+    } on Exception catch (e) {
+      log.w('initial ble state fetch failed: $e');
     }
   }
 
@@ -240,7 +248,7 @@ class BleSessionController extends Notifier<BleSessionState> {
     final client = _client;
     final token = ref.read(tokenProvider);
     if (client == null || token == null) return;
-    final map = await client.request(BleCommands.state(token));
+    final map = await client.request((p) => BleCommands.state(p));
     _emit(StateSnapshot.fromJson(map));
   }
 
@@ -288,18 +296,16 @@ class BleSessionController extends Notifier<BleSessionState> {
 /// `reorder` write all work over BLE per the v2 contract; only firmware
 /// transfer stays Wi-Fi.
 class BleControlTransport implements ControlTransport {
-  const BleControlTransport(this._client, this._token);
+  const BleControlTransport(this._client);
 
   final BleControlClient? _client;
-  final String? _token;
 
-  ({BleControlClient client, String token}) get _live {
+  /// The live client. The token lives inside it (used only to derive
+  /// per-command proofs) — commands never carry it.
+  BleControlClient get _live {
     final client = _client;
-    final token = _token;
-    if (client == null || token == null) {
-      throw StateError('BLE not connected');
-    }
-    return (client: client, token: token);
+    if (client == null) throw StateError('BLE not connected');
+    return client;
   }
 
   @override
@@ -307,21 +313,21 @@ class BleControlTransport implements ControlTransport {
 
   @override
   Future<void> setRelay({required String id, required bool on, int? ch}) async {
-    final (:client, :token) = _live;
+    final client = _live;
     // id already carries the channel suffix over BLE; ch is ignored.
-    await client.request(BleCommands.relay(token: token, id: id, on: on));
+    await client.request((p) => BleCommands.relay(proof: p, id: id, on: on));
   }
 
   @override
   Future<void> killAll() async {
-    final (:client, :token) = _live;
-    await client.request(BleCommands.killAll(token));
+    final client = _live;
+    await client.request((p) => BleCommands.killAll(p));
   }
 
   @override
   Future<List<ExtensionInfo>> extensions() async {
-    final (:client, :token) = _live;
-    final map = await client.request(BleCommands.extensions(token));
+    final client = _live;
+    final map = await client.request((p) => BleCommands.extensions(p));
     final list = map['extensions'];
     if (list is! List) return const [];
     return [
@@ -332,36 +338,37 @@ class BleControlTransport implements ControlTransport {
 
   @override
   Future<void> reorder(List<String> orderedIds) async {
-    final (:client, :token) = _live;
+    final client = _live;
     await client.request(
-      BleCommands.reorder(token: token, order: orderedIds.join(',')),
+      (p) => BleCommands.reorder(proof: p, order: orderedIds.join(',')),
     );
   }
 
   @override
   Future<void> renameExtension({required int slot, required String name}) async {
-    final (:client, :token) = _live;
+    final client = _live;
     await client
-        .request(BleCommands.renameExtension(token: token, slot: slot, name: name));
+        .request((p) =>
+            BleCommands.renameExtension(proof: p, slot: slot, name: name));
   }
 
   @override
   Future<void> renameSwitch({required String id, required String name}) async {
-    final (:client, :token) = _live;
+    final client = _live;
     await client
-        .request(BleCommands.renameSwitch(token: token, id: id, name: name));
+        .request((p) => BleCommands.renameSwitch(proof: p, id: id, name: name));
   }
 
   @override
   Future<void> renameMaster(String name) async {
-    final (:client, :token) = _live;
-    await client.request(BleCommands.renameMaster(token: token, name: name));
+    final client = _live;
+    await client.request((p) => BleCommands.renameMaster(proof: p, name: name));
   }
 
   @override
   Future<FwStatus> fwStatus() async {
-    final (:client, :token) = _live;
-    final map = await client.request(BleCommands.fwList(token));
+    final client = _live;
+    final map = await client.request((p) => BleCommands.fwList(p));
     return FwStatus.fromJson(Map<String, dynamic>.from(map));
   }
 }

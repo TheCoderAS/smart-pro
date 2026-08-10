@@ -1,104 +1,82 @@
-/// BLE control GATT identifiers and command shapes
-/// (UNISYNC_BLE_CONTROL_v1.md §Protocol). The service is the same one
-/// recovery uses (`…31`); control adds three characteristics.
+import 'ble_proof.dart';
+
+/// BLE control GATT identifiers and command shapes (firmware v11.24.0 /
+/// UX stories v5.1). The service is the same one recovery uses (`…31`).
 abstract final class BleControlUuids {
   static const service = '556e6973-796e-6320-5265-636f76657231';
 
-  // Recovery (already used by RecoveryService): …32 / …33 / …34
+  // Recovery (used by RecoveryService): …32 / …33 / …34
   // Control:
   static const controlRequest = '556e6973-796e-6320-5265-636f76657235';
   static const controlResponse = '556e6973-796e-6320-5265-636f76657236';
   static const statePush = '556e6973-796e-6320-5265-636f76657237';
+
+  /// Session nonce — read after connecting, different every connection.
+  /// Feeds the per-command proof.
+  static const sessionNonce = '556e6973-796e-6320-5265-636f76657238';
 }
 
-/// JSON command builders (BLE spec §Commands). `id` for a relay carries
-/// the channel suffix (`ext<slot>_<ch>` / `master_<ch>`) — there is no
-/// separate `ch` field over BLE.
+/// JSON command builders.
+///
+/// **There is no login over BLE** — firmware v11.24.0 removed it so the
+/// password never crosses an open link (v5.1 Epic 5). BLE works only
+/// with a token already obtained from a Wi-Fi login, and the token
+/// itself is never sent: every command carries a [BleProof].
+///
+/// Relay ids carry the channel suffix (`ext<slot>_<ch>` / `master_<ch>`);
+/// there is no separate `ch` field over BLE.
 abstract final class BleCommands {
-  static Map<String, Object?> login(String password) => {
-    'c': 'login',
-    'p': password,
-  };
+  static Map<String, Object?> _cmd(BleProof proof, Map<String, Object?> body) =>
+      {...proof.toFields(), ...body};
 
   static Map<String, Object?> relay({
-    required String token,
+    required BleProof proof,
     required String id,
     required bool on,
-  }) => {
-    't': token,
-    'c': 'relay',
-    'id': id,
-    's': on,
-  };
+  }) =>
+      _cmd(proof, {'c': 'relay', 'id': id, 's': on});
 
-  static Map<String, Object?> killAll(String token) => {
-    't': token,
-    'c': 'killall',
-  };
+  /// One command turns everything off — never loop `relay`.
+  static Map<String, Object?> killAll(BleProof proof) =>
+      _cmd(proof, {'c': 'killall'});
 
-  static Map<String, Object?> extensions(String token) => {
-    't': token,
-    'c': 'exts',
-  };
+  static Map<String, Object?> state(BleProof proof) =>
+      _cmd(proof, {'c': 'state'});
 
-  /// Reorder switches — `order` is the comma-separated id list, same as
-  /// the HTTP endpoint (BLE spec v2 §reorder).
+  static Map<String, Object?> extensions(BleProof proof) =>
+      _cmd(proof, {'c': 'exts'});
+
   static Map<String, Object?> reorder({
-    required String token,
+    required BleProof proof,
     required String order,
-  }) => {
-    't': token,
-    'c': 'reorder',
-    'order': order,
-  };
+  }) =>
+      _cmd(proof, {'c': 'reorder', 'order': order});
 
-  /// Firmware images already staged on the master + its own version
-  /// (BLE spec v2 §fwlist). Transfer still needs Wi-Fi.
-  static Map<String, Object?> fwList(String token) => {
-    't': token,
-    'c': 'fwlist',
-  };
-
-  /// Renames — added over BLE in firmware v11.18.0. All reply
-  /// `{"ok":true}` (or `{"err":…}`), persist to NVS, and push state.
   static Map<String, Object?> renameExtension({
-    required String token,
+    required BleProof proof,
     required int slot,
     required String name,
-  }) => {
-    't': token,
-    'c': 'rename_ext',
-    'slot': slot,
-    'name': name,
-  };
+  }) =>
+      _cmd(proof, {'c': 'rename_ext', 'slot': slot, 'name': name});
 
   static Map<String, Object?> renameSwitch({
-    required String token,
+    required BleProof proof,
     required String id,
     required String name,
-  }) => {
-    't': token,
-    'c': 'rename_sw',
-    'id': id,
-    'name': name,
-  };
+  }) =>
+      _cmd(proof, {'c': 'rename_sw', 'id': id, 'name': name});
 
   static Map<String, Object?> renameMaster({
-    required String token,
+    required BleProof proof,
     required String name,
-  }) => {
-    't': token,
-    'c': 'rename_master',
-    'name': name,
-  };
+  }) =>
+      _cmd(proof, {'c': 'rename_master', 'name': name});
 
-  static Map<String, Object?> mesh(String token) => {
-    't': token,
-    'c': 'mesh',
-  };
+  /// Firmware images staged on the master + its own version. Transfer
+  /// still requires Wi-Fi.
+  static Map<String, Object?> fwList(BleProof proof) =>
+      _cmd(proof, {'c': 'fwlist'});
 
-  static Map<String, Object?> state(String token) => {
-    't': token,
-    'c': 'state',
-  };
+  static Map<String, Object?> mesh(BleProof proof) =>
+      _cmd(proof, {'c': 'mesh'});
 }
