@@ -158,6 +158,29 @@ class AppLocalizationsEn extends AppLocalizations {
   String get switchTransport => 'Switch connection';
 
   @override
+  String get btNeedsWifiLogin =>
+      'Sign in over Wi-Fi first — Bluetooth mode uses that sign-in.';
+
+  @override
+  String get btPermissionDenied =>
+      'Bluetooth permission is needed for this mode.';
+
+  @override
+  String get openSettings => 'Open settings';
+
+  @override
+  String get accessResetTitle => 'Your access was reset';
+
+  @override
+  String accessResetBody(String network) {
+    return 'The password was changed, so this phone was signed out. Connect to $network to sign in again.';
+  }
+
+  @override
+  String get accessResetBodyGeneric =>
+      'The password was changed, so this phone was signed out. Connect to the switch\'s Wi-Fi to sign in again.';
+
+  @override
   String get wifiOnlyTitle => 'Wi-Fi needed for this';
 
   @override

@@ -13,6 +13,7 @@ import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
@@ -331,9 +332,11 @@ class _StatusPill extends ConsumerWidget {
                 trailing: current == entry.$1
                     ? const Icon(Icons.check_rounded)
                     : null,
-                onTap: () {
+                onTap: () async {
+                  final messenger = ScaffoldMessenger.of(context);
                   Navigator.of(sheetContext).pop();
-                  coordinator.choose(entry.$1);
+                  final result = await coordinator.choose(entry.$1);
+                  showTransportRefusal(messenger, l10n, result);
                 },
               ),
             const SizedBox(height: 8),
@@ -540,7 +543,10 @@ class _BleTrouble extends ConsumerWidget {
                 textAlign: TextAlign.center),
             const SizedBox(height: 8),
             Text(
-              l10n.bleTroubleBody,
+              // Prefer the session's own reason ("Sign in over Wi-Fi
+              // first", "No switch found nearby…") over generic advice —
+              // the accurate message was previously discarded.
+              ref.watch(bleSessionProvider).error ?? l10n.bleTroubleBody,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: scheme.onSurfaceVariant,
