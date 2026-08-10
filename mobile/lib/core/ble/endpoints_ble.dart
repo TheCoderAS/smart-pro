@@ -66,6 +66,14 @@ abstract final class BleCommands {
   }) =>
       _cmd(proof, {'c': 'rename_sw', 'id': id, 'name': name});
 
+  /// Per-switch power-cut policy. Same shape as `rename_sw`.
+  static Map<String, Object?> setRestore({
+    required BleProof proof,
+    required String id,
+    required bool restore,
+  }) =>
+      _cmd(proof, {'c': 'set_restore', 'id': id, 'restore': restore});
+
   static Map<String, Object?> renameMaster({
     required BleProof proof,
     required String name,

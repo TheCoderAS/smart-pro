@@ -50,6 +50,10 @@ class WifiControlTransport implements ControlTransport {
   Future<void> renameMaster(String name) => _auth.renameMaster(name);
 
   @override
+  Future<void> setRestore({required String id, required bool restore}) =>
+      _switch.setRestore(id: id, restore: restore);
+
+  @override
   Future<FwStatus> fwStatus() async {
     final images = await _fw.storedImages();
     // The master's own version isn't in fw/list — /api/info carries it.

@@ -46,11 +46,48 @@ abstract class SwitchState with _$SwitchState {
     /// Channel for multi-channel switches. Wire key is `channel`.
     @JsonKey(name: 'channel') @Default(0) int ch,
     /// Whether the extension backing this switch is currently online.
+    /// This is the master's presence verdict, not a guess: a board that has
+    /// just come back reads false until it has been solid for a minute.
     @Default(true) bool online,
+
+    /// Per-switch power-cut policy: true restores the last state, false
+    /// starts off. The master owns this; the app only reflects it.
+    @Default(false) bool restore,
   }) = _SwitchState;
 
   factory SwitchState.fromJson(Map<String, dynamic> json) =>
       _$SwitchStateFromJson(json);
+}
+
+/// How present something is, as the master sees it. Deliberately three
+/// states: a board that keeps dropping and returning is a distinct
+/// diagnostic case, not a switch blinking in and out of the dashboard.
+enum Presence {
+  online,
+  offline,
+  intermittent;
+
+  static Presence parse(String? s) => switch (s) {
+        'online' => Presence.online,
+        'intermittent' => Presence.intermittent,
+        _ => Presence.offline,
+      };
+
+  String get label => switch (this) {
+        Presence.online => 'Online',
+        Presence.offline => 'Offline',
+        Presence.intermittent => 'Intermittent',
+      };
+}
+
+/// "3 minutes ago" from the master's seconds-since count. The master has no
+/// clock, so last-seen is always relative.
+String lastSeenLabel(int seconds) {
+  if (seconds <= 0) return 'just now';
+  if (seconds < 60) return '${seconds}s ago';
+  if (seconds < 3600) return '${seconds ~/ 60} min ago';
+  if (seconds < 86400) return '${seconds ~/ 3600} h ago';
+  return '${seconds ~/ 86400} d ago';
 }
 
 /// A peer master in the mesh, as reported in the snapshot's peer array.
@@ -61,7 +98,18 @@ abstract class PeerState with _$PeerState {
     @Default('') String name,
     @Default('') String fw,
     @Default(true) bool online,
+
+    /// Debounced presence from the master. `online` is the same verdict as
+    /// a bool; this distinguishes a settled outage from a flapping peer.
+    @JsonKey(name: 'presence') @Default('online') String presenceRaw,
+
+    /// Seconds since the peer was last heard from.
+    @JsonKey(name: 'last_seen') @Default(0) int lastSeen,
   }) = _PeerState;
+
+  const PeerState._();
+
+  Presence get presence => Presence.parse(presenceRaw);
 
   factory PeerState.fromJson(Map<String, dynamic> json) =>
       _$PeerStateFromJson(json);

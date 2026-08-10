@@ -21,6 +21,7 @@ abstract final class Api {
   static const relay = '/api/relay'; // TOKEN, id + state + ch
   static const relayKillAll = '/api/relay/killall'; // TOKEN
   static const switchRename = '/api/switch/rename'; // TOKEN, id + name
+  static const switchRestore = '/api/switch/restore'; // TOKEN, id + restore
   static const switchReorder = '/api/switch/reorder'; // TOKEN, plain
 
   // Extensions

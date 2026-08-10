@@ -72,6 +72,18 @@ class SwitchRepository {
     }
   }
 
+  /// POST /api/switch/restore — `restore` is 1/0.
+  Future<void> setRestore({required String id, required bool restore}) async {
+    try {
+      await _dio.post<dynamic>(
+        Api.switchRestore,
+        data: {'id': id, 'restore': restore ? 1 : 0},
+      );
+    } on DioException catch (e) {
+      throw e.apiFailure;
+    }
+  }
+
   /// POST /api/switch/reorder — `plain` is the comma-separated id
   /// order.
   Future<void> reorder(List<String> orderedIds) async {

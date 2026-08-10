@@ -43,6 +43,11 @@ abstract interface class ControlTransport {
   Future<void> renameSwitch({required String id, required String name});
   Future<void> renameMaster(String name);
 
+  /// Per-switch power-cut policy: restore the last state, or start off.
+  /// The master owns it; the app only asks for a change and waits for the
+  /// next snapshot to confirm.
+  Future<void> setRestore({required String id, required bool restore});
+
   /// The master's running version + the images staged in its library.
   /// Firmware *transfer* still requires Wi-Fi.
   Future<FwStatus> fwStatus();

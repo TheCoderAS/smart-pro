@@ -20,6 +20,8 @@ _ExtensionInfo _$ExtensionInfoFromJson(Map<String, dynamic> json) =>
       fails: (json['fails'] as num?)?.toInt() ?? 0,
       stuck: json['stuck'] as bool? ?? false,
       avail: json['avail'] as String?,
+      presenceRaw: json['presence'] as String? ?? 'online',
+      lastSeen: (json['last_seen'] as num?)?.toInt() ?? 0,
     );
 
 Map<String, dynamic> _$ExtensionInfoToJson(_ExtensionInfo instance) =>
@@ -36,4 +38,6 @@ Map<String, dynamic> _$ExtensionInfoToJson(_ExtensionInfo instance) =>
       'fails': instance.fails,
       'stuck': instance.stuck,
       'avail': instance.avail,
+      'presence': instance.presenceRaw,
+      'last_seen': instance.lastSeen,
     };

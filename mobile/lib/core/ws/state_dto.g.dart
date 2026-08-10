@@ -42,6 +42,7 @@ _SwitchState _$SwitchStateFromJson(Map<String, dynamic> json) => _SwitchState(
   on: json['state'] as bool? ?? false,
   ch: (json['channel'] as num?)?.toInt() ?? 0,
   online: json['online'] as bool? ?? true,
+  restore: json['restore'] as bool? ?? false,
 );
 
 Map<String, dynamic> _$SwitchStateToJson(_SwitchState instance) =>
@@ -51,6 +52,7 @@ Map<String, dynamic> _$SwitchStateToJson(_SwitchState instance) =>
       'state': instance.on,
       'channel': instance.ch,
       'online': instance.online,
+      'restore': instance.restore,
     };
 
 _PeerState _$PeerStateFromJson(Map<String, dynamic> json) => _PeerState(
@@ -58,6 +60,8 @@ _PeerState _$PeerStateFromJson(Map<String, dynamic> json) => _PeerState(
   name: json['name'] as String? ?? '',
   fw: json['fw'] as String? ?? '',
   online: json['online'] as bool? ?? true,
+  presenceRaw: json['presence'] as String? ?? 'online',
+  lastSeen: (json['last_seen'] as num?)?.toInt() ?? 0,
 );
 
 Map<String, dynamic> _$PeerStateToJson(_PeerState instance) =>
@@ -66,4 +70,6 @@ Map<String, dynamic> _$PeerStateToJson(_PeerState instance) =>
       'name': instance.name,
       'fw': instance.fw,
       'online': instance.online,
+      'presence': instance.presenceRaw,
+      'last_seen': instance.lastSeen,
     };

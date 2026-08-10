@@ -60,7 +60,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     });
 
     final snap = snapshot.value;
-    final switches = snap?.switches ?? const <SwitchState>[];
+    // An offline extension's switches leave the dashboard entirely (story
+    // Epic 2) — they are not greyed out, they are gone, and they come back
+    // on their own. The master decides presence; the app never infers it
+    // from its own request failures. The extension list still shows the
+    // board, marked offline with a last-seen time.
+    final switches = (snap?.switches ?? const <SwitchState>[])
+        .where((s) => s.online)
+        .toList(growable: false);
+    final hiddenOffline =
+        (snap?.switches.length ?? 0) - switches.length;
 
     // Over BLE, a failed scan/connect would otherwise spin forever —
     // surface it with a retry instead.
@@ -99,6 +108,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           else ...[
             SliverToBoxAdapter(child: _QuickTools(switches: switches)),
             _SwitchGrid(switches: switches),
+            if (hiddenOffline > 0)
+              SliverToBoxAdapter(child: _OfflineNote(count: hiddenOffline)),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
           ],
           ],
@@ -555,6 +566,41 @@ class _BleTrouble extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Quiet footnote when switches have left the grid because their board is
+/// unreachable. Without it the grid silently shrinks and reads as data loss.
+class _OfflineNote extends StatelessWidget {
+  const _OfflineNote({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off_outlined,
+              size: 16, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              count == 1
+                  ? '1 switch is hidden while its extension is unreachable. '
+                      'It comes back on its own.'
+                  : '$count switches are hidden while their extensions are '
+                      'unreachable. They come back on their own.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -366,6 +366,14 @@ class BleControlTransport implements ControlTransport {
   }
 
   @override
+  Future<void> setRestore({required String id, required bool restore}) async {
+    final client = _live;
+    await client.request(
+      (p) => BleCommands.setRestore(proof: p, id: id, restore: restore),
+    );
+  }
+
+  @override
   Future<FwStatus> fwStatus() async {
     final client = _live;
     final map = await client.request((p) => BleCommands.fwList(p));

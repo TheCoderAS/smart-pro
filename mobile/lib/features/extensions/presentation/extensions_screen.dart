@@ -5,6 +5,7 @@ import '../../../core/api/failure.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/wifi_guard.dart';
+import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
 import '../data/extension_repository.dart';
 import '../domain/extension_models.dart';
 
@@ -117,18 +118,23 @@ class ExtensionTile extends ConsumerWidget {
         // multi-line subtitle.
         titleAlignment: ListTileTitleAlignment.center,
         leading: Icon(
-          ext.online ? Icons.extension : Icons.extension_off_outlined,
-          color: ext.online ? scheme.primary : scheme.onSurfaceVariant,
+          switch (ext.presence) {
+            Presence.online => Icons.extension,
+            Presence.intermittent => Icons.sync_problem_outlined,
+            Presence.offline => Icons.extension_off_outlined,
+          },
+          color: switch (ext.presence) {
+            Presence.online => scheme.primary,
+            Presence.intermittent => scheme.tertiary,
+            Presence.offline => scheme.onSurfaceVariant,
+          },
         ),
         title: Text(ext.name.isEmpty ? 'Slot ${ext.slot + 1}' : ext.name),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '${ext.sw1.isEmpty ? "Switch 1" : ext.sw1} · '
-              '${ext.sw2.isEmpty ? "Switch 2" : ext.sw2}',
-            ),
-            Text('Firmware ${ext.fw}${ext.online ? "" : " · offline"}'),
+            Text(_switchNames(ext)),
+            Text(_presenceLine(ext)),
             if (ext.avail != null)
               Text(
                 'Update available: ${ext.avail}',
@@ -160,6 +166,28 @@ class ExtensionTile extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// Default switch names are per-board, so every extension would otherwise
+  /// read "Switch 1 · Switch 2" and the list would be a wall of identical
+  /// rows. Number the defaults by slot the way the master's own web UI does.
+  String _switchNames(ExtensionInfo ext) {
+    final one = ext.sw1.isEmpty ? 'Switch ${ext.slot * 2 + 3}' : ext.sw1;
+    final two = ext.sw2.isEmpty ? 'Switch ${ext.slot * 2 + 4}' : ext.sw2;
+    return '$one · $two';
+  }
+
+  /// Presence comes from the master, with its last-seen time. "Offline"
+  /// means the app can't reach it — the physical switch still works.
+  String _presenceLine(ExtensionInfo ext) {
+    final fw = 'Firmware ${ext.fw}';
+    return switch (ext.presence) {
+      Presence.online => fw,
+      Presence.offline =>
+        '$fw · offline · last seen ${lastSeenLabel(ext.lastSeen)}',
+      Presence.intermittent =>
+        '$fw · intermittent · last seen ${lastSeenLabel(ext.lastSeen)}',
+    };
   }
 
   Future<void> _rename(BuildContext context, WidgetRef ref) async {
@@ -216,7 +244,9 @@ class ExtensionTile extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'Its switches disappear from every device. '
+              'Its switches disappear from every device, and its names and '
+              'settings are forgotten. If this board later reappears on the '
+              'bus it is adopted as new, with default names.\n\n'
               'This cannot be undone.',
             ),
             const SizedBox(height: 16),
