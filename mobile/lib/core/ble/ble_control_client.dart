@@ -5,6 +5,7 @@ import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import '../logging/log.dart';
 import '../ws/state_dto.dart';
 import 'ble_framing.dart';
+import 'ble_proof.dart';
 import 'endpoints_ble.dart';
 
 /// A `{"err": ...}` reply from the master (BLE spec §Errors). Note a
@@ -22,6 +23,15 @@ class BleTimeout implements Exception {
   const BleTimeout();
 }
 
+/// The master rejected our per-command proof twice, even after a fresh
+/// nonce — the token is dead (password changed). The UI must route the
+/// user to a Wi-Fi login; there is no login over BLE.
+class BleTokenRejected implements Exception {
+  const BleTokenRejected();
+  @override
+  String toString() => 'BleTokenRejected';
+}
+
 /// One authenticated BLE session with a single connected master.
 ///
 /// Owns the GATT plumbing: connect, MTU negotiation, framed
@@ -30,10 +40,20 @@ class BleTimeout implements Exception {
 /// state push is a full [StateSnapshot], interchangeable with the
 /// WebSocket's (BLE spec §State push).
 class BleControlClient {
-  BleControlClient(this._ble, this.deviceId);
+  BleControlClient(this._ble, this.deviceId, this._token);
 
   final FlutterReactiveBle _ble;
   final String deviceId;
+
+  /// The Wi-Fi-issued token. Never sent over BLE — only used locally to
+  /// derive each command's proof.
+  final String _token;
+
+  /// 8-byte session nonce from `…38`, re-read on every connection.
+  List<int> _nonce = const [];
+
+  /// Per-connection command counter; starts at 1, resets with the nonce.
+  int _counter = 0;
 
   static const _connectTimeout = Duration(seconds: 12);
   static const _requestTimeout = Duration(seconds: 6);
@@ -116,24 +136,75 @@ class BleControlClient {
         }
       }
     }, onError: (Object e) => log.w('ble state error: $e'));
+
+    await _readNonce();
+  }
+
+  /// Reads the session nonce and resets the counter. Done on connect and
+  /// again whenever the master rejects a proof — and, because every hop
+  /// builds a new client, implicitly after every roam.
+  Future<void> _readNonce() async {
+    _nonce = await _ble.readCharacteristic(
+      _char(BleControlUuids.sessionNonce),
+    );
+    _counter = 0;
+    log.d('ble nonce read (${_nonce.length}B), counter reset');
+  }
+
+  BleProof _nextProof() {
+    _counter += 1;
+    return computeBleProof(
+      token: _token,
+      sessionNonce: _nonce,
+      counter: _counter,
+    );
   }
 
   /// Sends a command and awaits the reassembled reply. Serialized: a
-  /// second call waits for the first. Throws [BleTimeout] on silence
-  /// (spec: no reply on a bad request) and [BleCommandError] on
-  /// `{"err"}`.
-  Future<Map<String, Object?>> request(Map<String, Object?> command) {
+  /// second call waits for the first.
+  ///
+  /// [build] receives a freshly-derived [BleProof] — the proof is
+  /// computed at send time so a retry gets a new counter. On
+  /// `invalid proof` the nonce is re-read, the counter reset, and the
+  /// command retried once; a second rejection means the token is dead
+  /// and throws [BleTokenRejected].
+  ///
+  /// Throws [BleTimeout] on silence (spec: no reply on a bad request)
+  /// and [BleCommandError] on any other `{"err"}`.
+  Future<Map<String, Object?>> request(
+    Map<String, Object?> Function(BleProof proof) build,
+  ) {
     final completer = Completer<Map<String, Object?>>();
     _lock = _lock.then((_) async {
       try {
-        final result = await _doRequest(command);
-        completer.complete(result);
+        completer.complete(await _requestWithRetry(build));
       } on Object catch (e, st) {
         completer.completeError(e, st);
       }
     });
     return completer.future;
   }
+
+  Future<Map<String, Object?>> _requestWithRetry(
+    Map<String, Object?> Function(BleProof proof) build,
+  ) async {
+    try {
+      return await _doRequest(build(_nextProof()));
+    } on BleCommandError catch (e) {
+      if (!_isInvalidProof(e.message)) rethrow;
+      log.w('ble proof rejected — re-reading nonce and retrying once');
+      await _readNonce();
+      try {
+        return await _doRequest(build(_nextProof()));
+      } on BleCommandError catch (e2) {
+        if (_isInvalidProof(e2.message)) throw const BleTokenRejected();
+        rethrow;
+      }
+    }
+  }
+
+  static bool _isInvalidProof(String message) =>
+      message.toLowerCase().contains('proof');
 
   Future<Map<String, Object?>> _doRequest(Map<String, Object?> command) async {
     final pending = Completer<Map<String, Object?>>();
