@@ -4759,7 +4759,14 @@ static void master_restore_ap(void) {
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_AP);
     vTaskDelay(pdMS_TO_TICKS(100));
-    WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+    /* Bring back the AP this master actually owns. Hard-coding the mesh
+     * credentials is only safe while this is reached exclusively from the
+     * mesh pull path -- a standalone master would otherwise reappear on an
+     * SSID it was never part of, with a password its owner does not know.
+     * Latent today (a standalone master has no peers to pull from and
+     * returns early), but it costs nothing to be correct here. */
+    const char *ap_ssid = mesh_active ? mesh_name : unique_ssid;
+    WiFi.softAP(ap_ssid, active_pass(), AP_CHANNEL);
     vTaskDelay(pdMS_TO_TICKS(200));
     /* WiFi.disconnect(true,true) resets the driver, which takes ESP-NOW
      * with it. On the success path we reboot immediately so it hardly
@@ -4771,7 +4778,7 @@ static void master_restore_ap(void) {
         mesh_init();
         Serial.println("[MFW] mesh radio reinitialised");
     }
-    Serial.printf("[MFW] access point restored: %s\n", mesh_name);
+    Serial.printf("[MFW] access point restored: %s\n", ap_ssid);
 }
 
 static void master_fw_sync(void) {
