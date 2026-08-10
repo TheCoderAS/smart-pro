@@ -35,16 +35,16 @@ class RecoveryDevice {
   final String id;
 }
 
-/// BLE password recovery (API §8). Runs while LOGGED OUT — the whole
+/// BLE password recovery (story Epic 8). Runs while LOGGED OUT — the whole
 /// point is that the user cannot join the Wi-Fi.
 ///
-/// Flow: scan for `U…` names → connect → read challenge (8 bytes,
-/// fresh per connection) → write HMAC-SHA256(key, challenge)[0..8] →
-/// read/notify the result = the password as ASCII.
+/// Flow: scan for `U…` names → connect → read the challenge (8 bytes,
+/// fresh per connection) → write the wrapped request → read the verdict.
 ///
-/// A wrong key produces NO response at all — silence IS the failure
-/// signal, hence the result timeout. Five failures lock the service
-/// for 15 minutes (surfaced in UI wording; not detectable here).
+/// The user picks the new password and it never crosses in the clear. The
+/// master answers plainly, accepted or rejected, and a rejection carries
+/// the seconds to wait before the next attempt — the backoff schedule is
+/// the device's, and the app only renders the countdown it was handed.
 class RecoveryService {
   RecoveryService(this._ble);
 
@@ -92,14 +92,17 @@ class RecoveryService {
     return found.values.toList()..sort((a, b) => a.name.compareTo(b.name));
   }
 
-  /// Runs the challenge-response against [target] with the user's
-  /// recovery key. Returns the new password.
+  /// Runs recovery against [target]: proves knowledge of the recovery key
+  /// and hands over the password the user chose, wrapped.
   ///
-  /// Throws [FormatException] for a malformed key,
-  /// [TimeoutException] for silence (wrong key or lockout).
-  Future<String> recover(RecoveryDevice target, String recoveryKey) async {
-    // Validate before any radio traffic.
-    final response = <int>[];
+  /// Returns the master's verdict. Throws [FormatException] for a malformed
+  /// key or password, [TimeoutException] if the master says nothing at all
+  /// — which now means a broken link rather than a wrong key.
+  Future<RecoveryVerdict> recover({
+    required RecoveryDevice target,
+    required String recoveryKey,
+    required String newPassword,
+  }) async {
 
     final connection = _ble
         .connectToDevice(
@@ -129,8 +132,11 @@ class RecoveryService {
           await _ble.readCharacteristic(char(RecoveryBle.challengeChar));
       log.d('recovery challenge: ${challenge.length} bytes');
 
-      // Steps 3-4: derive the truncated HMAC.
-      response.addAll(recoveryResponse(recoveryKey, challenge));
+      final request = buildRecoveryRequest(
+        recoveryKeyHex: recoveryKey,
+        challenge: challenge,
+        newPassword: newPassword,
+      );
 
       // Subscribe BEFORE writing so a fast notify isn't missed.
       final resultChar = char(RecoveryBle.resultChar);
@@ -142,10 +148,9 @@ class RecoveryService {
 
       await _ble.writeCharacteristicWithResponse(
         char(RecoveryBle.responseChar),
-        value: response,
+        value: request,
       );
 
-      // Step 5: the new password, ASCII. Silence = wrong key.
       List<int> raw;
       try {
         raw = await resultFuture;
@@ -155,7 +160,12 @@ class RecoveryService {
         raw = await _ble.readCharacteristic(resultChar);
         if (raw.isEmpty) rethrow;
       }
-      return ascii.decode(raw, allowInvalid: true).trim();
+      final text = utf8.decode(raw, allowMalformed: true).trim();
+      final decoded = jsonDecode(text);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('unreadable reply from the switch');
+      }
+      return RecoveryVerdict.fromJson(decoded);
     } finally {
       await connection.cancel(); // disconnects
     }

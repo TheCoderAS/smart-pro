@@ -6,6 +6,7 @@ import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
 import '../application/session.dart';
+import 'session_gate.dart';
 
 /// Password prompt. One password joins the Wi-Fi and logs in (API §1);
 /// by the time the user is here they're on the AP, so the login is a
@@ -103,6 +104,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     onPressed: () => context.push(Routes.recovery),
                     child: Text(l10n.forgotPassword),
                   ),
+                  // Being locked out of one master must never trap the
+                  // user away from the others (story Epic 6).
+                  const MasterSwitcherButton(),
                 ],
               ),
             ),

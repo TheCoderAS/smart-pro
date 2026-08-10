@@ -11,6 +11,7 @@ class SavedMaster {
     required this.name,
     this.ssid,
     this.meshId,
+    this.preferredMode,
   });
 
   factory SavedMaster.fromJson(Map<String, dynamic> json) => SavedMaster(
@@ -18,6 +19,7 @@ class SavedMaster {
         name: json['name'] as String? ?? '',
         ssid: json['ssid'] as String?,
         meshId: json['meshId'] as int?,
+        preferredMode: json['preferredMode'] as String?,
       );
 
   final String uid;
@@ -31,11 +33,17 @@ class SavedMaster {
   /// standalone.
   final int? meshId;
 
+  /// This master's preferred transport, when the user has set one. The
+  /// global preference is the fallback; a master reached over Bluetooth in
+  /// the shed and Wi-Fi in the hall is a real thing people want.
+  final String? preferredMode;
+
   Map<String, dynamic> toJson() => {
         'uid': uid,
         'name': name,
         if (ssid != null) 'ssid': ssid,
         if (meshId != null) 'meshId': meshId,
+        if (preferredMode != null) 'preferredMode': preferredMode,
       };
 }
 
@@ -48,6 +56,9 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
   static const _key = 'masters';
   static const _lastUsedKey = 'masters.lastUsed';
 
+  /// Bookkeeping only — uid, display name, cached network name, mesh id.
+  /// The secrets the vault exists to protect (tokens, remembered
+  /// passwords) live in [SecureStore] and never touch this file.
   @override
   Future<List<SavedMaster>> build() => _load();
 
@@ -77,22 +88,35 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
   /// Called from the dashboard on every state snapshot so a master the
   /// user signed into — not just one commissioned from scratch — is
   /// known to the BLE cold-start path. No-op when nothing changes.
-  Future<void> ensure({required String uid, String? name}) async {
+  Future<void> ensure({
+    required String uid,
+    String? name,
+    String? ssid,
+  }) async {
     if (uid.isEmpty) return;
     final current = [...state.value ?? await _load()];
     final i = current.indexWhere((m) => m.uid == uid);
     if (i >= 0) {
       final m = current[i];
-      if (name == null || name.isEmpty || name == m.name) return;
+      final nextName = (name?.isNotEmpty ?? false) ? name! : m.name;
+      // The network name is cached from the master's own report every time
+      // we are connected, so instruction copy heals itself after a rename.
+      final nextSsid = (ssid?.isNotEmpty ?? false) ? ssid : m.ssid;
+      if (nextName == m.name && nextSsid == m.ssid) return;
       current[i] = SavedMaster(
         uid: m.uid,
-        name: name,
-        ssid: m.ssid,
+        name: nextName,
+        ssid: nextSsid,
         meshId: m.meshId,
+        preferredMode: m.preferredMode,
       );
     } else {
       current.add(
-        SavedMaster(uid: uid, name: (name?.isNotEmpty ?? false) ? name! : 'Master'),
+        SavedMaster(
+          uid: uid,
+          name: (name?.isNotEmpty ?? false) ? name! : 'Master',
+          ssid: (ssid?.isNotEmpty ?? false) ? ssid : null,
+        ),
       );
     }
     await _persist(current);

@@ -26,8 +26,13 @@ class WifiControlTransport implements ControlTransport {
   TransportKind get kind => TransportKind.wifi;
 
   @override
-  Future<void> setRelay({required String id, required bool on, int? ch}) =>
-      _switch.setRelay(id: id, on: on, ch: ch);
+  Future<void> setRelay({
+    required String id,
+    required bool on,
+    int? ch,
+    String? masterUid,
+  }) =>
+      _switch.setRelay(id: id, on: on, ch: ch, masterUid: masterUid);
 
   @override
   Future<void> killAll() => _switch.killAll();
@@ -48,6 +53,10 @@ class WifiControlTransport implements ControlTransport {
 
   @override
   Future<void> renameMaster(String name) => _auth.renameMaster(name);
+
+  @override
+  Future<void> setRestore({required String id, required bool restore}) =>
+      _switch.setRestore(id: id, restore: restore);
 
   @override
   Future<FwStatus> fwStatus() async {

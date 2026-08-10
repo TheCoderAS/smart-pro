@@ -11,14 +11,17 @@ import '../../../app/theme.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/link_state.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
+import '../../onboarding/presentation/first_run_prompts.dart';
 import '../../settings/presentation/master_switcher.dart';
 import '../../switches/presentation/rename_sheet.dart';
+import '../application/master_cards.dart';
 import '../application/switch_overrides.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -32,9 +35,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    // Decide Wi-Fi vs BLE from the user's preference + reachability.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(transportCoordinatorProvider).reconcile();
+    // Decide Wi-Fi vs BLE from the user's preference + reachability, then
+    // ask the two once-only setup questions (story Epic 1 steps 4 and 5).
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await ref.read(transportCoordinatorProvider).reconcile();
+      if (!mounted) return;
+      await runFirstRunPrompts(context, ref);
     });
   }
 
@@ -52,6 +58,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     ref.listen(activeStateProvider, (prev, next) {
       final snap = next.value;
       if (snap != null) {
+        // A snapshot is proof the link works, on either transport — it
+        // beats waiting for the next heartbeat tick.
+        ref.read(linkStateProvider.notifier).markAlive();
         ref.read(switchOverridesProvider.notifier).reconcile(snap.switches);
         ref.read(masterRegistryProvider.notifier).ensure(
               uid: snap.selfUid,
@@ -61,7 +70,20 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     });
 
     final snap = snapshot.value;
-    final switches = snap?.switches ?? const <SwitchState>[];
+    // An offline extension's switches leave the dashboard entirely (story
+    // Epic 2) — they are not greyed out, they are gone, and they come back
+    // on their own. The master decides presence; the app never infers it
+    // from its own request failures. The extension list still shows the
+    // board, marked offline with a last-seen time.
+    final sections = snap == null
+        ? const <MasterSection>[]
+        : sectionsFrom(snap, ref.watch(masterCardOrderProvider));
+    final switches = [for (final sec in sections) ...sec.switches];
+    final hiddenOffline = snap == null
+        ? 0
+        : (snap.switches.length +
+                snap.peers.fold<int>(0, (n, p) => n + p.switches.length)) -
+            switches.length;
 
     // Over BLE, a failed scan/connect would otherwise spin forever —
     // surface it with a retry instead.
@@ -99,7 +121,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             )
           else ...[
             SliverToBoxAdapter(child: _QuickTools(switches: switches)),
-            _SwitchGrid(switches: switches),
+            // One master: a flat grid, because wrapping a single master's
+            // switches in a collapsible card would just add a tap. A mesh:
+            // one card per master, one open at a time (story Epic 7).
+            if (sections.length <= 1)
+              _SwitchGrid(
+                switches: switches,
+                masterUid: sections.isEmpty ? null : sections.first.uid,
+              )
+            else
+              _MasterCards(sections: sections),
+            if (hiddenOffline > 0)
+              SliverToBoxAdapter(child: _OfflineNote(count: hiddenOffline)),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
           ],
           ],
@@ -406,6 +439,8 @@ class _OverflowMenu extends ConsumerWidget {
         switch (v) {
           case 'reorder':
             unawaited(context.push(Routes.reorder));
+          case 'reorderMasters':
+            unawaited(context.push(Routes.reorderMasters));
           case 'extensions':
             unawaited(context.push(Routes.extensions));
           case 'mesh':
@@ -421,10 +456,16 @@ class _OverflowMenu extends ConsumerWidget {
         _menuItem('mesh', Icons.hub_rounded, l10n.menuMesh),
         _menuItem('firmware', Icons.system_update_rounded, l10n.menuFirmware),
         _menuItem('reorder', Icons.swap_vert_rounded, l10n.menuReorder),
+        // Only worth offering once there is more than one master card.
+        if (_hasSeveralMasters(ref))
+          _menuItem('reorderMasters', Icons.reorder_rounded, 'Reorder masters'),
         _menuItem('settings', Icons.settings_rounded, l10n.menuSettings),
       ],
     );
   }
+
+  bool _hasSeveralMasters(WidgetRef ref) =>
+      (ref.read(activeStateProvider).value?.peers.length ?? 0) > 0;
 
   PopupMenuItem<String> _menuItem(String value, IconData icon, String label) {
     return PopupMenuItem(
@@ -450,12 +491,14 @@ class _QuickTools extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context)!;
+    final linkUp = ref.watch(linkStateProvider).controlsEnabled;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
       child: _QuickButton(
         icon: Icons.flash_off_rounded,
         label: l10n.allOff,
-        onTap: () => _killAll(ref),
+        // Same rule as the tiles: no acting on a link we can't confirm.
+        onTap: linkUp ? () => _killAll(ref) : null,
       ),
     ).animate().fadeIn(duration: 300.ms).slideY(begin: 0.2, curve: Curves.easeOut);
   }
@@ -486,33 +529,36 @@ class _QuickButton extends StatelessWidget {
 
   final IconData icon;
   final String label;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        onTap: onTap,
+    return Opacity(
+      opacity: onTap == null ? 0.4 : 1,
+      child: Material(
+        color: scheme.surface,
         borderRadius: BorderRadius.circular(16),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: scheme.outlineVariant),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 20, color: scheme.primary),
-              const SizedBox(width: 8),
-              Text(
-                label,
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-            ],
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: scheme.outlineVariant),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 20, color: scheme.primary),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -566,6 +612,41 @@ class _BleTrouble extends ConsumerWidget {
   }
 }
 
+/// Quiet footnote when switches have left the grid because their board is
+/// unreachable. Without it the grid silently shrinks and reads as data loss.
+class _OfflineNote extends StatelessWidget {
+  const _OfflineNote({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off_outlined,
+              size: 16, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              count == 1
+                  ? '1 switch is hidden while its extension is unreachable. '
+                      'It comes back on its own.'
+                  : '$count switches are hidden while their extensions are '
+                      'unreachable. They come back on their own.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
 
@@ -611,9 +692,10 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _SwitchGrid extends StatelessWidget {
-  const _SwitchGrid({required this.switches});
+  const _SwitchGrid({required this.switches, this.masterUid});
 
   final List<SwitchState> switches;
+  final String? masterUid;
 
   @override
   Widget build(BuildContext context) {
@@ -627,7 +709,7 @@ class _SwitchGrid extends StatelessWidget {
           mainAxisSpacing: 14,
         ),
         delegate: SliverChildBuilderDelegate((context, i) {
-          return SwitchTile(sw: switches[i])
+          return SwitchTile(sw: switches[i], masterUid: masterUid)
               .animate()
               .fadeIn(duration: 260.ms, delay: (40 * i).ms)
               .slideY(begin: 0.15, curve: Curves.easeOut);
@@ -637,13 +719,125 @@ class _SwitchGrid extends StatelessWidget {
   }
 }
 
+/// One collapsible card per master, one open at a time. A master that has
+/// gone quiet keeps its card — with its switches disabled and a last-seen
+/// time — rather than disappearing, so the user sees the state before
+/// acting rather than discovering it through a failed tap.
+class _MasterCards extends ConsumerWidget {
+  const _MasterCards({required this.sections});
+
+  final List<MasterSection> sections;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final expanded = ref.watch(expandedMasterProvider);
+    // Arriving on a mesh dashboard with everything shut would read as
+    // empty, so the first card opens itself.
+    if (expanded == null && sections.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(expandedMasterProvider.notifier).defaultTo(sections.first.uid);
+      });
+    }
+    return SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      sliver: SliverList.builder(
+        itemCount: sections.length,
+        itemBuilder: (context, i) => _MasterCard(
+          section: sections[i],
+          open: sections[i].uid == expanded,
+        ),
+      ),
+    );
+  }
+}
+
+class _MasterCard extends ConsumerWidget {
+  const _MasterCard({required this.section, required this.open});
+
+  final MasterSection section;
+  final bool open;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final on = section.switches.where((s) => s.on).length;
+    final subtitle = section.online
+        ? '$on of ${section.switches.length} on'
+        : '${section.presence.label} · last seen '
+            '${lastSeenLabel(section.lastSeen)}';
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        children: [
+          ListTile(
+            leading: Icon(
+              section.isSelf ? Icons.router : Icons.router_outlined,
+              color: section.online ? scheme.primary : scheme.onSurfaceVariant,
+            ),
+            title: Text(section.name),
+            subtitle: Text(subtitle),
+            trailing: Icon(open ? Icons.expand_less : Icons.expand_more),
+            onTap: () =>
+                ref.read(expandedMasterProvider.notifier).toggle(section.uid),
+          ),
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 220),
+            crossFadeState:
+                open ? CrossFadeState.showFirst : CrossFadeState.showSecond,
+            firstChild: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: section.switches.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Text('No switches reachable right now.'),
+                    )
+                  : GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 220,
+                        mainAxisExtent: 128,
+                        crossAxisSpacing: 14,
+                        mainAxisSpacing: 14,
+                      ),
+                      itemCount: section.switches.length,
+                      itemBuilder: (context, i) => SwitchTile(
+                        sw: section.switches[i],
+                        // Self is driven directly; a peer is relayed.
+                        masterUid: section.isSelf ? null : section.uid,
+                        enabled: section.online,
+                      ),
+                    ),
+            ),
+            secondChild: const SizedBox(width: double.infinity),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// One relay. Renders the optimistic override when present, else the
 /// snapshot state. Animated accent glow + press feedback when on.
 /// Public for widget tests.
 class SwitchTile extends ConsumerStatefulWidget {
-  const SwitchTile({required this.sw, super.key});
+  const SwitchTile({
+    required this.sw,
+    this.masterUid,
+    this.enabled = true,
+    super.key,
+  });
 
   final SwitchState sw;
+
+  /// The master that owns this switch, when it isn't the one the app is
+  /// connected to. Null drives a local relay.
+  final String? masterUid;
+
+  /// False when the owning master itself is unreachable.
+  final bool enabled;
 
   @override
   ConsumerState<SwitchTile> createState() => _SwitchTileState();
@@ -660,16 +854,25 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
     final on = overrides[sw.id] ?? sw.on;
     final scheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
-    final online = sw.online;
-    final stateLabel = online
-        ? (on ? l10n.switchOn : l10n.switchOff)
-        : l10n.switchOffline;
+    // Two separate reasons a tile can't be driven, and they read
+    // differently to the user: the board is offline, or *we* are. When the
+    // link is down the states on screen are last-seen values, not truth, so
+    // the story says controls disable rather than letting someone find out
+    // by tapping (Epic 1, connection awareness).
+    final linkUp = ref.watch(linkStateProvider).controlsEnabled;
+    final online = sw.online && widget.enabled;
+    final live = online && linkUp;
+    final stateLabel = !online
+        ? l10n.switchOffline
+        : !linkUp
+            ? '${on ? l10n.switchOn : l10n.switchOff} · last seen'
+            : (on ? l10n.switchOn : l10n.switchOff);
 
     final accent = UnisyncColors.accent;
 
     return Semantics(
       label: '${sw.name.isEmpty ? sw.id : sw.name}, $stateLabel',
-      button: online,
+      button: live,
       toggled: on,
       child: AnimatedScale(
         scale: _pressed ? 0.96 : 1,
@@ -710,11 +913,11 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
           ),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
-            onTap: online ? () => _toggle(on) : null,
+            onTap: live ? () => _toggle(on) : null,
             // Rename works on either transport (firmware v11.18.0).
             onLongPress: () => showRenameSwitchSheet(context, ref, sw),
-            onTapDown: online ? (_) => setState(() => _pressed = true) : null,
-            onTapUp: online ? (_) => setState(() => _pressed = false) : null,
+            onTapDown: live ? (_) => setState(() => _pressed = true) : null,
+            onTapUp: live ? (_) => setState(() => _pressed = false) : null,
             onTapCancel: () => setState(() => _pressed = false),
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -767,9 +970,12 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
     final overrides = ref.read(switchOverridesProvider.notifier);
     overrides.set(sw.id, next);
     try {
-      await ref
-          .read(activeControlProvider)
-          .setRelay(id: sw.id, on: next, ch: sw.ch);
+      await ref.read(activeControlProvider).setRelay(
+            id: sw.id,
+            on: next,
+            ch: sw.ch,
+            masterUid: widget.masterUid,
+          );
       // Leave the override in place; the next snapshot clears it.
     } on Exception {
       // Command failed — snap back to the snapshot state.

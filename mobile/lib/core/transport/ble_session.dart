@@ -331,9 +331,18 @@ class BleControlTransport implements ControlTransport {
   TransportKind get kind => TransportKind.ble;
 
   @override
-  Future<void> setRelay({required String id, required bool on, int? ch}) async {
-    // id already carries the channel suffix over BLE; ch is ignored.
-    await _send((p) => BleCommands.relay(proof: p, id: id, on: on));
+  Future<void> setRelay({
+    required String id,
+    required bool on,
+    int? ch,
+    String? masterUid,
+  }) async {
+    // id already carries the channel suffix over BLE; ch is ignored. The
+    // uid, when present, tells the connected master to forward over the
+    // mesh — Bluetooth controls the whole mesh, not just what's in range.
+    await _send(
+      (p) => BleCommands.relay(proof: p, id: id, on: on, masterUid: masterUid),
+    );
   }
 
   @override
@@ -373,6 +382,13 @@ class BleControlTransport implements ControlTransport {
   @override
   Future<void> renameMaster(String name) async {
     await _send((p) => BleCommands.renameMaster(proof: p, name: name));
+  }
+
+  @override
+  Future<void> setRestore({required String id, required bool restore}) async {
+    await _send(
+      (p) => BleCommands.setRestore(proof: p, id: id, restore: restore),
+    );
   }
 
   @override

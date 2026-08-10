@@ -48,6 +48,28 @@ class WifiService {
     }
   }
 
+  /// Routes this app's traffic to the Wi-Fi the phone is already on.
+  ///
+  /// The setup path the story describes is the user joining the master's
+  /// network from the phone's own settings. Android sees a network with no
+  /// internet and silently sends app traffic back to mobile data, so every
+  /// request to the master fails in a way that looks like broken hardware
+  /// — the single most likely field failure of the whole flow. Binding
+  /// inside [join] only ever covered app-initiated joins.
+  ///
+  /// Process-wide on Android, so anything that needs the internet (the
+  /// firmware manifest and image downloads) must [release] first. Returns
+  /// false on iOS, which offers no equivalent and needs none.
+  Future<bool> bindToWifi() async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('bindToWifi');
+      return ok ?? false;
+    } on PlatformException catch (e) {
+      log.w('wifi bind failed: ${e.code}');
+      return false;
+    }
+  }
+
   /// The SSID the phone is currently associated with, or null when
   /// not determinable. Both platforms restrict SSID reads without
   /// certain permissions/entitlements — treat null as "unknown",

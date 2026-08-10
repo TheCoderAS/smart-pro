@@ -28,9 +28,25 @@ class SwitchRepository {
     required String id,
     required bool on,
     int? ch,
+    String? masterUid,
   }) async {
     final channel = _channelFromId(id) ?? ch ?? 1;
     try {
+      if (masterUid != null && masterUid.isNotEmpty) {
+        // A switch on another master in the mesh. The connected master
+        // forwards it; `state` is explicit so an optimistic UI and a retry
+        // can't land on opposite values.
+        await _dio.post<dynamic>(
+          Api.meshRelay,
+          data: {
+            'peer_uid': masterUid,
+            'sw_id': id,
+            'ch': channel,
+            'state': on ? 1 : 0,
+          },
+        );
+        return;
+      }
       await _dio.post<dynamic>(
         Api.relay,
         data: {
@@ -66,6 +82,18 @@ class SwitchRepository {
       await _dio.post<dynamic>(
         Api.switchRename,
         data: {'id': id, 'name': name},
+      );
+    } on DioException catch (e) {
+      throw e.apiFailure;
+    }
+  }
+
+  /// POST /api/switch/restore — `restore` is 1/0.
+  Future<void> setRestore({required String id, required bool restore}) async {
+    try {
+      await _dio.post<dynamic>(
+        Api.switchRestore,
+        data: {'id': id, 'restore': restore ? 1 : 0},
       );
     } on DioException catch (e) {
       throw e.apiFailure;

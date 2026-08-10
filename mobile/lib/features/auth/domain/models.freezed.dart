@@ -15,7 +15,15 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$DeviceInfo {
 
- int get uptime;@JsonKey(name: 'free_heap') int get freeHeap; String get uid; String get fw; bool get auth;
+ int get uptime;@JsonKey(name: 'free_heap') int get freeHeap; String get uid; String get fw; bool get auth;/// The network name this master is broadcasting *right now* — its own
+/// report, not the phone's OS. Instruction copy ("connect to X") comes
+/// from here, so it self-heals after a rename and needs no location
+/// permission to read.
+ String get ssid;/// True when this master is in a mesh. Meshed masters are one home and
+/// one switcher entry, never several.
+ bool get mesh;/// Stable mesh identity. The mesh name is user-changeable, so the
+/// switcher keys on this instead.
+@JsonKey(name: 'mesh_id') int get meshId;
 /// Create a copy of DeviceInfo
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -28,16 +36,16 @@ $DeviceInfoCopyWith<DeviceInfo> get copyWith => _$DeviceInfoCopyWithImpl<DeviceI
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is DeviceInfo&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.freeHeap, freeHeap) || other.freeHeap == freeHeap)&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.auth, auth) || other.auth == auth));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is DeviceInfo&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.freeHeap, freeHeap) || other.freeHeap == freeHeap)&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.auth, auth) || other.auth == auth)&&(identical(other.ssid, ssid) || other.ssid == ssid)&&(identical(other.mesh, mesh) || other.mesh == mesh)&&(identical(other.meshId, meshId) || other.meshId == meshId));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,uptime,freeHeap,uid,fw,auth);
+int get hashCode => Object.hash(runtimeType,uptime,freeHeap,uid,fw,auth,ssid,mesh,meshId);
 
 @override
 String toString() {
-  return 'DeviceInfo(uptime: $uptime, freeHeap: $freeHeap, uid: $uid, fw: $fw, auth: $auth)';
+  return 'DeviceInfo(uptime: $uptime, freeHeap: $freeHeap, uid: $uid, fw: $fw, auth: $auth, ssid: $ssid, mesh: $mesh, meshId: $meshId)';
 }
 
 
@@ -48,7 +56,7 @@ abstract mixin class $DeviceInfoCopyWith<$Res>  {
   factory $DeviceInfoCopyWith(DeviceInfo value, $Res Function(DeviceInfo) _then) = _$DeviceInfoCopyWithImpl;
 @useResult
 $Res call({
- int uptime,@JsonKey(name: 'free_heap') int freeHeap, String uid, String fw, bool auth
+ int uptime,@JsonKey(name: 'free_heap') int freeHeap, String uid, String fw, bool auth, String ssid, bool mesh,@JsonKey(name: 'mesh_id') int meshId
 });
 
 
@@ -65,14 +73,17 @@ class _$DeviceInfoCopyWithImpl<$Res>
 
 /// Create a copy of DeviceInfo
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? uptime = null,Object? freeHeap = null,Object? uid = null,Object? fw = null,Object? auth = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? uptime = null,Object? freeHeap = null,Object? uid = null,Object? fw = null,Object? auth = null,Object? ssid = null,Object? mesh = null,Object? meshId = null,}) {
   return _then(_self.copyWith(
 uptime: null == uptime ? _self.uptime : uptime // ignore: cast_nullable_to_non_nullable
 as int,freeHeap: null == freeHeap ? _self.freeHeap : freeHeap // ignore: cast_nullable_to_non_nullable
 as int,uid: null == uid ? _self.uid : uid // ignore: cast_nullable_to_non_nullable
 as String,fw: null == fw ? _self.fw : fw // ignore: cast_nullable_to_non_nullable
 as String,auth: null == auth ? _self.auth : auth // ignore: cast_nullable_to_non_nullable
-as bool,
+as bool,ssid: null == ssid ? _self.ssid : ssid // ignore: cast_nullable_to_non_nullable
+as String,mesh: null == mesh ? _self.mesh : mesh // ignore: cast_nullable_to_non_nullable
+as bool,meshId: null == meshId ? _self.meshId : meshId // ignore: cast_nullable_to_non_nullable
+as int,
   ));
 }
 
@@ -157,10 +168,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int uptime, @JsonKey(name: 'free_heap')  int freeHeap,  String uid,  String fw,  bool auth)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int uptime, @JsonKey(name: 'free_heap')  int freeHeap,  String uid,  String fw,  bool auth,  String ssid,  bool mesh, @JsonKey(name: 'mesh_id')  int meshId)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _DeviceInfo() when $default != null:
-return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth);case _:
+return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth,_that.ssid,_that.mesh,_that.meshId);case _:
   return orElse();
 
 }
@@ -178,10 +189,10 @@ return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth);case 
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int uptime, @JsonKey(name: 'free_heap')  int freeHeap,  String uid,  String fw,  bool auth)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int uptime, @JsonKey(name: 'free_heap')  int freeHeap,  String uid,  String fw,  bool auth,  String ssid,  bool mesh, @JsonKey(name: 'mesh_id')  int meshId)  $default,) {final _that = this;
 switch (_that) {
 case _DeviceInfo():
-return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth);case _:
+return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth,_that.ssid,_that.mesh,_that.meshId);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -198,10 +209,10 @@ return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth);case 
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int uptime, @JsonKey(name: 'free_heap')  int freeHeap,  String uid,  String fw,  bool auth)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int uptime, @JsonKey(name: 'free_heap')  int freeHeap,  String uid,  String fw,  bool auth,  String ssid,  bool mesh, @JsonKey(name: 'mesh_id')  int meshId)?  $default,) {final _that = this;
 switch (_that) {
 case _DeviceInfo() when $default != null:
-return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth);case _:
+return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth,_that.ssid,_that.mesh,_that.meshId);case _:
   return null;
 
 }
@@ -213,7 +224,7 @@ return $default(_that.uptime,_that.freeHeap,_that.uid,_that.fw,_that.auth);case 
 @JsonSerializable()
 
 class _DeviceInfo implements DeviceInfo {
-  const _DeviceInfo({required this.uptime, @JsonKey(name: 'free_heap') required this.freeHeap, required this.uid, required this.fw, required this.auth});
+  const _DeviceInfo({required this.uptime, @JsonKey(name: 'free_heap') required this.freeHeap, required this.uid, required this.fw, required this.auth, this.ssid = '', this.mesh = false, @JsonKey(name: 'mesh_id') this.meshId = 0});
   factory _DeviceInfo.fromJson(Map<String, dynamic> json) => _$DeviceInfoFromJson(json);
 
 @override final  int uptime;
@@ -221,6 +232,17 @@ class _DeviceInfo implements DeviceInfo {
 @override final  String uid;
 @override final  String fw;
 @override final  bool auth;
+/// The network name this master is broadcasting *right now* — its own
+/// report, not the phone's OS. Instruction copy ("connect to X") comes
+/// from here, so it self-heals after a rename and needs no location
+/// permission to read.
+@override@JsonKey() final  String ssid;
+/// True when this master is in a mesh. Meshed masters are one home and
+/// one switcher entry, never several.
+@override@JsonKey() final  bool mesh;
+/// Stable mesh identity. The mesh name is user-changeable, so the
+/// switcher keys on this instead.
+@override@JsonKey(name: 'mesh_id') final  int meshId;
 
 /// Create a copy of DeviceInfo
 /// with the given fields replaced by the non-null parameter values.
@@ -235,16 +257,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _DeviceInfo&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.freeHeap, freeHeap) || other.freeHeap == freeHeap)&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.auth, auth) || other.auth == auth));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _DeviceInfo&&(identical(other.uptime, uptime) || other.uptime == uptime)&&(identical(other.freeHeap, freeHeap) || other.freeHeap == freeHeap)&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.auth, auth) || other.auth == auth)&&(identical(other.ssid, ssid) || other.ssid == ssid)&&(identical(other.mesh, mesh) || other.mesh == mesh)&&(identical(other.meshId, meshId) || other.meshId == meshId));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,uptime,freeHeap,uid,fw,auth);
+int get hashCode => Object.hash(runtimeType,uptime,freeHeap,uid,fw,auth,ssid,mesh,meshId);
 
 @override
 String toString() {
-  return 'DeviceInfo(uptime: $uptime, freeHeap: $freeHeap, uid: $uid, fw: $fw, auth: $auth)';
+  return 'DeviceInfo(uptime: $uptime, freeHeap: $freeHeap, uid: $uid, fw: $fw, auth: $auth, ssid: $ssid, mesh: $mesh, meshId: $meshId)';
 }
 
 
@@ -255,7 +277,7 @@ abstract mixin class _$DeviceInfoCopyWith<$Res> implements $DeviceInfoCopyWith<$
   factory _$DeviceInfoCopyWith(_DeviceInfo value, $Res Function(_DeviceInfo) _then) = __$DeviceInfoCopyWithImpl;
 @override @useResult
 $Res call({
- int uptime,@JsonKey(name: 'free_heap') int freeHeap, String uid, String fw, bool auth
+ int uptime,@JsonKey(name: 'free_heap') int freeHeap, String uid, String fw, bool auth, String ssid, bool mesh,@JsonKey(name: 'mesh_id') int meshId
 });
 
 
@@ -272,14 +294,17 @@ class __$DeviceInfoCopyWithImpl<$Res>
 
 /// Create a copy of DeviceInfo
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? uptime = null,Object? freeHeap = null,Object? uid = null,Object? fw = null,Object? auth = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? uptime = null,Object? freeHeap = null,Object? uid = null,Object? fw = null,Object? auth = null,Object? ssid = null,Object? mesh = null,Object? meshId = null,}) {
   return _then(_DeviceInfo(
 uptime: null == uptime ? _self.uptime : uptime // ignore: cast_nullable_to_non_nullable
 as int,freeHeap: null == freeHeap ? _self.freeHeap : freeHeap // ignore: cast_nullable_to_non_nullable
 as int,uid: null == uid ? _self.uid : uid // ignore: cast_nullable_to_non_nullable
 as String,fw: null == fw ? _self.fw : fw // ignore: cast_nullable_to_non_nullable
 as String,auth: null == auth ? _self.auth : auth // ignore: cast_nullable_to_non_nullable
-as bool,
+as bool,ssid: null == ssid ? _self.ssid : ssid // ignore: cast_nullable_to_non_nullable
+as String,mesh: null == mesh ? _self.mesh : mesh // ignore: cast_nullable_to_non_nullable
+as bool,meshId: null == meshId ? _self.meshId : meshId // ignore: cast_nullable_to_non_nullable
+as int,
   ));
 }
 

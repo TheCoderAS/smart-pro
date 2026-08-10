@@ -521,11 +521,40 @@ static void save_registration(uint8_t addr, uint8_t *m_uid) {
     nvs_flush();
 }
 
+/* Every nvs_flush() erases and rewrites the whole 2 KB page. Doing that
+ * inline on each toggle burns a page-erase cycle per press, which is the
+ * flash-wear problem the tech story calls out. The shadow is updated
+ * immediately (so every reader sees the truth at once) and only the
+ * flash write is deferred until the user stops flipping the switch. */
+#define NVS_WRITE_DEBOUNCE_MS 3000UL
+static bool     nvs_dirty    = false;
+static uint32_t nvs_dirty_ms = 0;
+
 static void save_relay_state(void) {
     nvs_shadow[NVS_RELAY] = (relay1_state ? 0x01 : 0x00) |
                              (relay2_state ? 0x02 : 0x00);
     nvs_shadow[NVS_MAGIC] = NVS_RELAY_MAGIC; /* standalone -- not registered */
+    nvs_dirty    = true;
+    nvs_dirty_ms = millis();
+}
+
+/* Write now, cancelling any pending debounce. For mode changes, where
+ * losing the state to a power cut would be worse than a page erase. */
+static void save_relay_state_now(void) {
+    save_relay_state();
     nvs_flush();
+    nvs_dirty = false;
+}
+
+/* Called every loop: commits a debounced write once the burst ends.
+ * Never during OTA -- nvs_flush() erases a flash page, and doing that
+ * while the bootloader is writing firmware is how you brick a board. A
+ * pending write simply waits; OTA ends in a reset anyway. */
+static void nvs_tick(void) {
+    if (!nvs_dirty || mode == MODE_OTA) return;
+    if ((millis() - nvs_dirty_ms) < NVS_WRITE_DEBOUNCE_MS) return;
+    nvs_flush();
+    nvs_dirty = false;
 }
 
 static void wipe_registration(void) {
@@ -583,14 +612,22 @@ static void set_relay2(bool s) {
 /* ================================================================
  * SELF-UNREGISTER
  * ================================================================ */
+/* Reached only from the orphan timeout: the master has stopped answering.
+ * That is a lost *link*, not an instruction to change anything, so the
+ * relays are left exactly as the user last set them -- a master reboot
+ * must not darken a lit house. The board simply reverts to standalone
+ * behaviour, where touch keeps working and it owns its own state again.
+ *
+ * wipe_registration() clears bytes 0..7, which includes NVS_RELAY, so the
+ * live state is re-persisted afterwards under the standalone magic --
+ * otherwise a later power cut would restore stale or empty state. */
 static void self_unregister(void) {
-    relay1_state = false; relay2_state = false;
-    set_relay1(false); set_relay2(false);
     wipe_registration();
     slot_address      = ADDR_UNASSIGNED;
     mode              = MODE_UNREGISTERED;
     announce_interval = 2000;
     last_announce_ms  = 0;
+    save_relay_state_now();
 }
 
 /* ================================================================
@@ -941,6 +978,7 @@ void setup() {
  * ================================================================ */
 void loop() {
     handle_touch();
+    nvs_tick();    /* commit any debounced relay-state write */
 
     bus_rx_tick(); /* always process bus including during OTA */
 

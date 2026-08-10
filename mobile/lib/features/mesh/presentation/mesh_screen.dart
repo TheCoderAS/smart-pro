@@ -2,22 +2,70 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
+import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
 import '../../auth/application/session.dart';
+import '../../onboarding/application/first_run.dart';
 import '../data/mesh_repository.dart';
 import '../domain/mesh_models.dart';
+import 'add_to_mesh_flow.dart';
 
-class MeshScreen extends ConsumerWidget {
+class MeshScreen extends ConsumerStatefulWidget {
   const MeshScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MeshScreen> createState() => _MeshScreenState();
+}
+
+class _MeshScreenState extends ConsumerState<MeshScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTip());
+  }
+
+  /// One sentence, once, on first mesh entry: roaming between masters is the
+  /// phone's own Wi-Fi doing the handoff, and it only works if the phone is
+  /// allowed to reconnect on its own. Shown once, findable again in
+  /// Settings — a tip, not a nag.
+  Future<void> _maybeShowTip() async {
+    final status = await ref.read(meshStatusProvider.future);
+    if (!status.active || !mounted) return;
+    final flags = await ref.read(firstRunProvider.future);
+    if (flags.meshTipSeen || !mounted) return;
+    await ref.read(firstRunProvider.notifier).markMeshTipSeen();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('One thing for smooth roaming'),
+        content: Text(
+          'Keep auto-connect switched on for "${status.meshName}" in your '
+          "phone's Wi-Fi settings. That's what lets you walk through the "
+          'house without the app skipping a beat.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final status = ref.watch(meshStatusProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Mesh')),
+      appBar: AppBar(
+        title: const Text('Mesh'),
+        bottom: const ConnectionBar(),
+      ),
       body: RefreshIndicator(
         onRefresh: () => ref.read(meshStatusProvider.notifier).refresh(),
         child: switch (status) {
@@ -31,7 +79,9 @@ class MeshScreen extends ConsumerWidget {
                 ] else ...[
                   _MeshStatusCard(status: s),
                   const SizedBox(height: 12),
-                  ...s.peers.map((p) => _PeerTile(peer: p)),
+                  ...s.peers.map(
+                    (p) => _PeerTile(peer: p, rolloutTarget: _newest(s)),
+                  ),
                 ],
                 const SizedBox(height: 24),
                 _Actions(status: s),
@@ -56,6 +106,32 @@ class MeshScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// The newest firmware version anywhere in the mesh — this master or any
+/// peer. Everything behind it is still catching up.
+String _newest(MeshStatus s) {
+  var best = s.fw;
+  for (final p in s.peers) {
+    if (p.fw.isEmpty) continue;
+    if (best.isEmpty || _fwNewer(p.fw, best)) best = p.fw;
+  }
+  return best;
+}
+
+bool _fwNewer(String a, String b) {
+  List<int> parse(String v) => [
+        for (final part in v.split('.'))
+          int.tryParse(part.replaceAll(RegExp('[^0-9]'), '')) ?? 0,
+      ];
+  final pa = parse(a);
+  final pb = parse(b);
+  for (var i = 0; i < pa.length || i < pb.length; i++) {
+    final x = i < pa.length ? pa[i] : 0;
+    final y = i < pb.length ? pb[i] : 0;
+    if (x != y) return x > y;
+  }
+  return false;
 }
 
 /// The one unrecoverable state (API §5): this master missed a
@@ -149,27 +225,115 @@ class _MeshStatusCard extends StatelessWidget {
   }
 }
 
-class _PeerTile extends StatelessWidget {
-  const _PeerTile({required this.peer});
+/// One member master. Every member is listed, reachable or not — a card
+/// that vanishes when a master goes quiet is exactly the flapping the story
+/// rules out, and the user has to see the state before acting on it.
+class _PeerTile extends ConsumerWidget {
+  const _PeerTile({required this.peer, this.rolloutTarget = ''});
 
   final MeshPeer peer;
 
+  /// The newest version anywhere in the mesh. A peer behind it is mid
+  /// rollout, not broken.
+  final String rolloutTarget;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final (icon, colour) = peer.credStale
+        ? (Icons.sync_problem, scheme.error)
+        : switch (peer.presence) {
+            Presence.online => (Icons.router_outlined, scheme.primary),
+            Presence.intermittent =>
+              (Icons.signal_wifi_statusbar_null_outlined, scheme.tertiary),
+            Presence.offline => (Icons.router_outlined, scheme.onSurfaceVariant),
+          };
+
+    final line = StringBuffer('Firmware ${peer.fw}');
+    // Mid-rollout a mesh legitimately runs several versions: one push
+    // propagates master-to-master and each applies at its own pace. That
+    // is progress, not a fault, so it reads as "updating" rather than a
+    // mismatch warning.
+    if (rolloutTarget.isNotEmpty && peer.fw != rolloutTarget) {
+      line.write(' · updating to $rolloutTarget');
+    }
+    if (peer.presence != Presence.online) {
+      line
+        ..write(' · ${peer.presence.label.toLowerCase()}')
+        ..write(' · last seen ${lastSeenLabel(peer.lastSeen)}');
+    }
+    if (peer.credStale) line.write(' · needs remove & re-add');
+
     return Card(
       child: ListTile(
-        leading: Icon(
-          peer.credStale ? Icons.sync_problem : Icons.router_outlined,
-          color: peer.credStale ? scheme.error : null,
-        ),
-        title: Text(peer.name),
-        subtitle: Text(
-          'Firmware ${peer.fw}'
-          '${peer.credStale ? " · needs remove & re-add" : ""}',
+        leading: Icon(icon, color: colour),
+        title: Text(peer.name.isEmpty ? peer.uid : peer.name),
+        subtitle: Text(line.toString()),
+        trailing: peer.uid.isEmpty
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.person_remove_outlined),
+                // Removal needs the target to delete its own credentials
+                // and confirm, so an unreachable master cannot be removed.
+                onPressed: peer.removable
+                    ? () => _remove(context, ref)
+                    : () => ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              '${peer.name.isEmpty ? "That master" : peer.name} '
+                              'has to be reachable before it can be removed. '
+                              'Power it on and try again.',
+                            ),
+                          ),
+                        ),
+                color: peer.removable ? scheme.error : scheme.onSurfaceVariant,
+                tooltip: peer.removable
+                    ? 'Remove from mesh'
+                    : 'Offline — cannot be removed',
+              ),
+      ),
+    );
+  }
+
+  Future<void> _remove(BuildContext context, WidgetRef ref) async {
+    final name = peer.name.isEmpty ? peer.uid : peer.name;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Remove $name from the mesh?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '$name restarts as a standalone switch, using the network name '
+              'and password it had before it joined. Its switches leave this '
+              'dashboard.\n\n' 
+              'It keeps everything of its own — its extensions, names, order '
+              'and settings are untouched. Every other master carries on '
+              'without interruption.',
+            ),
+            const SizedBox(height: 16),
+            FormActions(
+              saveLabel: 'Remove',
+              destructive: true,
+              onCancel: () => Navigator.of(dialogContext).pop(false),
+              onSave: () => Navigator.of(dialogContext).pop(true),
+            ),
+          ],
         ),
       ),
     );
+    if (!(confirmed ?? false) || !context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(meshRepositoryProvider).kick(uid: peer.uid);
+      messenger.showSnackBar(
+        SnackBar(content: Text('$name left the mesh.')),
+      );
+    } on ApiFailure catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    }
+    await ref.read(meshStatusProvider.notifier).refresh();
   }
 }
 
@@ -192,14 +356,16 @@ class _Actions extends ConsumerWidget {
           const SizedBox(height: 8),
           OutlinedButton.icon(
             icon: const Icon(Icons.login),
-            label: const Text('Join a mesh (enter invite)'),
+            label: const Text('Join an existing mesh'),
             onPressed: () => _joinMesh(context, ref),
           ),
         ] else ...[
           FilledButton.icon(
             icon: const Icon(Icons.person_add_alt),
-            label: const Text('Invite another master'),
-            onPressed: () => _invite(context, ref),
+            label: const Text('Add a switch to this mesh'),
+            // The invite is fetched and used inside the flow; the PIN
+            // never reaches the screen (v5.1 Epic 7).
+            onPressed: () => runAddToMeshFlow(context, ref),
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
@@ -242,11 +408,62 @@ class _Actions extends ConsumerWidget {
   }
 
   Future<void> _createMesh(BuildContext context, WidgetRef ref) async {
-    final name = await _promptText(context, 'Create a mesh', 'Mesh name');
-    if (name == null || name.isEmpty) return;
+    final nameController = TextEditingController();
+    final passController = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Create a mesh'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final name = nameController.text.trim();
+            final canSave = name.isNotEmpty && passController.text.length >= 8;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  autofocus: true,
+                  maxLength: 31,
+                  decoration: const InputDecoration(labelText: 'Mesh name'),
+                  onChanged: (_) => setState(() {}),
+                ),
+                PasswordField(
+                  controller: passController,
+                  label: 'Mesh password',
+                  helper: 'At least 8 characters. This becomes the Wi-Fi '
+                      'password and the sign-in for the whole home.',
+                  helperMaxLines: 3,
+                ),
+                const SizedBox(height: 12),
+                // Pre-announce the drop: the network restarts the moment
+                // the mesh is created (v5.1 Epic 7).
+                Text(
+                  'Your network will restart under the new mesh name. '
+                  'You will be asked to rejoin it with this password.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 16),
+                FormActions(
+                  saveLabel: 'Create',
+                  canSave: canSave,
+                  onCancel: () => Navigator.of(dialogContext).pop(false),
+                  onSave: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    final name = nameController.text.trim();
+    final pass = passController.text;
+    nameController.dispose();
+    passController.dispose();
+    if (!(ok ?? false) || name.isEmpty || pass.length < 8) return;
     if (!context.mounted) return;
     await _guard(context, ref, () async {
-      await ref.read(meshRepositoryProvider).create(name: name);
+      await ref.read(meshRepositoryProvider).create(name: name, pass: pass);
     });
   }
 
@@ -259,53 +476,25 @@ class _Actions extends ConsumerWidget {
     });
   }
 
-  Future<void> _invite(BuildContext context, WidgetRef ref) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final MeshInvite invite;
-    try {
-      invite = await ref.read(meshRepositoryProvider).invite();
-    } on ApiFailure catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
-      return;
-    }
-    if (!context.mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Invite code'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'On the phone connected to the new master, choose '
-              '"Join a mesh" and enter:',
-            ),
-            const SizedBox(height: 16),
-            SelectableText('MAC:  ${invite.mac}'),
-            SelectableText('PIN:  ${invite.pin}'),
-          ],
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Done'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<void> _joinMesh(BuildContext context, WidgetRef ref) async {
     final macController = TextEditingController();
     final pinController = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Join a mesh'),
+        title: const Text('Join an existing mesh'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            const Text(
+              'The easy way round is from the other side: open the app on '
+              'the mesh you already have and choose "Add a switch to this '
+              'mesh". It carries the invite across for you.\n\n'
+              'This form is the manual fallback if that cannot reach this '
+              'switch.',
+            ),
+            const SizedBox(height: 16),
             TextField(
               controller: macController,
               decoration: const InputDecoration(labelText: 'MAC'),

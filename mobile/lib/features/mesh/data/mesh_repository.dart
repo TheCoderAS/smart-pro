@@ -43,8 +43,12 @@ class MeshRepository {
   }
 
   /// Standalone → mesh; this master becomes the first member.
-  Future<void> create({required String name}) =>
-      _post(Api.meshCreate, {'name': name});
+  ///
+  /// The password is the user's choice and becomes both the mesh Wi-Fi
+  /// key and the login for the whole home (v5.1 Epic 7). Firmware
+  /// requires at least 8 characters.
+  Future<void> create({required String name, required String pass}) =>
+      _post(Api.meshCreate, {'name': name, 'pass': pass});
 
   /// Run on a master already in the mesh; yields the mac/pin the
   /// joining master enters.
@@ -63,6 +67,15 @@ class MeshRepository {
 
   /// Restores the device password (API §1).
   Future<void> leave() => _post(Api.meshLeave, const {});
+
+  /// Remove another master from the mesh, by uid.
+  ///
+  /// The master must be reachable: it deletes its own mesh credentials and
+  /// acknowledges before this resolves, so a success here means the removal
+  /// actually happened. The firmware refuses an offline target (409) rather
+  /// than leaving the app to report a removal that didn't occur.
+  Future<void> kick({required String uid}) =>
+      _post(Api.meshKick, {'uid': uid});
 
   Future<void> rename({required String name}) =>
       _post(Api.meshRename, {'name': name});

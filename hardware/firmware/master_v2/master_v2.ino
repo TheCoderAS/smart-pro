@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.24.0"
+#define MASTER_FW_VERSION  "11.27.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -197,7 +197,22 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 #define UART_BAUD         250000
 #define MAX_EXTENSIONS    5
 #define POLL_MS           200
-#define MISSED_MAX        5
+/* Presence (UX story, Epic 2). A "check-in" is one second of bus polling,
+ * not a single 200 ms poll -- one dropped frame on a shared RS-485 bus is
+ * noise, not an outage. Offline is declared after three missed check-ins. */
+#define CHECKIN_MS        1000UL
+#define CHECKIN_MISSES    3
+#define MISSED_MAX        ((int)((CHECKIN_MS/POLL_MS)*CHECKIN_MISSES))  /* 15 polls = 3 s */
+/* Coming back is not instant: an extension that has dropped only returns to
+ * the dashboard after a solid minute of presence. Until then it reports as
+ * "intermittent" so its switches don't blink in and out. */
+#define PRESENCE_SETTLE_MS 60000UL
+/* How long a drop is remembered. Two drops inside the window mark the board
+ * intermittent while it is down, rather than plainly offline. */
+#define PRESENCE_FLAP_MS   600000UL
+/* Restore pushes are spaced this far apart, per channel, so a whole house
+ * coming back after an outage doesn't slam every relay closed at once. */
+#define RESTORE_STAGGER_MS 40UL
 #define BUS_RESP_MS       20
 #define LISTEN_WINDOW_MS  30
 #define LISTEN_INTERVAL_MS 200
@@ -239,7 +254,12 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
  * 10 KB of SRAM; raise together with the mesh-status JSON buffer below. */
 #define MAX_MESH_MASTERS   16     /* OTA-updatable */
 #define MESH_GOSSIP_MS     500   /* state broadcast interval */
-#define MESH_PEER_TIMEOUT  10000 /* ms before peer marked offline */
+/* Mesh presence reuses the extension pattern (three missed check-ins), but a
+ * mesh check-in is four gossip intervals: ESP-NOW shares the air with Wi-Fi
+ * and loses frames the wired bus never does. 3 x 2 s = 6 s to declare a peer
+ * offline. */
+#define MESH_CHECKIN_MS    2000UL
+#define MESH_PEER_TIMEOUT  (MESH_CHECKIN_MS * CHECKIN_MISSES)
 #define MESH_PIN_VALID_MS  300000 /* PIN expires after 5 minutes */
 
 /* Mesh packet types */
@@ -255,6 +275,7 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 #define MESH_PKT_CONFIG    0x0A
 #define MESH_PKT_KICK      0x0B
 #define MESH_PKT_KICK_ACK  0x0C  /* config command: rename/reorder */
+#define MESH_PKT_RECFAIL   0x0D  /* recovery backoff, shared across the mesh */
 
 /* ================================================================
  * RELAY RATE LIMITING
@@ -277,7 +298,22 @@ static const char *SLOT_COLORS[] = {
 /* ================================================================
  * DATA TYPES
  * ================================================================ */
+/* Bus liveness. This drives polling and command routing and is NOT what the
+ * app sees -- see presence_t below. */
 typedef enum { EXT_EMPTY=0, EXT_ONLINE, EXT_OFFLINE } ext_state_t;
+
+/* What apps see. Deliberately a separate layer from bus liveness: a board can
+ * be answering the bus (so we keep polling and controlling it) while still
+ * reporting "intermittent" because it hasn't been solid for a minute yet. */
+typedef enum { PRES_OFFLINE=0, PRES_ONLINE, PRES_INTERMITTENT } presence_t;
+
+static const char *presence_str(presence_t p) {
+    switch (p) {
+        case PRES_ONLINE:       return "online";
+        case PRES_INTERMITTENT: return "intermittent";
+        default:                return "offline";
+    }
+}
 
 /* Mesh switch state (for gossip) */
 typedef struct {
@@ -286,6 +322,8 @@ typedef struct {
     char     color[8];
     bool     state;
     bool     online;
+    bool     restore; /* per-switch restore policy, gossiped so a peer's
+                       * card can show and change it like a local one */
     uint8_t  ch;      /* relay channel (1 or 2) */
 } mesh_switch_t;
 
@@ -294,8 +332,12 @@ typedef struct {
     uint8_t       uid[4];
     uint8_t       mac[6];
     char          name[24];
-    bool          online;
+    bool          online;          /* link liveness -- routing, not UI */
     uint32_t      last_seen_ms;
+    /* Presence debounce, mirroring extension_t below. */
+    uint32_t      settle_until_ms; /* 0 = settled; else back but not solid yet */
+    uint32_t      last_drop_ms;
+    uint8_t       drops;
     mesh_switch_t switches[12];
     uint8_t       switch_count;
     uint8_t       fw[3];          /* peer's master firmware version */
@@ -356,6 +398,12 @@ typedef struct {
     bool        relay2;
     uint8_t     missed;
     uint32_t    last_seen_ms;
+    /* Presence debounce. Zero means "never dropped" -- a freshly adopted
+     * board appears on the dashboard at once; only a *return* has to serve
+     * the settle window. */
+    uint32_t    settle_until_ms;
+    uint32_t    last_drop_ms;
+    uint8_t     drops;               /* drops inside PRESENCE_FLAP_MS */
     uint32_t    last_relay1_cmd_ms;  /* rate limiting */
     uint32_t    last_relay2_cmd_ms;
     bool        polled_once;         /* for boot overlay */
@@ -366,6 +414,83 @@ typedef struct {
     uint8_t     ota_fail_ver[3];     /* which version those failures were for */
     uint32_t    ota_next_try_ms;     /* backoff gate */
 } extension_t;
+
+/* ---- Presence ---------------------------------------------------------
+ * One rule, applied to extensions and to mesh peers alike. Callers pass the
+ * raw liveness flag plus the debounce fields; the result is what apps see.
+ *
+ *   down  + flapping recently  -> intermittent (diagnostic, not a plain outage)
+ *   down                       -> offline
+ *   up    + inside settle win  -> intermittent (back, but not trusted yet)
+ *   up                         -> online
+ *
+ * Millis comparisons are signed differences so a 49-day rollover can't strand
+ * a board in the wrong state. */
+static presence_t presence_of(bool up, uint32_t settle_until_ms,
+                              uint32_t last_drop_ms, uint8_t drops,
+                              uint32_t now) {
+    if (!up) {
+        bool recent = last_drop_ms && (now - last_drop_ms) < PRESENCE_FLAP_MS;
+        return (drops >= 2 && recent) ? PRES_INTERMITTENT : PRES_OFFLINE;
+    }
+    if (settle_until_ms && (int32_t)(now - settle_until_ms) < 0)
+        return PRES_INTERMITTENT;
+    return PRES_ONLINE;
+}
+
+/* Bookkeeping for a transition, shared by both presence users. `up` is the
+ * new liveness. Returns nothing; the caller owns the mutex. */
+static void presence_note_drop(uint32_t *settle_until_ms,
+                               uint32_t *last_drop_ms, uint8_t *drops,
+                               uint32_t now) {
+    if (*last_drop_ms && (now - *last_drop_ms) >= PRESENCE_FLAP_MS) *drops = 0;
+    if (*drops < 255) (*drops)++;
+    *last_drop_ms = now ? now : 1;
+    *settle_until_ms = 0;
+}
+
+/* `last_drop_ms` of 0 means this thing has no history of leaving -- a
+ * first-ever appearance (fresh adoption, a master joining the mesh). Those
+ * show up immediately; the settle window exists for a *return*. */
+static void presence_note_return(uint32_t *settle_until_ms,
+                                 uint32_t last_drop_ms, uint32_t now) {
+    if (!last_drop_ms) { *settle_until_ms = 0; return; }
+    uint32_t until = now + PRESENCE_SETTLE_MS;
+    *settle_until_ms = until ? until : 1;   /* 0 is reserved for "settled" */
+}
+
+/* Called on every successful check-in: retires the settle window once it has
+ * elapsed, and forgets an old flap run. */
+static void presence_tick_up(uint32_t *settle_until_ms,
+                             uint32_t *last_drop_ms, uint8_t *drops,
+                             uint32_t now) {
+    if (*settle_until_ms && (int32_t)(now - *settle_until_ms) >= 0)
+        *settle_until_ms = 0;
+    if (*last_drop_ms && (now - *last_drop_ms) >= PRESENCE_FLAP_MS) {
+        *last_drop_ms = 0;
+        *drops = 0;
+    }
+}
+
+/* Seconds since this thing was last heard from. 0 while it is being heard
+ * from right now, and 0 during a post-welcome grace window (last_seen_ms is
+ * parked in the future there). */
+static uint32_t seconds_since(uint32_t last_seen_ms, uint32_t now) {
+    if (last_seen_ms == 0) return 0;
+    if ((int32_t)(now - last_seen_ms) < 0) return 0;
+    return (now - last_seen_ms) / 1000UL;
+}
+
+static presence_t ext_presence(const extension_t *e, uint32_t now) {
+    if (e->state == EXT_EMPTY) return PRES_OFFLINE;
+    return presence_of(e->state == EXT_ONLINE, e->settle_until_ms,
+                       e->last_drop_ms, e->drops, now);
+}
+
+static presence_t peer_presence(const mesh_peer_t *p, uint32_t now) {
+    return presence_of(p->online, p->settle_until_ms,
+                       p->last_drop_ms, p->drops, now);
+}
 
 /* Pending challenge tracking */
 #define MAX_CHALLENGES 5
@@ -525,14 +650,21 @@ static uint32_t       auth_lock_until = 0;
  * registers one with the Bluetooth SIG. */
 #define BLE_COMPANY_ID 0xFFFF
 #define BLE_MFG_VER    0x01
-#define BLE_MAX_FAILS  5
-#define BLE_LOCKOUT_MS 900000UL      /* 15 min after 5 wrong answers */
+/* Recovery backoff: two seconds, doubling per rejection, capped. The
+ * schedule lives here rather than in the app, and every rejection carries
+ * the remaining wait so the app only renders a countdown it was given. */
+#define REC_BACKOFF_BASE_S 2
+#define REC_BACKOFF_MAX_S  300
 
 static NimBLECharacteristic *ble_chal_char   = nullptr;
 static NimBLECharacteristic *ble_result_char = nullptr;
 static uint8_t  ble_nonce[8]      = {0};
-static uint8_t  ble_fails         = 0;
-static uint32_t ble_lock_until    = 0;
+/* Rejection count and the moment the next attempt is allowed. Synchronised
+ * across the mesh, because the story requires one recovery gate for the
+ * whole home -- hopping to another master must continue the same countdown
+ * rather than resetting it. */
+static uint8_t  rec_fails         = 0;
+static uint32_t rec_next_ms       = 0;
 static bool     ble_recover_ready = false;   /* apply from task_web */
 static char     ble_new_pass[64]  = {0};
 static NimBLECharacteristic *ble_rsp_char   = nullptr;
@@ -547,6 +679,7 @@ typedef struct {
     uint32_t opened_ms;
     uint32_t last_ms;
     uint32_t last_counter;   /* replay guard: must strictly increase */
+    uint8_t  snonce[8];      /* this connection's session nonce */
 } ble_conn_t;
 static ble_conn_t   ble_conns[BLE_MAX_CONN];
 static uint8_t      ble_conn_count = 0;
@@ -617,6 +750,8 @@ static void     reset_button_tick(void);
 static void     ble_recovery_begin(void);
 static void     ble_recovery_apply(void);
 static void     mesh_broadcast_pass_change(void);
+static bool     mesh_send(const uint8_t *mac, const void *data, size_t len);
+static void     mesh_broadcast(const void *data, size_t len);
 static int      mesh_verify(const uint8_t *data, int len);
 static bool     fs_ready       = false;
 static uint32_t last_reconcile = 0;
@@ -651,6 +786,12 @@ static uint32_t fwrx_last_ms = 0;
  * callback and the bus task far above; Arduino's auto-prototype pass is
  * not reliable enough to depend on here. */
 static void     ext_reset_identity(extension_t *e);
+static bool     switch_id_valid(const String &id);
+static void     nvs_load_switch_name(const char *id, char *name, int nlen);
+static void     relay_state_save(void);
+static void     relay_state_save_now(void);
+static bool     nvs_load_restore(const char *id);
+static void     nvs_save_restore(const char *id, bool restore);
 static void     master_ver_parse(const char *s, uint8_t *v);
 static void     task_fwsync(void *arg);
 static void     hmac_sha256(const uint8_t *key, const uint8_t *msg,
@@ -878,7 +1019,14 @@ static void pin_wrap(const char *pin, const uint8_t *uid4,
     uint8_t seed[12], key[32], ks[32];
     memcpy(seed, uid4, 4);
     memcpy(seed + 4, nonce8, 8);
-    hmac_sha256((const uint8_t *)pin, seed, sizeof(seed), key);
+    /* hmac_sha256 always reads sixteen key bytes. mesh_pin is a seven-byte
+     * buffer, so passing it straight in read nine bytes of whatever globals
+     * followed it -- deterministic within one build, and different in the
+     * next, which would have made a join between two firmware versions fail
+     * in a way nobody could explain. Pad explicitly instead. */
+    uint8_t pk[16] = {0};
+    for (int i = 0; i < 16 && pin[i]; i++) pk[i] = (uint8_t)pin[i];
+    hmac_sha256(pk, seed, sizeof(seed), key);
     for (uint16_t off = 0; off < n; off += 32) {
         uint8_t ctr[36];
         memcpy(ctr, key, 32);
@@ -912,9 +1060,19 @@ static void mesh_broadcast_pass_change(void) {
 
 static bool mesh_send(const uint8_t *mac, const void *data, size_t len) {
     if (!mesh_active) return false;
-    if (!mesh_auth_set || len + MESH_TAG_LEN > 250) {
+    if (!mesh_auth_set) {
+        /* Before a mesh exists there is no key to tag with; the join
+         * exchange is authenticated by the PIN instead. */
         esp_err_t r0 = esp_now_send(mac, (const uint8_t*)data, len);
         return (r0 == ESP_OK);
+    }
+    if (len + MESH_TAG_LEN > 250) {
+        /* Sending it untagged would be worse than not sending it: the peer
+         * drops untagged packets, so the caller would believe it succeeded
+         * while nothing arrived. Say so instead. */
+        Serial.printf("[MESH] packet %u bytes exceeds the ESP-NOW limit, not sent\n",
+                      (unsigned)len);
+        return false;
     }
     uint8_t buf[250];
     memcpy(buf, data, len);
@@ -936,11 +1094,138 @@ static int mesh_verify(const uint8_t *data, int len) {
     return body;
 }
 
-/* Broadcast to all known mesh peers */
+/* Broadcast to all known mesh peers.
+ *
+ * Through mesh_send, so the packet carries the auth tag. It used to call
+ * esp_now_send directly and therefore went out untagged -- and mesh_recv_cb
+ * drops every untagged packet that is not a join, so gossip, config relays,
+ * password changes and kicks were all thrown away by their recipients. */
 static void mesh_broadcast(const void *data, size_t len) {
     if (!mesh_active) return;
     uint8_t broadcast_mac[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-    esp_now_send(broadcast_mac, (const uint8_t*)data, len);
+    mesh_send(broadcast_mac, data, len);
+}
+
+/* ---- Gossip ------------------------------------------------------------
+ * ESP-NOW carries at most 250 bytes, and mesh_send spends 8 of them on the
+ * auth tag. A master's full switch list does not come close to fitting: even
+ * a bare two-channel master with no extensions serialised to well over 250,
+ * so esp_now_send rejected every gossip packet outright and no peer ever saw
+ * another peer's switches.
+ *
+ * State is therefore gossiped incrementally, in packets that fit:
+ *
+ *   header  {"type":1,"uid":..,"nm":..,"fw":..,"cv":..,"t":<count>}
+ *   window  {"type":1,"uid":..,"t":<count>,"sw":[ up to two switches ]}
+ *
+ * Receivers merge switch entries by id, so windows may arrive in any order
+ * and a lost packet costs one round rather than a corrupted list. Changed
+ * switches jump the queue: a wall touch propagates on the next tick instead
+ * of waiting for the sweep to come round. The periodic sweep continues
+ * underneath so a master that joins or reboots converges on its own.
+ *
+ * Keys inside "sw" are one character because the budget is genuinely that
+ * tight -- a 23-character switch name is 29 bytes of the ~95 an entry costs.
+ */
+#define MESH_MTU        242   /* 250 minus the auth tag mesh_send appends */
+#define GOSSIP_SW_MAX   2     /* switches per window packet */
+#define MAX_LOCAL_SW    (2 + 2 * MAX_EXTENSIONS)
+
+typedef struct {
+    char    id[16];
+    char    name[24];
+    uint8_t slot_color;   /* index into SLOT_COLORS */
+    bool    state;
+    bool    online;
+    bool    restore;
+    uint8_t ch;
+} local_sw_t;
+
+/* What we last put on the air, so a change can be spotted without asking
+ * every consumer to tell us. */
+static bool     gossip_shadow_valid = false;
+static uint8_t  gossip_shadow_count = 0;
+static char     gossip_shadow_id[MAX_LOCAL_SW][16];
+static bool     gossip_shadow_state[MAX_LOCAL_SW];
+static bool     gossip_shadow_online[MAX_LOCAL_SW];
+static uint8_t  gossip_cursor = 0;    /* 0 = header, then switch windows */
+
+/* Snapshot this master's switches. Reads NVS, so it must not run with the
+ * state mutex held; it takes and releases the mutex itself. */
+static uint8_t gossip_collect(local_sw_t *out) {
+    uint8_t n = 0;
+    char sw_name[24];
+
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    bool r1 = master_relay1, r2 = master_relay2;
+    xSemaphoreGive(state_mutex);
+
+    for (int ch = 1; ch <= 2; ch++) {
+        local_sw_t *s = &out[n++];
+        snprintf(s->id, sizeof(s->id), "master_%d", ch);
+        nvs_load_switch_name(s->id, sw_name, sizeof(sw_name));
+        if (!strcmp(sw_name, "Switch")) snprintf(sw_name, sizeof(sw_name), "Switch %d", ch);
+        strncpy(s->name, sw_name, sizeof(s->name)-1); s->name[sizeof(s->name)-1] = 0;
+        s->slot_color = 0;
+        s->state   = (ch == 1) ? r1 : r2;
+        s->online  = true;
+        s->restore = nvs_load_restore(s->id);
+        s->ch      = ch;
+    }
+
+    uint32_t now_ms = millis();
+    for (int i = 0; i < MAX_EXTENSIONS; i++) {
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool empty = (extensions[i].state == EXT_EMPTY);
+        bool er1 = extensions[i].relay1, er2 = extensions[i].relay2;
+        bool eon = (ext_presence(&extensions[i], now_ms) == PRES_ONLINE);
+        xSemaphoreGive(state_mutex);
+        if (empty) continue;
+        for (int ch = 1; ch <= 2; ch++) {
+            local_sw_t *s = &out[n++];
+            snprintf(s->id, sizeof(s->id), "ext%d_%d", i, ch);
+            nvs_load_switch_name(s->id, sw_name, sizeof(sw_name));
+            if (!strcmp(sw_name, "Switch"))
+                snprintf(sw_name, sizeof(sw_name), "Switch %d", ch + i*2 + 2);
+            strncpy(s->name, sw_name, sizeof(s->name)-1); s->name[sizeof(s->name)-1] = 0;
+            s->slot_color = (i + 1 < 6) ? (i + 1) : 5;
+            s->state   = (ch == 1) ? er1 : er2;
+            s->online  = eon;
+            s->restore = nvs_load_restore(s->id);
+            s->ch      = ch;
+        }
+    }
+    return n;
+}
+
+/* Serialise and send one packet, dropping optional fields until it fits.
+ * Silently oversized packets are what broke gossip in the first place, so
+ * anything still too large after trimming is logged rather than dropped. */
+static void gossip_emit(JsonDocument &doc, const char *what) {
+    String payload;
+    serializeJson(doc, payload);
+    if (payload.length() + 1 > MESH_MTU && doc.containsKey("o")) {
+        doc.remove("o");            /* master order re-broadcasts on change */
+        payload = "";
+        serializeJson(doc, payload);
+    }
+    if (payload.length() + 1 > MESH_MTU) {
+        Serial.printf("[MESH] %s packet %u bytes, over the %u limit -- dropped\n",
+                      what, (unsigned)payload.length()+1, (unsigned)MESH_MTU);
+        return;
+    }
+    mesh_broadcast(payload.c_str(), payload.length()+1);
+}
+
+static void gossip_add_switch(JsonArray arr, const local_sw_t *s) {
+    JsonObject o = arr.createNestedObject();
+    o["d"] = s->id;
+    o["n"] = s->name;
+    o["c"] = SLOT_COLORS[s->slot_color];
+    o["s"] = s->state;
+    o["o"] = s->online;
+    o["r"] = s->restore;
+    o["h"] = s->ch;
 }
 
 /* Build and broadcast local state to all peers */
@@ -950,72 +1235,85 @@ static void mesh_gossip(void) {
      * de-initialised ESP-NOW just logs "esp now not init!" every cycle. */
     if (master_pull_active) return;
 
-    /* Build state packet */
-    StaticJsonDocument<1024> doc;
-    doc["type"]         = MESH_PKT_STATE;
-    doc["name"]         = master_name;
-    doc["fw"]           = MASTER_FW_VERSION;
-    doc["cv"]           = cred_version;
-    doc["master_order"] = master_order_str;
+    /* Static, not stack: mesh_gossip runs on task_bus, which has 4 KB. */
+    static local_sw_t sw[MAX_LOCAL_SW];
+    uint8_t n = gossip_collect(sw);
 
-    xSemaphoreTake(state_mutex, portMAX_DELAY);
-    /* Snapshot local switches */
-    String ord = switch_order.length()>0 ? switch_order : "";
-    if (ord.length()==0) {
-        ord = "master_1,master_2";
-        for (int i=0;i<MAX_EXTENSIONS;i++) {
-            if (extensions[i].state==EXT_EMPTY) continue;
-            char a[16],b[16];
-            snprintf(a,sizeof(a),"ext%d_1",i);
-            snprintf(b,sizeof(b),"ext%d_2",i);
-            ord+=","; ord+=a; ord+=","; ord+=b;
-        }
-    }
-    bool r1=master_relay1, r2=master_relay2;
-    xSemaphoreGive(state_mutex);
-
-    JsonArray sw = doc.createNestedArray("switches");
-
-    /* Add master switches */
-    char sw_name[24];
-    JsonObject s1=sw.createNestedObject();
-    s1["id"]="master_1"; s1["ch"]=1;
-    nvs_load_switch_name("master_1",sw_name,sizeof(sw_name));
-    s1["name"]=(String(sw_name)=="Switch")?"Switch 1":sw_name;
-    s1["color"]=SLOT_COLORS[0]; s1["state"]=r1; s1["online"]=true;
-
-    JsonObject s2=sw.createNestedObject();
-    s2["id"]="master_2"; s2["ch"]=2;
-    nvs_load_switch_name("master_2",sw_name,sizeof(sw_name));
-    s2["name"]=(String(sw_name)=="Switch")?"Switch 2":sw_name;
-    s2["color"]=SLOT_COLORS[0]; s2["state"]=r2; s2["online"]=true;
-
-    /* Add extension switches */
-    xSemaphoreTake(state_mutex, portMAX_DELAY);
-    for (int i=0;i<MAX_EXTENSIONS;i++) {
-        if (extensions[i].state==EXT_EMPTY) continue;
-        for (int ch=1;ch<=2;ch++) {
-            char id[16]; snprintf(id,sizeof(id),"ext%d_%d",i,ch);
-            nvs_load_switch_name(id,sw_name,sizeof(sw_name));
-            JsonObject s=sw.createNestedObject();
-            s["id"]=id; s["ch"]=ch;
-            s["name"]=(String(sw_name)=="Switch")?
-                      ("Switch "+String(ch+i*2+2)):sw_name;
-            s["color"]=SLOT_COLORS[i+1<6?i+1:5];
-            s["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
-            s["online"]=(extensions[i].state==EXT_ONLINE);
-        }
-    }
-    xSemaphoreGive(state_mutex);
-
-    /* Add src_uid */
     char uid_str[12];
-    snprintf(uid_str,sizeof(uid_str),"%02X%02X%02X%02X",
-             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-    doc["uid"] = uid_str;
+    snprintf(uid_str, sizeof(uid_str), "%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
 
-    String payload; serializeJson(doc, payload);
-    mesh_broadcast(payload.c_str(), payload.length()+1);
+    /* A changed switch list length invalidates the shadow wholesale: the
+     * indices no longer line up, and peers need a fresh sweep anyway. */
+    if (gossip_shadow_valid && gossip_shadow_count != n) gossip_shadow_valid = false;
+
+    /* Anything that changed since the last packet goes out first. */
+    int changed[MAX_LOCAL_SW]; int nchanged = 0;
+    if (gossip_shadow_valid) {
+        for (int i = 0; i < n && nchanged < GOSSIP_SW_MAX; i++) {
+            if (strcmp(gossip_shadow_id[i], sw[i].id) != 0 ||
+                gossip_shadow_state[i]  != sw[i].state ||
+                gossip_shadow_online[i] != sw[i].online)
+                changed[nchanged++] = i;
+        }
+    }
+
+    if (nchanged > 0) {
+        StaticJsonDocument<MESH_MTU + 64> doc;
+        doc["type"] = MESH_PKT_STATE;
+        doc["uid"]  = uid_str;
+        doc["t"]    = n;
+        JsonArray a = doc.createNestedArray("sw");
+        for (int i = 0; i < nchanged; i++) {
+            gossip_add_switch(a, &sw[changed[i]]);
+            gossip_shadow_state[changed[i]]  = sw[changed[i]].state;
+            gossip_shadow_online[changed[i]] = sw[changed[i]].online;
+            strncpy(gossip_shadow_id[changed[i]], sw[changed[i]].id, 15);
+            gossip_shadow_id[changed[i]][15] = 0;
+        }
+        gossip_emit(doc, "delta");
+        return;
+    }
+
+    /* Otherwise advance the periodic sweep: header, then switch windows. */
+    if (gossip_cursor == 0) {
+        StaticJsonDocument<MESH_MTU + 64> doc;
+        doc["type"] = MESH_PKT_STATE;
+        doc["uid"]  = uid_str;
+        doc["nm"]   = master_name;
+        doc["fw"]   = MASTER_FW_VERSION;
+        doc["cv"]   = cred_version;
+        doc["t"]    = n;
+        doc["o"]    = master_order_str;   /* dropped by gossip_emit if tight */
+        gossip_emit(doc, "header");
+        gossip_cursor = 1;
+        return;
+    }
+
+    uint8_t first = (uint8_t)((gossip_cursor - 1) * GOSSIP_SW_MAX);
+    if (first >= n) { gossip_cursor = 0; return; }
+
+    StaticJsonDocument<MESH_MTU + 64> doc;
+    doc["type"] = MESH_PKT_STATE;
+    doc["uid"]  = uid_str;
+    doc["t"]    = n;
+    JsonArray a = doc.createNestedArray("sw");
+    for (uint8_t i = first; i < n && i < first + GOSSIP_SW_MAX; i++) {
+        gossip_add_switch(a, &sw[i]);
+        gossip_shadow_state[i]  = sw[i].state;
+        gossip_shadow_online[i] = sw[i].online;
+        strncpy(gossip_shadow_id[i], sw[i].id, 15);
+        gossip_shadow_id[i][15] = 0;
+    }
+    gossip_emit(doc, "window");
+
+    gossip_cursor++;
+    if ((uint8_t)((gossip_cursor - 1) * GOSSIP_SW_MAX) >= n) {
+        /* Swept the whole list -- the shadow is now a complete picture. */
+        gossip_shadow_count = n;
+        gossip_shadow_valid = true;
+        gossip_cursor = 0;
+    }
 }
 
 /* Generate 6-digit mesh PIN */
@@ -1147,6 +1445,9 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         }
 
         xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (!mesh_peers[idx].online)
+            presence_note_return(&mesh_peers[idx].settle_until_ms,
+                                 mesh_peers[idx].last_drop_ms, millis());
         mesh_peers[idx].online       = true;
         mesh_peers[idx].last_seen_ms = millis();
         /* If a peer reports a newer credential version we missed a change
@@ -1159,37 +1460,60 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
               Serial.println("[MESH] credentials out of date -- remove and re-add this master");
               notify_ui();
           } }
-        master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
         /* ESP-NOW carries far further than a usable TCP association, so a
          * peer we can hear is not necessarily a peer we can download 1.1 MB
          * from. Keep the signal level and prefer close peers when pulling. */
         if (info->rx_ctrl) mesh_peers[idx].rssi = info->rx_ctrl->rssi;
-        const char *pname = doc["name"] | "Master";
-        strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
         memcpy(mesh_peers[idx].mac, info->src_addr, 6);
+
+        /* Gossip arrives in pieces (see mesh_gossip): a header packet with
+         * the peer's identity, and window/delta packets carrying switches.
+         * Only overwrite what a packet actually carries -- taking a default
+         * for an absent key would blank the peer's name on every window. */
+        if (doc.containsKey("nm")) {
+            const char *pname = doc["nm"] | "Master";
+            strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
+            mesh_peers[idx].name[sizeof(mesh_peers[idx].name)-1] = 0;
+        }
+        if (doc.containsKey("fw"))
+            master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
         /* Sync master_order from gossip if peer has a non-empty one */
-        const char *peer_order = doc["master_order"] | "";
+        const char *peer_order = doc["o"] | "";
         if (strlen(peer_order) > strlen(master_order_str)) {
             /* Peer has more entries -- use theirs as it's more complete */
             strncpy(master_order_str, peer_order, sizeof(master_order_str)-1);
             mesh_nvs_save();
         }
 
-        JsonArray sw = doc["switches"];
-        mesh_peers[idx].switch_count = 0;
+        /* The peer's switch count. A change means its extension list moved,
+         * so the merged list is rebuilt from the coming windows rather than
+         * left holding entries for switches that no longer exist. */
+        uint8_t total = (uint8_t)(doc["t"] | 0);
+        if (total > 12) total = 12;
+        if (total && mesh_peers[idx].switch_count > total)
+            mesh_peers[idx].switch_count = 0;
+
+        /* Merge by id, so windows may arrive in any order and a lost packet
+         * costs one sweep rather than a scrambled list. */
+        JsonArray sw = doc["sw"];
         for (JsonObject s : sw) {
-            int i = mesh_peers[idx].switch_count;
-            if (i >= 12) break;
-            strncpy(mesh_peers[idx].switches[i].id,
-                    s["id"]|"", sizeof(mesh_peers[idx].switches[i].id)-1);
-            strncpy(mesh_peers[idx].switches[i].name,
-                    s["name"]|"", sizeof(mesh_peers[idx].switches[i].name)-1);
-            strncpy(mesh_peers[idx].switches[i].color,
-                    s["color"]|"#444", sizeof(mesh_peers[idx].switches[i].color)-1);
-            mesh_peers[idx].switches[i].state  = s["state"]|false;
-            mesh_peers[idx].switches[i].online = s["online"]|false;
-            mesh_peers[idx].switches[i].ch     = s["ch"]|1;
-            mesh_peers[idx].switch_count++;
+            const char *sid = s["d"] | "";
+            if (!sid[0]) continue;
+            int j = -1;
+            for (int k = 0; k < mesh_peers[idx].switch_count; k++)
+                if (!strcmp(mesh_peers[idx].switches[k].id, sid)) { j = k; break; }
+            if (j < 0) {
+                if (mesh_peers[idx].switch_count >= 12) continue;
+                j = mesh_peers[idx].switch_count++;
+            }
+            mesh_switch_t *ms = &mesh_peers[idx].switches[j];
+            strncpy(ms->id,   sid,             sizeof(ms->id)-1);   ms->id[sizeof(ms->id)-1]=0;
+            strncpy(ms->name, s["n"] | "",     sizeof(ms->name)-1); ms->name[sizeof(ms->name)-1]=0;
+            strncpy(ms->color,s["c"] | "#444", sizeof(ms->color)-1);ms->color[sizeof(ms->color)-1]=0;
+            ms->state   = s["s"] | false;
+            ms->online  = s["o"] | false;
+            ms->restore = s["r"] | false;
+            ms->ch      = s["h"] | 1;
         }
         xSemaphoreGive(state_mutex);
         notify_ui();
@@ -1231,6 +1555,10 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             relay_cmd_t k2; k2.target=-1; k2.channel=2; k2.state=false;
             xQueueSend(master_relay_queue,&k1,0);
             xQueueSend(master_relay_queue,&k2,0);
+            /* Persist, like the local kill-all does. Last commanded state
+             * is what the restore policy reads at boot; leaving it stale
+             * would bring a killed house back lit. */
+            relay_state_save_now();
             Serial.println("[MESH] Kill all (remote)");
             notify_ui();
             return;
@@ -1551,6 +1879,9 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         if (idx >= 0) {
             xSemaphoreTake(state_mutex, portMAX_DELAY);
             mesh_peers[idx].last_seen_ms = millis();
+            if (!mesh_peers[idx].online)
+                presence_note_return(&mesh_peers[idx].settle_until_ms,
+                                     mesh_peers[idx].last_drop_ms, millis());
             mesh_peers[idx].online = true;
             xSemaphoreGive(state_mutex);
         }
@@ -1602,6 +1933,19 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 }
             }
 
+        /* Restore policy -- only apply if this is the target. `name` holds
+         * the switch id, `slot` the 0/1 policy. */
+        } else if (strcmp(cmd, "set_restore") == 0 && strlen(name) > 0) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0 && switch_id_valid(String(name))) {
+                nvs_save_restore(name, slot != 0);
+                Serial.printf("[MESH] %s restore policy -> %s\n",
+                              name, slot ? "restore" : "start off");
+                notify_ui();
+            }
+
         /* Reorder switches -- only apply if this is the target */
         } else if (strcmp(cmd, "reorder_switches") == 0 && strlen(order) > 0) {
             char self_uid[12];
@@ -1613,6 +1957,24 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 Serial.printf("[MESH] Switch order updated: %s\n", order);
                 notify_ui();
             }
+        }
+
+    } else if (type == MESH_PKT_RECFAIL) {
+        /* One recovery gate for the whole home: a rejection anywhere in the
+         * mesh advances everyone's backoff, so hopping to another master
+         * continues the same countdown instead of resetting it. Only ever
+         * moves the gate later, never earlier -- except an explicit reset
+         * after a successful recovery. */
+        uint8_t f = (uint8_t)(doc["f"] | 0);
+        uint32_t w = (uint32_t)(doc["w"] | 0);
+        if (f == 0) {
+            rec_fails   = 0;
+            rec_next_ms = 0;
+        } else if (f >= rec_fails) {
+            rec_fails = f;
+            uint32_t until = millis() + w * 1000UL;
+            if (!rec_next_ms || (int32_t)(until - rec_next_ms) > 0)
+                rec_next_ms = until ? until : 1;
         }
 
     } else if (type == MESH_PKT_PASS_CHG) {
@@ -1697,11 +2059,74 @@ static bool mesh_relay_remote(const uint8_t *dst_uid, const uint8_t *dst_mac,
     /* Fire and forget -- no ACK wait.
      * State confirmed via next gossip broadcast (500ms).
      * Blocking the web task for ACK causes 500 errors. */
-    esp_err_t err = esp_now_send(dst_mac,
-                    (const uint8_t*)payload.c_str(), payload.length()+1);
-    Serial.printf("[MESH] relay_remote to %s sw=%s ch=%d state=%d err=%d\n",
-                  dst_uid_str, sw_id, ch, state, err);
-    return (err == ESP_OK);
+    /* Through mesh_send so the packet is tagged. Sent raw, it was dropped
+     * by the peer's tag check and the command silently never landed. */
+    bool ok = mesh_send(dst_mac, payload.c_str(), payload.length()+1);
+    Serial.printf("[MESH] relay_remote to %s sw=%s ch=%d state=%d ok=%d\n",
+                  dst_uid_str, sw_id, ch, state, ok ? 1 : 0);
+    return ok;
+}
+
+/* Parse an 8-hex-char uid. False if it isn't one. */
+static bool mesh_uid_parse(const char *s, uint8_t *out4) {
+    if (!s || strlen(s) != 8) return false;
+    for (int i = 0; i < 4; i++) {
+        char b[3] = { s[i*2], s[i*2+1], 0 };
+        char *end = nullptr;
+        long v = strtol(b, &end, 16);
+        if (end != b + 2) return false;
+        out4[i] = (uint8_t)v;
+    }
+    return true;
+}
+
+/* Turn everything off on every peer as well as here.
+ *
+ * "All off" is one command, and in a mesh it means the whole house -- the
+ * story puts whole-mesh control behind Bluetooth as well as Wi-Fi, and a
+ * kill-all that stops at the master you happen to be talking to is exactly
+ * the kind of half-result that makes people distrust the button. */
+static void mesh_killall_peers(void) {
+    if (!mesh_active) return;
+    char self_uid[12];
+    snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+    StaticJsonDocument<128> doc;
+    doc["type"]  = MESH_PKT_RELAY_CMD;
+    doc["uid"]   = self_uid;
+    doc["sw_id"] = "*";
+    doc["ch"]    = 0;
+    doc["state"] = false;
+    for (int i = 0; i < MAX_MESH_MASTERS; i++) {
+        if (!mesh_peers[i].online) continue;
+        char puid[12];
+        snprintf(puid, sizeof(puid), "%02X%02X%02X%02X",
+                 mesh_peers[i].uid[0], mesh_peers[i].uid[1],
+                 mesh_peers[i].uid[2], mesh_peers[i].uid[3]);
+        doc["dst_uid"] = puid;
+        String payload; serializeJson(doc, payload);
+        mesh_send(mesh_peers[i].mac, payload.c_str(), payload.length()+1);
+    }
+}
+
+/* Drive one switch on a peer to an explicit state, and reflect it in the
+ * local cache so the next state push doesn't show the old value for the
+ * half-second until gossip corrects it. False if the peer is unknown. */
+static bool mesh_relay_set(const uint8_t *peer_uid, const char *sw_id,
+                           int ch, bool state) {
+    int idx = mesh_find_peer(peer_uid);
+    if (idx < 0) return false;
+    bool ok = mesh_relay_remote(peer_uid, mesh_peers[idx].mac, sw_id, ch, state);
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    for (int i = 0; i < mesh_peers[idx].switch_count; i++) {
+        if (!strcmp(mesh_peers[idx].switches[i].id, sw_id)) {
+            mesh_peers[idx].switches[i].state = state;
+            break;
+        }
+    }
+    xSemaphoreGive(state_mutex);
+    notify_ui();
+    return ok;
 }
 
 /* Check peer timeouts */
@@ -1713,7 +2138,22 @@ static void mesh_check_timeouts(void) {
         if (!mesh_peers[i].online) continue;
         if ((now - mesh_peers[i].last_seen_ms) > MESH_PEER_TIMEOUT) {
             mesh_peers[i].online = false;
+            presence_note_drop(&mesh_peers[i].settle_until_ms,
+                               &mesh_peers[i].last_drop_ms,
+                               &mesh_peers[i].drops, now);
             Serial.printf("[MESH] Peer offline: %s\n", mesh_peers[i].name);
+            xSemaphoreGive(state_mutex);
+            notify_ui();
+            xSemaphoreTake(state_mutex, portMAX_DELAY);
+            continue;
+        }
+        /* A returning peer's card only goes green after a solid minute; that
+         * moment has to push a state update of its own. */
+        uint32_t before = mesh_peers[i].settle_until_ms;
+        presence_tick_up(&mesh_peers[i].settle_until_ms,
+                         &mesh_peers[i].last_drop_ms,
+                         &mesh_peers[i].drops, now);
+        if (before && mesh_peers[i].settle_until_ms == 0) {
             xSemaphoreGive(state_mutex);
             notify_ui();
             xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -1833,8 +2273,52 @@ static void nvs_load_switch_name(const char *id, char *name, int nlen) {
     prefs.begin("sw_names", true);
     String s = prefs.getString(key, "");
     prefs.end();
-    if (s.length() > 0) { strncpy(name, s.c_str(), nlen-1); name[nlen-1]=' '; }
+    if (s.length() > 0) { strncpy(name, s.c_str(), nlen-1); name[nlen-1]='\0'; }
     else snprintf(name, nlen, "Switch");
+}
+
+/* Per-switch restore policy: true = restore last state after a power cut,
+ * false = always start off. The default is FALSE on purpose -- the story
+ * says the house comes back dark unless the owner opted that one switch in.
+ * Stored in "sw_names" so a factory reset wipes policies with the names. */
+static bool nvs_load_restore(const char *id) {
+    char key[20]; snprintf(key, sizeof(key), "rs:%s", id);
+    prefs.begin("sw_names", true);
+    bool v = prefs.getBool(key, false);
+    prefs.end();
+    return v;
+}
+
+static void nvs_save_restore(const char *id, bool restore) {
+    char key[20]; snprintf(key, sizeof(key), "rs:%s", id);
+    prefs.begin("sw_names", false);
+    prefs.putBool(key, restore);
+    prefs.end();
+}
+
+/* True for "master_1", "master_2", and "extN_1"/"extN_2" naming a slot that
+ * actually holds a board. Keeps a typo from silently creating an NVS key
+ * that nothing will ever read back. */
+static bool switch_id_valid(const String &id) {
+    if (id == "master_1" || id == "master_2") return true;
+    if (!id.startsWith("ext")) return false;
+    int us = id.indexOf('_');
+    if (us < 4) return false;
+    int slot = id.substring(3, us).toInt();
+    int ch   = id.substring(us + 1).toInt();
+    if (slot < 0 || slot >= MAX_EXTENSIONS) return false;
+    if (ch != 1 && ch != 2) return false;
+    return extensions[slot].state != EXT_EMPTY;
+}
+
+/* Spaces restore pushes out. Shared by the master's own two channels and by
+ * every extension channel, so the stagger holds across the whole board and
+ * not just within one device. */
+static uint32_t restore_last_ms = 0;
+static void restore_stagger(void) {
+    uint32_t since = millis() - restore_last_ms;
+    if (since < RESTORE_STAGGER_MS) delay(RESTORE_STAGGER_MS - since);
+    restore_last_ms = millis();
 }
 
 static void nvs_save_master_name(const char *name) {
@@ -1847,7 +2331,7 @@ static void nvs_load_master_name(char *name, int nlen) {
     prefs.begin("sw_names", true);
     String s = prefs.getString("master_name", "Master 1");
     prefs.end();
-    strncpy(name, s.c_str(), nlen-1); name[nlen-1]=' ';
+    strncpy(name, s.c_str(), nlen-1); name[nlen-1]='\0';
 }
 
 static void nvs_save_switch_order(const String &order) {
@@ -1861,6 +2345,59 @@ static String nvs_load_switch_order(void) {
     String s = prefs.getString("sw_order", "");
     prefs.end();
     return s;
+}
+
+/* Everything a slot accumulates that is keyed by slot rather than by board:
+ * switch names, restore policies and last relay states. The registry entry
+ * is keyed by uid and cleared separately by nvs_remove.
+ *
+ * Removing an extension has to clear all of it. The story is explicit that
+ * a removed board's names and settings are forgotten, and that a board
+ * reappearing on the bus is adopted as new with default names -- but a slot
+ * is reused by whatever board lands in it next, so leftovers were inherited
+ * by a completely different device: someone else's names, and a relay that
+ * switches on at boot because the previous occupant was on. */
+static void nvs_forget_slot(int slot) {
+    char id[16], key[20];
+    for (int ch = 1; ch <= 2; ch++) {
+        switch_id(id, sizeof(id), slot, ch);
+        snprintf(key, sizeof(key), "sw:%s", id);
+        prefs.begin("sw_names", false);
+        prefs.remove(key);
+        snprintf(key, sizeof(key), "rs:%s", id);
+        prefs.remove(key);
+        prefs.end();
+    }
+    char k1[8], k2[8];
+    snprintf(k1, sizeof(k1), "e%d_r1", slot);
+    snprintf(k2, sizeof(k2), "e%d_r2", slot);
+    prefs.begin("relay_state", false);
+    prefs.remove(k1);
+    prefs.remove(k2);
+    prefs.end();
+
+    /* Drop the slot's ids from the saved order too, so a reused slot does
+     * not inherit the previous board's position. */
+    String order = nvs_load_switch_order();
+    if (order.length() == 0) return;
+    String rebuilt;
+    int start = 0;
+    while (start < (int)order.length()) {
+        int comma = order.indexOf(',', start);
+        String tok = (comma < 0) ? order.substring(start)
+                                 : order.substring(start, comma);
+        start = (comma < 0) ? order.length() : comma + 1;
+        if (tok.length() == 0) continue;
+        bool mine = false;
+        for (int ch = 1; ch <= 2 && !mine; ch++) {
+            switch_id(id, sizeof(id), slot, ch);
+            mine = (tok == id);
+        }
+        if (mine) continue;
+        if (rebuilt.length()) rebuilt += ",";
+        rebuilt += tok;
+    }
+    if (rebuilt != order) nvs_save_switch_order(rebuilt);
 }
 
 /* ================================================================
@@ -1980,7 +2517,17 @@ static void mesh_nvs_clear(void) {
 /* ================================================================
  * RELAY STATE NVS
  * ================================================================ */
-static void relay_state_save(void) {
+/* Every toggle used to write NVS inline. The tech story asks for these
+ * writes to be debounced -- written shortly after the last toggle in a
+ * burst, not on every one -- to limit flash wear, and a wall switch being
+ * flipped repeatedly is exactly the burst it means. The in-RAM state is
+ * already authoritative for everything that reads it; only the flash write
+ * waits. Same treatment the extension firmware got. */
+#define RELAY_NVS_DEBOUNCE_MS 3000UL
+static bool     relay_nvs_dirty    = false;
+static uint32_t relay_nvs_dirty_ms = 0;
+
+static void relay_state_flush(void) {
     prefs.begin("relay_state",false);
     prefs.putBool("m_r1",master_relay1);
     prefs.putBool("m_r2",master_relay2);
@@ -1995,21 +2542,43 @@ static void relay_state_save(void) {
     }
     xSemaphoreGive(state_mutex);
     prefs.end();
+    relay_nvs_dirty = false;
 }
 
-static void relay_state_load(void) {
-    prefs.begin("relay_state",true);
-    master_relay1=prefs.getBool("m_r1",false);
-    master_relay2=prefs.getBool("m_r2",false);
-    /* Load extension relay states */
-    for (int i=0;i<MAX_EXTENSIONS;i++) {
-        char k1[8],k2[8];
-        snprintf(k1,sizeof(k1),"e%d_r1",i);
-        snprintf(k2,sizeof(k2),"e%d_r2",i);
-        extensions[i].relay1=prefs.getBool(k1,false);
-        extensions[i].relay2=prefs.getBool(k2,false);
-    }
-    prefs.end();
+/* Mark the saved state stale; the bus task commits it once the flipping
+ * stops. */
+static void relay_state_save(void) {
+    relay_nvs_dirty    = true;
+    relay_nvs_dirty_ms = millis();
+}
+
+/* Commit now, cancelling any pending debounce. For the deliberate
+ * everything-off and for credential changes, where losing the write to a
+ * power cut would be worse than a flash write. */
+static void relay_state_save_now(void) {
+    relay_state_flush();
+}
+
+/* Called from the bus loop. Never writes during an OTA: the flash driver
+ * is busy with the image and a page write there is not worth the risk. */
+static void relay_state_tick(void) {
+    if (!relay_nvs_dirty || ota_in_progress) return;
+    if ((millis() - relay_nvs_dirty_ms) < RELAY_NVS_DEBOUNCE_MS) return;
+    relay_state_flush();
+}
+
+/* Applies each channel's restore policy to the state just read from NVS.
+ * Channels set to "always start off" are zeroed here, which is what makes
+ * the rest of the boot path safe by construction: everything downstream (the
+ * master's own GPIO writes, the first-poll push to each extension) works from
+ * these values, so a restore can only ever take a channel from off to on --
+ * never the reverse -- and a "start off" channel is never pushed at all.
+ *
+ * `slot` is -1 for the master's own board. */
+static void apply_restore_policy(int slot, bool *r1, bool *r2) {
+    char id[16];
+    switch_id(id,sizeof(id),slot,1); if (!nvs_load_restore(id)) *r1=false;
+    switch_id(id,sizeof(id),slot,2); if (!nvs_load_restore(id)) *r2=false;
 }
 
 /* ================================================================
@@ -2230,6 +2799,12 @@ static void handle_response(const uint8_t *frame) {
                     extensions[existing].relay2);
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         extensions[existing].polled_once=true;
+        /* A board that had gone offline and re-announced is a *return*, so it
+         * serves the settle window like any other; one that never left keeps
+         * whatever presence it already had. */
+        if (extensions[existing].state==EXT_OFFLINE)
+            presence_note_return(&extensions[existing].settle_until_ms,
+                                 extensions[existing].last_drop_ms,millis());
         extensions[existing].state=EXT_ONLINE;
         extensions[existing].missed=0;
         /* Grace period: wait 1s before polling to let extension save state */
@@ -2346,6 +2921,13 @@ static void ext_query_info(int i) {
  * master believe the newcomer is already up to date and it would never be
  * offered an update. A stale ota_fails would blacklist it outright. */
 static void ext_reset_identity(extension_t *e) {
+    /* Every caller means "this slot now holds a different board, or none":
+     * fresh adoption, slot replace, NVS restore, removal, boot init. A board
+     * with no history is present from the moment it answers -- the settle
+     * window is for a *return*, not a first appearance. */
+    e->settle_until_ms = 0;
+    e->last_drop_ms    = 0;
+    e->drops           = 0;
     e->hw_type = 0;
     e->hw_rev  = 0;
     e->fw_ver[0] = e->fw_ver[1] = e->fw_ver[2] = 0;
@@ -2378,6 +2960,9 @@ static void poll_extension(int i) {
         extensions[i].missed++;
         if (extensions[i].missed>=MISSED_MAX&&extensions[i].state==EXT_ONLINE) {
             extensions[i].state=EXT_OFFLINE;
+            presence_note_drop(&extensions[i].settle_until_ms,
+                               &extensions[i].last_drop_ms,
+                               &extensions[i].drops, millis());
             Serial.printf("[OFFLINE] %s\n",extensions[i].name);
             xSemaphoreGive(state_mutex); notify_ui(); return;
         }
@@ -2398,22 +2983,58 @@ static void poll_extension(int i) {
     extensions[i].last_seen_ms=millis();
     extensions[i].polled_once=true;
     bool was_offline=(extensions[i].state==EXT_OFFLINE);
-    if (was_offline) extensions[i].state=EXT_ONLINE;
+    bool was_settling=(extensions[i].settle_until_ms!=0);
+    if (was_offline) {
+        extensions[i].state=EXT_ONLINE;
+        /* Back on the bus, but its switches stay off the dashboard until it
+         * has been solid for a minute. */
+        presence_note_return(&extensions[i].settle_until_ms,
+                             extensions[i].last_drop_ms, millis());
+    } else {
+        presence_tick_up(&extensions[i].settle_until_ms,
+                         &extensions[i].last_drop_ms,
+                         &extensions[i].drops, millis());
+    }
+    /* The settle window expiring is a visible event -- it is what puts the
+     * switches back on the dashboard -- so it has to push, not wait for the
+     * next unrelated change. */
+    bool settled_now=(was_settling && extensions[i].settle_until_ms==0);
 
-    bool changed=was_offline;
+    bool changed=was_offline||settled_now;
     if (resp[3]==CMD_STATE_RESP&&resp[4]>=3) {
         uint8_t flags=resp[5],evts=resp[7];
         bool r1=(flags>>0)&0x01, r2=(flags>>1)&0x01;
         if (was_first_poll) {
-            /* First successful poll -- extension boots OFF.
-             * Send master's saved state if different. */
+            /* First successful poll -- a registered extension boots with
+             * both relays off. Only restore-enabled channels carry a saved
+             * ON here (apply_restore_policy zeroed the rest), so this push can
+             * only ever go off -> on, and a board whose channels are all
+             * "start off" is never written to at all.
+             *
+             * One frame per channel, spaced by the restore stagger, so a
+             * whole house coming back doesn't close every relay at once. */
             bool want_r1=extensions[i].relay1;
             bool want_r2=extensions[i].relay2;
             if (want_r1!=r1 || want_r2!=r2) {
-                uint8_t relay_byte=(want_r1?0x01:0x00)|(want_r2?0x02:0x00);
                 xSemaphoreGive(state_mutex);
-                bus_send(addr, CMD_SET_RELAY, &relay_byte, 1);
-                bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                /* Walk the board to the wanted state one channel at a time,
+                 * leaving the other channel where it is, so each closing
+                 * relay is separated by the stagger interval. A channel that
+                 * already matches costs no frame at all -- which is the
+                 * common case for "always start off", since the board boots
+                 * off and apply_restore_policy zeroed its wanted state. */
+                if (want_r1!=r1) {
+                    uint8_t mask=(want_r1?0x01:0x00)|(r2?0x02:0x00);
+                    restore_stagger();
+                    bus_send(addr, CMD_SET_RELAY, &mask, 1);
+                    bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                }
+                if (want_r2!=r2) {
+                    uint8_t mask=(want_r1?0x01:0x00)|(want_r2?0x02:0x00);
+                    restore_stagger();
+                    bus_send(addr, CMD_SET_RELAY, &mask, 1);
+                    bus_recv(resp, sizeof(resp), BUS_RESP_MS);
+                }
                 xSemaphoreTake(state_mutex, portMAX_DELAY);
                 extensions[i].relay1=want_r1;
                 extensions[i].relay2=want_r2;
@@ -2543,6 +3164,8 @@ static void task_bus(void *arg) {
                 } else { xSemaphoreGive(state_mutex); }
             }
         }
+
+        relay_state_tick();   /* commit any debounced relay-state write */
 
         /* Poll registered extensions -- skip during OTA */
         if ((now-last_poll)>=POLL_MS) {
@@ -2702,7 +3325,12 @@ static String build_state_json(void) {
     xSemaphoreGive(state_mutex);
 
     /* Now build JSON without holding mutex */
-    StaticJsonDocument<6144> doc;
+    /* Heap, not stack. task_web is created with an 8192-byte stack and this
+     * function already parks a 6 KB document plus a full extension snapshot
+     * on it -- there was almost nothing left, and the presence fields added
+     * below would have tipped it over. */
+    DynamicJsonDocument doc(8192);
+    uint32_t now_ms = millis();
     doc["uptime"]=millis()/1000;
     doc["boot_complete"]=snap_boot;
     doc["master_name"]=snap_mname;
@@ -2754,6 +3382,9 @@ static String build_state_json(void) {
             sw["channel"]=ch;
             sw["state"]=(ch==1)?snap_r1:snap_r2;
             sw["online"]=true;
+            /* Per-switch restore policy travels in the state stream so every
+             * connected phone updates together (story Epic 2). */
+            sw["restore"]=nvs_load_restore(id.c_str());
         } else if(id.startsWith("ext")) {
             /* parse extN_ch */
             int us=id.indexOf('_');
@@ -2770,7 +3401,8 @@ static String build_state_json(void) {
             sw["color"]=SLOT_COLORS[slot+1<6?slot+1:5];
             sw["channel"]=ch;
             sw["state"]=(ch==1)?snap_ext[slot].relay1:snap_ext[slot].relay2;
-            sw["online"]=(snap_ext[slot].state==EXT_ONLINE);
+            sw["online"]=(ext_presence(&snap_ext[slot],now_ms)==PRES_ONLINE);
+            sw["restore"]=nvs_load_restore(id.c_str());
         }
     }
 
@@ -2793,7 +3425,8 @@ static String build_state_json(void) {
                 sw["color"]=SLOT_COLORS[i+1<6?i+1:5];
                 sw["channel"]=ch;
                 sw["state"]=(ch==1)?snap_ext[i].relay1:snap_ext[i].relay2;
-                sw["online"]=(snap_ext[i].state==EXT_ONLINE);
+                sw["online"]=(ext_presence(&snap_ext[i],now_ms)==PRES_ONLINE);
+                sw["restore"]=nvs_load_restore(sw_id);
             }
         }
     }
@@ -2808,6 +3441,23 @@ static String build_state_json(void) {
                  snap_pend[i].uid[0],snap_pend[i].uid[1],
                  snap_pend[i].uid[2],snap_pend[i].uid[3]);
         p["uid"]=uid_str;
+    }
+
+    /* Extension presence travels in the state stream, not just in the
+     * /api/extensions poll: the story requires apps to learn presence from
+     * the master rather than infer it from their own failures, and the
+     * extension list has to show offline/intermittent + last-seen the moment
+     * it changes. `last_seen` is seconds ago -- the master has no clock. */
+    JsonArray exts=doc.createNestedArray("extensions");
+    for(int i=0;i<MAX_EXTENSIONS;i++) {
+        if(snap_ext[i].state==EXT_EMPTY) continue;
+        JsonObject ex=exts.createNestedObject();
+        presence_t pr=ext_presence(&snap_ext[i],now_ms);
+        ex["slot"]=i;
+        ex["name"]=snap_ext[i].name;
+        ex["online"]=(pr==PRES_ONLINE);
+        ex["presence"]=presence_str(pr);
+        ex["last_seen"]=seconds_since(snap_ext[i].last_seen_ms,now_ms);
     }
 
     /* Offline slots for replace option */
@@ -2839,17 +3489,25 @@ static String build_state_json(void) {
         snprintf(puid,sizeof(puid),"%02X%02X%02X%02X",
                  mesh_peers[i].uid[0],mesh_peers[i].uid[1],
                  mesh_peers[i].uid[2],mesh_peers[i].uid[3]);
-        p["uid"]    = puid;
-        p["name"]   = mesh_peers[i].name;
-        p["online"] = mesh_peers[i].online;
+        presence_t ppr = peer_presence(&mesh_peers[i], now_ms);
+        p["uid"]       = puid;
+        p["name"]      = mesh_peers[i].name;
+        /* Same debounce as extensions, so a master card doesn't flap. */
+        p["online"]    = (ppr == PRES_ONLINE);
+        p["presence"]  = presence_str(ppr);
+        p["last_seen"] = seconds_since(mesh_peers[i].last_seen_ms, now_ms);
         JsonArray psw = p.createNestedArray("switches");
         for (int j=0;j<mesh_peers[i].switch_count;j++) {
+            /* A window packet can be lost mid-sweep, leaving a slot the
+             * peer has announced but not yet described. Don't render it. */
+            if (!mesh_peers[i].switches[j].id[0]) continue;
             JsonObject s = psw.createNestedObject();
             s["id"]     = mesh_peers[i].switches[j].id;
             s["name"]   = mesh_peers[i].switches[j].name;
             s["color"]  = mesh_peers[i].switches[j].color;
             s["state"]  = mesh_peers[i].switches[j].state;
             s["online"] = mesh_peers[i].switches[j].online;
+            s["restore"] = mesh_peers[i].switches[j].restore;
             s["ch"]     = mesh_peers[i].switches[j].ch;
         }
     }
@@ -2925,8 +3583,7 @@ static void mesh_send_config(const char *cmd, const char *target_uid,
         }
         int idx = mesh_find_peer(peer_uid);
         if (idx >= 0)
-            esp_now_send(mesh_peers[idx].mac,
-                         (const uint8_t*)payload.c_str(), payload.length()+1);
+            mesh_send(mesh_peers[idx].mac, payload.c_str(), payload.length()+1);
     } else {
         /* Broadcast to all peers */
         mesh_broadcast(payload.c_str(), payload.length()+1);
@@ -2959,8 +3616,10 @@ static void setup_web(void) {
         relay_cmd_t cmd2; cmd2.target=-1; cmd2.channel=2; cmd2.state=false;
         xQueueSend(master_relay_queue,&cmd1,0);
         xQueueSend(master_relay_queue,&cmd2,0);
+        /* One command, the whole house. */
+        mesh_killall_peers();
         notify_ui();
-        relay_state_save(); /* persist all-off state */
+        relay_state_save_now(); /* persist all-off state */
         Serial.println("[RELAY] Kill all");
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -3146,6 +3805,7 @@ static void setup_web(void) {
         ext_reset_identity(&extensions[slot]);
         xSemaphoreGive(state_mutex);
         nvs_remove(uid);
+        nvs_forget_slot(slot);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -3162,6 +3822,24 @@ static void setup_web(void) {
         server.send(200,"application/json","{\"ok\":true}");
     });
 
+    /* Per-switch restore policy: "restore last state" vs "always start off".
+     * Lives in the same menu as rename, and the same endpoint shape. */
+    server.on("/api/switch/restore", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        String id = server.arg("id");
+        String rs = server.arg("restore");
+        if (id.length()==0 || rs.length()==0) {
+            server.send(400,"application/json",
+                "{\"error\":\"id and restore are required\"}"); return; }
+        if (!switch_id_valid(id)) {
+            server.send(400,"application/json",
+                "{\"error\":\"unknown switch\"}"); return; }
+        bool on = (rs=="1"||rs=="true"||rs=="on");
+        nvs_save_restore(id.c_str(), on);
+        notify_ui();
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
     /* Rename master */
     server.on("/api/master/rename", HTTP_POST, [](){
         if (!auth_ok()) return;
@@ -3170,7 +3848,7 @@ static void setup_web(void) {
             server.send(400,"application/json","{\"ok\":false}"); return; }
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         strncpy(master_name,name.c_str(),sizeof(master_name)-1);
-        master_name[sizeof(master_name)-1]=' ';
+        master_name[sizeof(master_name)-1]='\0';
         xSemaphoreGive(state_mutex);
         nvs_save_master_name(name.c_str());
         notify_ui();
@@ -3198,7 +3876,9 @@ static void setup_web(void) {
         char uid_str[20];
         snprintf(uid_str, sizeof(uid_str), "%02X%02X%02X%02X",
                  master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
-        StaticJsonDocument<256> doc;
+        /* 384, not 256: ssid (up to 31 chars) and uid are copied into the
+         * document, and an overflow here truncates the JSON silently. */
+        StaticJsonDocument<384> doc;
         doc["uptime"]    = millis()/1000;
         doc["free_heap"] = ESP.getFreeHeap();
         doc["uid"]       = uid_str;
@@ -3206,6 +3886,15 @@ static void setup_web(void) {
         /* So the UI knows whether to present a login before doing anything
          * else. /api/info is deliberately open; it exposes no secrets. */
         doc["auth"]      = true;   /* a credential is always set */
+        /* The app needs the network name for its "connect to X" copy and
+         * caches it per UID so a rename self-heals. It must come from the
+         * master: reading the phone's SSID would need location permission
+         * (UX stories v5.1 Epic 6). */
+        doc["ssid"]      = mesh_active ? mesh_name : unique_ssid;
+        /* Stable mesh identity for the app's switcher/vault. Survives a
+         * mesh rename; 0 = standalone (Epic 7 Tech Story). */
+        doc["mesh"]      = mesh_active;
+        doc["mesh_id"]   = mesh_active ? ble_mesh_id() : 0;
         String out; serializeJson(doc, out);
         server.send(200, "application/json", out);
     });
@@ -3275,15 +3964,22 @@ static void setup_web(void) {
         /* -- Extensions API -- */
     server.on("/api/extensions", HTTP_GET, [](){
         if (!auth_ok()) return;
-        StaticJsonDocument<1024> doc;
+        StaticJsonDocument<1536> doc;
         JsonArray arr = doc.createNestedArray("extensions");
+        uint32_t now_ms = millis();
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         for (int i=0; i<MAX_EXTENSIONS; i++) {
             if (extensions[i].state == EXT_EMPTY) continue;
             JsonObject e = arr.createNestedObject();
+            presence_t pr = ext_presence(&extensions[i], now_ms);
             e["slot"]   = i;
             e["addr"]   = extensions[i].address;
-            e["online"] = (extensions[i].state == EXT_ONLINE);
+            /* "online" is presence, not bus liveness: a board that has just
+             * come back is still settling and must not put its switches back
+             * on the dashboard yet. */
+            e["online"] = (pr == PRES_ONLINE);
+            e["presence"]  = presence_str(pr);
+            e["last_seen"] = seconds_since(extensions[i].last_seen_ms, now_ms);
             e["type"]   = extensions[i].hw_type;
             e["rev"]    = extensions[i].hw_rev;
             char vbuf[16];
@@ -3799,13 +4495,23 @@ static void setup_web(void) {
         name.trim();
         if (name.length() == 0) name = "Unisync";
         if (name.length() > 31) name = name.substring(0,31);
-        /* A new mesh gets a real password and a real auth key. Previously it
-         * inherited the compiled-in default, which also gated
-         * /api/ota/image -- so every new mesh shipped with 12345678. */
+        /* The mesh password is the user's to choose (UX stories v5.1
+         * Epic 7): it becomes the Wi-Fi key AND the login for the whole
+         * home, and the guided transition tells them to rejoin with it.
+         * Generating it here and only printing it to serial locked the
+         * owner out of their own network -- the AP came back on an SSID
+         * whose password nobody knew, recoverable only over BLE.
+         * Same rules as /api/mesh/passwd: >=8 chars, clamp at 63. */
+        String pass = server.arg("pass");
+        pass.trim();
+        if (pass.length() < 8) {
+            server.send(400,"application/json",
+                "{\"error\":\"Mesh password must be at least 8 characters\"}");
+            return;
+        }
+        if (pass.length() > 63) pass = pass.substring(0,63);
         {
-            char gen[13];
-            rand_hex(gen, 12);
-            strncpy(mesh_pass, gen, sizeof(mesh_pass)-1);
+            strncpy(mesh_pass, pass.c_str(), sizeof(mesh_pass)-1);
             mesh_pass[sizeof(mesh_pass)-1] = 0;
             for (int k = 0; k < 16; k += 4) {
                 uint32_t r = esp_random();
@@ -3819,7 +4525,7 @@ static void setup_web(void) {
             prefs.putBytes("authkey", mesh_auth_key, 16);
             prefs.putUInt("credver", cred_version);
             prefs.end();
-            Serial.printf("[MESH] created, password: %s\n", gen);
+            Serial.println("[MESH] created with the supplied password");
             ble_update_adv_data();
         }
         strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);
@@ -4014,8 +4720,7 @@ static void setup_web(void) {
             doc["ch"]      = 0;
             doc["state"]   = false;
             String payload; serializeJson(doc,payload);
-            esp_now_send(mesh_peers[idx].mac,
-                         (const uint8_t*)payload.c_str(), payload.length()+1);
+            mesh_send(mesh_peers[idx].mac, payload.c_str(), payload.length()+1);
             server.send(200,"application/json","{\"ok\":true}");
             return;
         }
@@ -4049,7 +4754,13 @@ static void setup_web(void) {
         }
         xSemaphoreGive(state_mutex);
 
-        bool new_state = !cur_state;
+        /* An explicit state when the caller sends one. Toggling was the
+         * only option before, which meant an optimistic UI and a retry
+         * could land on opposite values. */
+        String want = server.arg("state");
+        bool new_state = want.length()
+            ? (want == "1" || want == "true" || want == "on")
+            : !cur_state;
         bool ok = mesh_relay_remote(peer_uid, mesh_peers[idx].mac,
                                     sw_id.c_str(), ch, new_state);
 
@@ -4226,6 +4937,20 @@ static void setup_web(void) {
                 mesh_send_config("reorder_switches", target_uid.c_str(),
                                  nullptr, order.c_str(), -1);
             }
+
+        } else if (cmd == "set_restore") {
+            /* "name" carries the switch id and "slot" the policy (0/1), so
+             * this rides the existing config packet unchanged -- peers on
+             * older firmware simply ignore a command they don't know. */
+            if (is_self) {
+                if (switch_id_valid(name)) {
+                    nvs_save_restore(name.c_str(), slot != 0);
+                    notify_ui();
+                }
+            } else {
+                mesh_send_config("set_restore", target_uid.c_str(),
+                                 name.c_str(), nullptr, slot);
+            }
         }
 
         server.send(200,"application/json","{\"ok\":true}");
@@ -4234,24 +4959,45 @@ static void setup_web(void) {
     /* Mesh status */
     server.on("/api/mesh/status", HTTP_GET, [](){
         if (!auth_ok()) return;
-        StaticJsonDocument<3072> doc;   /* holds MAX_MESH_MASTERS peer entries */
+        /* Heap: 16 members with uid, name, presence, last-seen and firmware
+         * no longer fit in a stack document task_web can afford. */
+        DynamicJsonDocument doc(4096);
         doc["active"]    = mesh_active;
         doc["mesh_name"] = mesh_name;
         doc["pin_valid"] = mesh_pin_valid;
         if (mesh_pin_valid) doc["pin"] = mesh_pin;
+        /* Counted on presence, so the number matches the green cards in
+         * the list below rather than disagreeing with them for a minute. */
         int online_count = 0;
         for (int i=0;i<MAX_MESH_MASTERS;i++)
-            if (mesh_peers[i].online) online_count++;
+            if (peer_presence(&mesh_peers[i], millis()) == PRES_ONLINE)
+                online_count++;
         doc["peer_count"] = online_count;
         /* Version of every node, so convergence is visible in the UI. */
         doc["fw"] = MASTER_FW_VERSION;
         doc["syncing"] = master_pull_active || master_serve_busy;
         doc["cred_stale"] = cred_stale;
+        /* Every member, not just the reachable ones. The Mesh details screen
+         * lists offline masters too (with a last-seen time and Remove
+         * greyed out) -- a master that vanishes from the list is exactly the
+         * flapping the story rules out. */
         JsonArray pv = doc.createNestedArray("peers");
+        uint32_t now_ms = millis();
         for (int i=0;i<MAX_MESH_MASTERS;i++) {
-            if (!mesh_peers[i].online) continue;
+            bool has_uid=false;
+            for (int k=0;k<4;k++) if (mesh_peers[i].uid[k]) { has_uid=true; break; }
+            if (!has_uid) continue;
             JsonObject o = pv.createNestedObject();
+            char puid[12];
+            snprintf(puid,sizeof(puid),"%02X%02X%02X%02X",
+                     mesh_peers[i].uid[0],mesh_peers[i].uid[1],
+                     mesh_peers[i].uid[2],mesh_peers[i].uid[3]);
+            presence_t ppr = peer_presence(&mesh_peers[i], now_ms);
+            o["uid"]  = puid;
             o["name"] = mesh_peers[i].name;
+            o["online"]    = (ppr == PRES_ONLINE);
+            o["presence"]  = presence_str(ppr);
+            o["last_seen"] = seconds_since(mesh_peers[i].last_seen_ms, now_ms);
             char vb[16];
             snprintf(vb,sizeof(vb),"%u.%u.%u",
                      mesh_peers[i].fw[0],mesh_peers[i].fw[1],mesh_peers[i].fw[2]);
@@ -4737,7 +5483,14 @@ static void master_restore_ap(void) {
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_AP);
     vTaskDelay(pdMS_TO_TICKS(100));
-    WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+    /* Bring back the AP this master actually owns. Hard-coding the mesh
+     * credentials is only safe while this is reached exclusively from the
+     * mesh pull path -- a standalone master would otherwise reappear on an
+     * SSID it was never part of, with a password its owner does not know.
+     * Latent today (a standalone master has no peers to pull from and
+     * returns early), but it costs nothing to be correct here. */
+    const char *ap_ssid = mesh_active ? mesh_name : unique_ssid;
+    WiFi.softAP(ap_ssid, active_pass(), AP_CHANNEL);
     vTaskDelay(pdMS_TO_TICKS(200));
     /* WiFi.disconnect(true,true) resets the driver, which takes ESP-NOW
      * with it. On the success path we reboot immediately so it hardly
@@ -4749,7 +5502,7 @@ static void master_restore_ap(void) {
         mesh_init();
         Serial.println("[MFW] mesh radio reinitialised");
     }
-    Serial.printf("[MFW] access point restored: %s\n", mesh_name);
+    Serial.printf("[MFW] access point restored: %s\n", ap_ssid);
 }
 
 static void master_fw_sync(void) {
@@ -5155,12 +5908,30 @@ static void task_fwsync(void *arg) {
 /* ================================================================
  * BLE RECOVERY SERVICE
  * ================================================================ */
-static void ble_new_session_nonce(void) {
+/* The nonce is per connection, not global. It used to be one shared
+ * buffer regenerated on every onConnect, so a second phone connecting
+ * silently invalidated the first phone's proofs; the first would re-read
+ * the nonce, restart its counter at 1, and then be rejected by the replay
+ * guard as stale -- two clients permanently broke each other, even though
+ * the firmware allows three and the spec requires concurrent control. */
+static void ble_fill_nonce(uint8_t *dst) {
     for (int i = 0; i < 8; i += 4) {
         uint32_t r = esp_random();
-        ble_snonce[i]=r&0xFF; ble_snonce[i+1]=(r>>8)&0xFF;
-        ble_snonce[i+2]=(r>>16)&0xFF; ble_snonce[i+3]=(r>>24)&0xFF;
+        dst[i]=r&0xFF; dst[i+1]=(r>>8)&0xFF;
+        dst[i+2]=(r>>16)&0xFF; dst[i+3]=(r>>24)&0xFF;
     }
+}
+
+/* Index of the connection owning a handle, or -1. */
+static int ble_conn_index(uint16_t handle) {
+    for (int i = 0; i < BLE_MAX_CONN; i++)
+        if (ble_conns[i].used && ble_conns[i].handle == handle) return i;
+    return -1;
+}
+
+/* Placeholder only: each reader is served its own nonce by BleSNonceCB. */
+static void ble_new_session_nonce(void) {
+    ble_fill_nonce(ble_snonce);
     if (ble_snonce_char) ble_snonce_char->setValue(ble_snonce, 8);
 }
 
@@ -5173,52 +5944,166 @@ static void ble_new_nonce(void) {
     if (ble_chal_char) ble_chal_char->setValue(ble_nonce, 8);
 }
 
+/* Keystream from the recovery key and the challenge nonce. XOR is its own
+ * inverse, so one routine both wraps and unwraps.
+ *
+ * This is what keeps the new whole-home password off the air in the clear.
+ * The old flow had the *master* choose the password and notify it back
+ * unencrypted over an open link -- anyone in radio range with a sniffer got
+ * the key to the house. */
+static void rkey_wrap(const uint8_t *rkey, const uint8_t *nonce8,
+                      uint8_t *buf, uint16_t n) {
+    uint8_t key[32], ks[32];
+    hmac_sha256(rkey, nonce8, 8, key);
+    for (uint16_t off = 0; off < n; off += 32) {
+        uint8_t ctr[36];
+        memcpy(ctr, key, 32);
+        ctr[32]=(off>>24)&0xFF; ctr[33]=(off>>16)&0xFF;
+        ctr[34]=(off>>8)&0xFF;  ctr[35]=off&0xFF;
+        hmac_sha256(key, ctr, sizeof(ctr), ks);
+        for (uint16_t k = 0; k < 32 && off + k < n; k++)
+            buf[off + k] ^= ks[k];
+    }
+}
+
+/* Seconds still to wait, 0 when an attempt is allowed now. */
+static uint32_t rec_wait_s(void) {
+    if (!rec_next_ms) return 0;
+    int32_t left = (int32_t)(rec_next_ms - millis());
+    if (left <= 0) return 0;
+    return (uint32_t)((left + 999) / 1000);
+}
+
+static void rec_broadcast_gate(void) {
+    if (!mesh_active) return;
+    char self_uid[12];
+    snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+    StaticJsonDocument<128> doc;
+    doc["type"] = MESH_PKT_RECFAIL;
+    doc["uid"]  = self_uid;
+    doc["f"]    = rec_fails;
+    doc["w"]    = rec_wait_s();
+    String payload; serializeJson(doc, payload);
+    mesh_broadcast(payload.c_str(), payload.length() + 1);
+}
+
+/* One rejection: advance the schedule and tell the rest of the mesh. */
+static void rec_note_failure(void) {
+    if (rec_fails < 16) rec_fails++;
+    uint32_t wait_s = REC_BACKOFF_BASE_S;
+    for (uint8_t i = 1; i < rec_fails && wait_s < REC_BACKOFF_MAX_S; i++)
+        wait_s *= 2;
+    if (wait_s > REC_BACKOFF_MAX_S) wait_s = REC_BACKOFF_MAX_S;
+    rec_next_ms = millis() + wait_s * 1000UL;
+    rec_broadcast_gate();
+}
+
+static void rec_clear_gate(void) {
+    rec_fails   = 0;
+    rec_next_ms = 0;
+    rec_broadcast_gate();
+}
+
+/* The verdict, as the app reads it. Explicit accept/reject replaced the
+ * old silent timeout: the recovery key's entropy plus a device-enforced
+ * doubling backoff is what makes a straight answer safe to give. */
+static void rec_reply(bool ok, const char *why) {
+    StaticJsonDocument<128> doc;
+    doc["v"]  = 2;
+    doc["ok"] = ok;
+    if (ok) {
+        /* The master decides the scope, never the app: it is the one that
+         * knows whether it is meshed. */
+        doc["scope"] = mesh_active ? "mesh" : "device";
+    } else {
+        doc["wait"] = rec_wait_s();
+        if (why) doc["err"] = why;
+    }
+    String out; serializeJson(doc, out);
+    if (ble_result_char) {
+        ble_result_char->setValue((uint8_t *)out.c_str(), out.length());
+        ble_result_char->notify();
+    }
+}
+
 class BleRespCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
         /* Runs on the BLE task. Do the cheap checks here, hand the actual
          * credential change to task_web -- NVS writes and an AP restart do
-         * not belong on this stack. */
-        if (ble_lock_until && (int32_t)(millis() - ble_lock_until) < 0) return;
-
-        /* Arduino ESP32 core 3.x returns an Arduino String here; the 2.x
-         * API returned std::string. Use the Arduino type. */
+         * not belong on this stack.
+         *
+         * Request (v2), written in one go:
+         *   [0]      version, 0x02
+         *   [1]      password length, 8..63
+         *   [2..9]   HMAC-SHA256(recovery_key, nonce8 || ver || len || wrapped)[0..7]
+         *   [10..]   the new password, wrapped with rkey_wrap
+         *
+         * The app chooses the password and it never crosses in the clear;
+         * the proof authenticates the whole request, so neither the key nor
+         * the password can be lifted from a recorded exchange. */
         NimBLEAttValue av = ch->getValue();
-        if (av.length() != 8 || !factory_set) return;
+        const uint8_t *req = av.data();
+        uint16_t rlen = av.length();
 
-        uint8_t want[32];
-        hmac_sha256(recovery_key, ble_nonce, 8, want);
-        if (!ct_equal(want, av.data(), 8)) {
-            /* Silent on failure: no distinguishable response, so the
-             * service cannot be probed for near-misses. */
-            if (++ble_fails >= BLE_MAX_FAILS) {
-                ble_lock_until = millis() + BLE_LOCKOUT_MS;
-                ble_fails = 0;
-            }
+        if (!factory_set) { rec_reply(false, "not provisioned"); return; }
+
+        /* The gate is enforced here, whatever the client believes. */
+        if (rec_wait_s() > 0) { rec_reply(false, "too soon"); return; }
+
+        if (rlen < 10 + 8 || req[0] != 0x02) {
+            rec_note_failure();
+            rec_reply(false, "malformed");
             ble_new_nonce();
             return;
         }
-        ble_fails = 0;
-
-        if (mesh_active) {
-            /* A mesh password is shared, so it cannot be restored from
-             * this device's card. Issue a fresh one and push it to every
-             * peer, authenticated with mesh_auth_key which they all still
-             * hold. One master recovers the whole house. */
-            char gen[13];
-            rand_hex(gen, 12);
-            strncpy(ble_new_pass, gen, sizeof(ble_new_pass)-1);
-        } else {
-            /* Standalone: go back to the value printed on the card. */
-            strncpy(ble_new_pass, factory_pass, sizeof(ble_new_pass)-1);
+        uint8_t plen = req[1];
+        if (plen < PASS_MIN_LEN || plen > 63 || (uint16_t)(10 + plen) != rlen) {
+            rec_note_failure();
+            rec_reply(false, "malformed");
+            ble_new_nonce();
+            return;
         }
-        ble_new_pass[sizeof(ble_new_pass)-1] = 0;
 
-        if (ble_result_char) {
-            ble_result_char->setValue((uint8_t*)ble_new_pass, strlen(ble_new_pass));
-            ble_result_char->notify();
+        /* Proof covers the wrapped password too, so a recorded request
+         * cannot be replayed with a different one grafted on. */
+        uint8_t msg[8 + 2 + 64];
+        memcpy(msg, ble_nonce, 8);
+        msg[8] = req[0];
+        msg[9] = req[1];
+        memcpy(msg + 10, req + 10, plen);
+        uint8_t want[32];
+        hmac_sha256(recovery_key, msg, 10 + plen, want);
+        if (!ct_equal(want, req + 2, 8)) {
+            rec_note_failure();
+            rec_reply(false, "wrong recovery key");
+            ble_new_nonce();
+            return;
         }
+
+        uint8_t clear[64];
+        memcpy(clear, req + 10, plen);
+        rkey_wrap(recovery_key, ble_nonce, clear, plen);
+        memcpy(ble_new_pass, clear, plen);
+        ble_new_pass[plen] = 0;
+        memset(clear, 0, sizeof(clear));
+        memset(msg, 0, sizeof(msg));
+
+        rec_clear_gate();
+        rec_reply(true, nullptr);
         ble_recover_ready = true;
         ble_new_nonce();
+    }
+};
+
+/* Serves the calling connection its own nonce. Without this the single
+ * stored characteristic value would hand every client whichever nonce was
+ * generated last. */
+class BleSNonceCB : public NimBLECharacteristicCallbacks {
+    void onRead(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        int idx = ble_conn_index(info.getConnHandle());
+        if (idx >= 0) ch->setValue(ble_conns[idx].snonce, 8);
+        else          ch->setValue(ble_snonce, 8);
     }
 };
 
@@ -5227,6 +6112,19 @@ class BleChalCB : public NimBLECharacteristicCallbacks {
         ch->setValue(ble_nonce, 8);
     }
 };
+
+/* The result characteristic now carries a verdict, not a credential -- the
+ * password travels the other way, wrapped, and is chosen by the app. It is
+ * still cleared on every connect and disconnect: a stale "accepted" left
+ * readable would tell the next person in radio range that a recovery just
+ * succeeded, and there is no reason to hand that out. */
+static void ble_clear_recovery_result(void) {
+    if (ble_result_char) ble_result_char->setValue((uint8_t *)"", 0);
+    /* Deliberately does NOT touch ble_new_pass: task_web consumes it in
+     * ble_recovery_apply(), which can run after the client has gone.
+     * Wiping it here would apply an empty password to the whole home.
+     * That buffer is zeroed in ble_recovery_apply() once it is spent. */
+}
 
 /* Same effect as POST /api/relay, driven from the BLE transport.
  * Mirrors the HTTP handler's semantics deliberately: id "master_1" or
@@ -5287,6 +6185,7 @@ static void ble_killall(void) {
     relay_cmd_t m2; m2.target=-1; m2.channel=2; m2.state=false;
     xQueueSend(master_relay_queue, &m1, 0);
     xQueueSend(master_relay_queue, &m2, 0);
+    mesh_killall_peers();
     relay_state_save();
     notify_ui();
 }
@@ -5355,9 +6254,17 @@ static bool ble_proof_ok(JsonDocument &req) {
     for (int i = 0; i < 8; i++) sprintf(token + 16 + i*2, "%02x", mac[i]);
     token[32] = 0;
 
-    /* Expected proof over this connection's nonce and the counter. */
+    /* Expected proof over THIS connection's nonce and the counter. An
+     * unknown handle is rejected outright: previously the replay-guard
+     * loop simply fell through and returned true, skipping the counter
+     * check whenever the connection table and handle disagreed. */
+    int ci = ble_conn_index(ble_req_handle);
+    if (ci < 0) {
+        Serial.println("[BLE] request from an untracked connection, rejected");
+        return false;
+    }
     uint8_t msg[12];
-    memcpy(msg, ble_snonce, 8);
+    memcpy(msg, ble_conns[ci].snonce, 8);
     msg[8]=(ctr>>24)&0xFF; msg[9]=(ctr>>16)&0xFF;
     msg[10]=(ctr>>8)&0xFF; msg[11]=ctr&0xFF;
     uint8_t want[32];
@@ -5365,17 +6272,13 @@ static bool ble_proof_ok(JsonDocument &req) {
     if (!ct_equal(want, given, 8)) return false;
 
     /* Replay guard for this connection. */
-    for (int i = 0; i < BLE_MAX_CONN; i++) {
-        if (!ble_conns[i].used || ble_conns[i].handle != ble_req_handle) continue;
-        if (ctr <= ble_conns[i].last_counter) {
-            Serial.printf("[BLE] replayed counter %lu, rejected\n",
-                          (unsigned long)ctr);
-            return false;
-        }
-        ble_conns[i].last_counter = ctr;
-        ble_conns[i].authed = true;
-        break;
+    if (ctr <= ble_conns[ci].last_counter) {
+        Serial.printf("[BLE] replayed counter %lu, rejected\n",
+                      (unsigned long)ctr);
+        return false;
     }
+    ble_conns[ci].last_counter = ctr;
+    ble_conns[ci].authed = true;
     return true;
 }
 
@@ -5393,7 +6296,10 @@ static void ble_handle_request(const char *json) {
     Serial.printf("[BLE] cmd='%s' ctr=%lu\n", cmd,
                   (unsigned long)(req["k"] | 0));
 
-    StaticJsonDocument<2048> res;
+    /* Heap: the "exts" reply now carries presence and last-seen per slot on
+     * top of names, versions and available images, and this runs on the BLE
+     * task's stack. */
+    DynamicJsonDocument res(3072);
 
     /* There is no login here, by design: the password must never cross
      * Bluetooth. Every command carries a proof of a token obtained over
@@ -5409,9 +6315,37 @@ static void ble_handle_request(const char *json) {
     if (!strcmp(cmd, "relay")) {
         const char *id = req["id"] | "";
         bool st = req["s"] | false;
-        bool r = ble_set_relay_by_id(id, st);
-        Serial.printf("[BLE] relay id='%s' state=%d -> %s\n",
-                      id, st ? 1 : 0, r ? "ok" : "REJECTED");
+        /* "Bluetooth mode controls the whole mesh": an optional peer uid
+         * sends the command on over the mesh instead of driving a local
+         * relay. Without it the app could only ever reach the one master
+         * its radio happened to be talking to. */
+        const char *puid = req["uid"] | "";
+        bool r;
+        if (puid[0]) {
+            uint8_t peer_uid[4];
+            char self_uid[12];
+            snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+                     master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+            if (!strcmp(puid, self_uid)) {
+                r = ble_set_relay_by_id(id, st);
+            } else if (!mesh_active) {
+                res["err"] = "not in mesh";
+                r = false;
+            } else if (!mesh_uid_parse(puid, peer_uid)) {
+                res["err"] = "bad uid";
+                r = false;
+            } else {
+                int ch = 1;
+                const char *us = strrchr(id, '_');
+                if (us && (us[1] == '1' || us[1] == '2')) ch = us[1] - '0';
+                r = mesh_relay_set(peer_uid, id, ch, st);
+                if (!r && !res.containsKey("err")) res["err"] = "peer not found";
+            }
+        } else {
+            r = ble_set_relay_by_id(id, st);
+        }
+        Serial.printf("[BLE] relay uid='%s' id='%s' state=%d -> %s\n",
+                      puid, id, st ? 1 : 0, r ? "ok" : "REJECTED");
         res["ok"] = r;
     } else if (!strcmp(cmd, "killall")) {
         ble_killall();
@@ -5427,13 +6361,17 @@ static void ble_handle_request(const char *json) {
          * not yet uploaded is invisible here, so the app decides what is
          * available by comparing its own manifest against "fw". */
         JsonArray a = res.createNestedArray("extensions");
+        uint32_t now_ms = millis();
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         for (int i = 0; i < MAX_EXTENSIONS; i++) {
             if (extensions[i].state == EXT_EMPTY) continue;
             JsonObject o = a.createNestedObject();
+            presence_t pr = ext_presence(&extensions[i], now_ms);
             o["slot"]   = i;
             o["addr"]   = extensions[i].address;
-            o["online"] = (extensions[i].state == EXT_ONLINE);
+            o["online"] = (pr == PRES_ONLINE);
+            o["presence"]  = presence_str(pr);
+            o["last_seen"] = seconds_since(extensions[i].last_seen_ms, now_ms);
             o["type"]   = extensions[i].hw_type;
             o["rev"]    = extensions[i].hw_rev;
             o["name"]   = extensions[i].name;
@@ -5486,6 +6424,16 @@ static void ble_handle_request(const char *json) {
         if (!id[0] || !nm[0]) { res["err"] = "bad id or name"; }
         else {
             nvs_save_switch_name(id, nm);
+            notify_ui();
+            res["ok"] = true;
+        }
+    } else if (!strcmp(cmd, "set_restore")) {
+        /* Per-switch restore policy, same shape as rename_sw. Bluetooth is
+         * a full control path, so the setting is reachable there too. */
+        const char *id = req["id"] | "";
+        if (!id[0] || !switch_id_valid(String(id))) { res["err"] = "bad id"; }
+        else {
+            nvs_save_restore(id, req["restore"] | false);
             notify_ui();
             res["ok"] = true;
         }
@@ -5638,13 +6586,15 @@ class BleSrvCB : public NimBLEServerCallbacks {
             ble_conns[i].opened_ms = millis();
             ble_conns[i].last_ms   = millis();
             ble_conns[i].last_counter = 0;
+            ble_fill_nonce(ble_conns[i].snonce);
             ble_conn_count++;
             break;
         }
         ble_connected = (ble_conn_count > 0);
-        /* A new session nonce per connection: a proof recorded on an
-         * earlier connection cannot be replayed on this one. */
-        ble_new_session_nonce();
+        /* The nonce for this connection was generated as its slot was
+         * claimed above; other clients' nonces are untouched. */
+        /* A new client never inherits a previous client's recovery result. */
+        ble_clear_recovery_result();
         Serial.printf("[BLE] client connected (handle %u), %u open\n",
                       h, ble_conn_count);
         ble_update_adv_data();
@@ -5670,6 +6620,9 @@ class BleSrvCB : public NimBLEServerCallbacks {
         }
         ble_connected = (ble_conn_count > 0);
         ble_req_len   = 0;
+        /* The delivered password dies with the connection that asked for
+         * it; it must not sit readable for the next person in range. */
+        ble_clear_recovery_result();
         Serial.printf("[BLE] client disconnected (reason %d), %u open\n",
                       reason, ble_conn_count);
         ble_update_adv_data();
@@ -5780,6 +6733,8 @@ static void ble_recovery_begin(void) {
     /* Fresh per connection; the app reads it and binds every proof to it. */
     ble_snonce_char = svc->createCharacteristic(
         BLE_SNONCE_UUID, NIMBLE_PROPERTY::READ);
+    /* Each reader gets its OWN connection's nonce, not one shared value. */
+    ble_snonce_char->setCallbacks(new BleSNonceCB());
     ble_new_session_nonce();
 
     ble_new_nonce();
@@ -5822,10 +6777,12 @@ static void ble_recovery_apply(void) {
         strncpy(device_pass, ble_new_pass, sizeof(device_pass)-1);
         device_pass[sizeof(device_pass)-1] = 0;
         prefs.begin("auth", false); prefs.putString("appw", device_pass); prefs.end();
-        Serial.println("[BLE] device password restored to the card value");
+        Serial.println("[BLE] device password set from recovery");
     }
     ap_change_pending = true;
     ap_change_at_ms   = millis() + AP_APPLY_DELAY_MS;
+    /* Spent: don't leave the new whole-home password sitting in RAM. */
+    memset(ble_new_pass, 0, sizeof(ble_new_pass));
 }
 
 /* Read the UID from the factory-burned eFuse MAC. Must run before
@@ -6029,8 +6986,13 @@ void setup() {
     master_relay1=prefs.getBool("m_r1",false);
     master_relay2=prefs.getBool("m_r2",false);
     prefs.end();
-    digitalWrite(RELAY1_PIN, master_relay1?LOW:HIGH);
-    digitalWrite(RELAY2_PIN, master_relay2?LOW:HIGH);
+    /* Nothing energizes unless the owner opted that channel into restore. */
+    apply_restore_policy(-1, &master_relay1, &master_relay2);
+    /* Both pins are already HIGH (off) from the pinMode block above, so these
+     * writes can only close a relay, never open one. Staggered so a whole
+     * house coming back doesn't switch everything in the same millisecond. */
+    if (master_relay1) { restore_stagger(); digitalWrite(RELAY1_PIN, LOW); }
+    if (master_relay2) { restore_stagger(); digitalWrite(RELAY2_PIN, LOW); }
     Serial.printf("[RELAY] Restored: CH1=%s CH2=%s\n",
                   master_relay1?"ON":"OFF", master_relay2?"ON":"OFF");
 
@@ -6061,6 +7023,11 @@ void setup() {
           extensions[i].relay2=prefs.getBool(k2,false);
       }
       prefs.end();
+      /* Registered extensions boot with their relays off and are pushed
+       * state on their first poll. Zeroing "start off" channels here means
+       * those channels are never pushed at all. */
+      for (int i=0;i<MAX_EXTENSIONS;i++)
+          apply_restore_policy(i, &extensions[i].relay1, &extensions[i].relay2);
     }
 
     /* Load master name and switch order */

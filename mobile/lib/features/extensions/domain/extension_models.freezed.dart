@@ -15,7 +15,12 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$ExtensionInfo {
 
- int get slot; int get addr; bool get online; int get type; int get rev; String get fw; String get name; String get sw1; String get sw2; int get fails; bool get stuck; String? get avail;
+ int get slot; int get addr; bool get online; int get type; int get rev; String get fw; String get name; String get sw1; String get sw2; int get fails; bool get stuck; String? get avail;/// The master's debounced presence verdict. `online` above is the same
+/// judgement as a bool; this separates a settled outage from a board
+/// that keeps dropping and returning.
+@JsonKey(name: 'presence') String get presenceRaw;/// Seconds since the master last heard from this board. The master has
+/// no clock, so last-seen is always relative.
+@JsonKey(name: 'last_seen') int get lastSeen;
 /// Create a copy of ExtensionInfo
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -28,16 +33,16 @@ $ExtensionInfoCopyWith<ExtensionInfo> get copyWith => _$ExtensionInfoCopyWithImp
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ExtensionInfo&&(identical(other.slot, slot) || other.slot == slot)&&(identical(other.addr, addr) || other.addr == addr)&&(identical(other.online, online) || other.online == online)&&(identical(other.type, type) || other.type == type)&&(identical(other.rev, rev) || other.rev == rev)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.name, name) || other.name == name)&&(identical(other.sw1, sw1) || other.sw1 == sw1)&&(identical(other.sw2, sw2) || other.sw2 == sw2)&&(identical(other.fails, fails) || other.fails == fails)&&(identical(other.stuck, stuck) || other.stuck == stuck)&&(identical(other.avail, avail) || other.avail == avail));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is ExtensionInfo&&(identical(other.slot, slot) || other.slot == slot)&&(identical(other.addr, addr) || other.addr == addr)&&(identical(other.online, online) || other.online == online)&&(identical(other.type, type) || other.type == type)&&(identical(other.rev, rev) || other.rev == rev)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.name, name) || other.name == name)&&(identical(other.sw1, sw1) || other.sw1 == sw1)&&(identical(other.sw2, sw2) || other.sw2 == sw2)&&(identical(other.fails, fails) || other.fails == fails)&&(identical(other.stuck, stuck) || other.stuck == stuck)&&(identical(other.avail, avail) || other.avail == avail)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,slot,addr,online,type,rev,fw,name,sw1,sw2,fails,stuck,avail);
+int get hashCode => Object.hash(runtimeType,slot,addr,online,type,rev,fw,name,sw1,sw2,fails,stuck,avail,presenceRaw,lastSeen);
 
 @override
 String toString() {
-  return 'ExtensionInfo(slot: $slot, addr: $addr, online: $online, type: $type, rev: $rev, fw: $fw, name: $name, sw1: $sw1, sw2: $sw2, fails: $fails, stuck: $stuck, avail: $avail)';
+  return 'ExtensionInfo(slot: $slot, addr: $addr, online: $online, type: $type, rev: $rev, fw: $fw, name: $name, sw1: $sw1, sw2: $sw2, fails: $fails, stuck: $stuck, avail: $avail, presenceRaw: $presenceRaw, lastSeen: $lastSeen)';
 }
 
 
@@ -48,7 +53,7 @@ abstract mixin class $ExtensionInfoCopyWith<$Res>  {
   factory $ExtensionInfoCopyWith(ExtensionInfo value, $Res Function(ExtensionInfo) _then) = _$ExtensionInfoCopyWithImpl;
 @useResult
 $Res call({
- int slot, int addr, bool online, int type, int rev, String fw, String name, String sw1, String sw2, int fails, bool stuck, String? avail
+ int slot, int addr, bool online, int type, int rev, String fw, String name, String sw1, String sw2, int fails, bool stuck, String? avail,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen
 });
 
 
@@ -65,7 +70,7 @@ class _$ExtensionInfoCopyWithImpl<$Res>
 
 /// Create a copy of ExtensionInfo
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? slot = null,Object? addr = null,Object? online = null,Object? type = null,Object? rev = null,Object? fw = null,Object? name = null,Object? sw1 = null,Object? sw2 = null,Object? fails = null,Object? stuck = null,Object? avail = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? slot = null,Object? addr = null,Object? online = null,Object? type = null,Object? rev = null,Object? fw = null,Object? name = null,Object? sw1 = null,Object? sw2 = null,Object? fails = null,Object? stuck = null,Object? avail = freezed,Object? presenceRaw = null,Object? lastSeen = null,}) {
   return _then(_self.copyWith(
 slot: null == slot ? _self.slot : slot // ignore: cast_nullable_to_non_nullable
 as int,addr: null == addr ? _self.addr : addr // ignore: cast_nullable_to_non_nullable
@@ -79,7 +84,9 @@ as String,sw2: null == sw2 ? _self.sw2 : sw2 // ignore: cast_nullable_to_non_nul
 as String,fails: null == fails ? _self.fails : fails // ignore: cast_nullable_to_non_nullable
 as int,stuck: null == stuck ? _self.stuck : stuck // ignore: cast_nullable_to_non_nullable
 as bool,avail: freezed == avail ? _self.avail : avail // ignore: cast_nullable_to_non_nullable
-as String?,
+as String?,presenceRaw: null == presenceRaw ? _self.presenceRaw : presenceRaw // ignore: cast_nullable_to_non_nullable
+as String,lastSeen: null == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
+as int,
   ));
 }
 
@@ -164,10 +171,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int slot,  int addr,  bool online,  int type,  int rev,  String fw,  String name,  String sw1,  String sw2,  int fails,  bool stuck,  String? avail)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int slot,  int addr,  bool online,  int type,  int rev,  String fw,  String name,  String sw1,  String sw2,  int fails,  bool stuck,  String? avail, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _ExtensionInfo() when $default != null:
-return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw,_that.name,_that.sw1,_that.sw2,_that.fails,_that.stuck,_that.avail);case _:
+return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw,_that.name,_that.sw1,_that.sw2,_that.fails,_that.stuck,_that.avail,_that.presenceRaw,_that.lastSeen);case _:
   return orElse();
 
 }
@@ -185,10 +192,10 @@ return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int slot,  int addr,  bool online,  int type,  int rev,  String fw,  String name,  String sw1,  String sw2,  int fails,  bool stuck,  String? avail)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int slot,  int addr,  bool online,  int type,  int rev,  String fw,  String name,  String sw1,  String sw2,  int fails,  bool stuck,  String? avail, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen)  $default,) {final _that = this;
 switch (_that) {
 case _ExtensionInfo():
-return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw,_that.name,_that.sw1,_that.sw2,_that.fails,_that.stuck,_that.avail);case _:
+return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw,_that.name,_that.sw1,_that.sw2,_that.fails,_that.stuck,_that.avail,_that.presenceRaw,_that.lastSeen);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -205,10 +212,10 @@ return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int slot,  int addr,  bool online,  int type,  int rev,  String fw,  String name,  String sw1,  String sw2,  int fails,  bool stuck,  String? avail)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int slot,  int addr,  bool online,  int type,  int rev,  String fw,  String name,  String sw1,  String sw2,  int fails,  bool stuck,  String? avail, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen)?  $default,) {final _that = this;
 switch (_that) {
 case _ExtensionInfo() when $default != null:
-return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw,_that.name,_that.sw1,_that.sw2,_that.fails,_that.stuck,_that.avail);case _:
+return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw,_that.name,_that.sw1,_that.sw2,_that.fails,_that.stuck,_that.avail,_that.presenceRaw,_that.lastSeen);case _:
   return null;
 
 }
@@ -219,8 +226,8 @@ return $default(_that.slot,_that.addr,_that.online,_that.type,_that.rev,_that.fw
 /// @nodoc
 @JsonSerializable()
 
-class _ExtensionInfo implements ExtensionInfo {
-  const _ExtensionInfo({required this.slot, this.addr = 0, this.online = false, this.type = 0, this.rev = 0, this.fw = '', this.name = '', this.sw1 = '', this.sw2 = '', this.fails = 0, this.stuck = false, this.avail});
+class _ExtensionInfo extends ExtensionInfo {
+  const _ExtensionInfo({required this.slot, this.addr = 0, this.online = false, this.type = 0, this.rev = 0, this.fw = '', this.name = '', this.sw1 = '', this.sw2 = '', this.fails = 0, this.stuck = false, this.avail, @JsonKey(name: 'presence') this.presenceRaw = 'online', @JsonKey(name: 'last_seen') this.lastSeen = 0}): super._();
   factory _ExtensionInfo.fromJson(Map<String, dynamic> json) => _$ExtensionInfoFromJson(json);
 
 @override final  int slot;
@@ -235,6 +242,13 @@ class _ExtensionInfo implements ExtensionInfo {
 @override@JsonKey() final  int fails;
 @override@JsonKey() final  bool stuck;
 @override final  String? avail;
+/// The master's debounced presence verdict. `online` above is the same
+/// judgement as a bool; this separates a settled outage from a board
+/// that keeps dropping and returning.
+@override@JsonKey(name: 'presence') final  String presenceRaw;
+/// Seconds since the master last heard from this board. The master has
+/// no clock, so last-seen is always relative.
+@override@JsonKey(name: 'last_seen') final  int lastSeen;
 
 /// Create a copy of ExtensionInfo
 /// with the given fields replaced by the non-null parameter values.
@@ -249,16 +263,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _ExtensionInfo&&(identical(other.slot, slot) || other.slot == slot)&&(identical(other.addr, addr) || other.addr == addr)&&(identical(other.online, online) || other.online == online)&&(identical(other.type, type) || other.type == type)&&(identical(other.rev, rev) || other.rev == rev)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.name, name) || other.name == name)&&(identical(other.sw1, sw1) || other.sw1 == sw1)&&(identical(other.sw2, sw2) || other.sw2 == sw2)&&(identical(other.fails, fails) || other.fails == fails)&&(identical(other.stuck, stuck) || other.stuck == stuck)&&(identical(other.avail, avail) || other.avail == avail));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _ExtensionInfo&&(identical(other.slot, slot) || other.slot == slot)&&(identical(other.addr, addr) || other.addr == addr)&&(identical(other.online, online) || other.online == online)&&(identical(other.type, type) || other.type == type)&&(identical(other.rev, rev) || other.rev == rev)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.name, name) || other.name == name)&&(identical(other.sw1, sw1) || other.sw1 == sw1)&&(identical(other.sw2, sw2) || other.sw2 == sw2)&&(identical(other.fails, fails) || other.fails == fails)&&(identical(other.stuck, stuck) || other.stuck == stuck)&&(identical(other.avail, avail) || other.avail == avail)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,slot,addr,online,type,rev,fw,name,sw1,sw2,fails,stuck,avail);
+int get hashCode => Object.hash(runtimeType,slot,addr,online,type,rev,fw,name,sw1,sw2,fails,stuck,avail,presenceRaw,lastSeen);
 
 @override
 String toString() {
-  return 'ExtensionInfo(slot: $slot, addr: $addr, online: $online, type: $type, rev: $rev, fw: $fw, name: $name, sw1: $sw1, sw2: $sw2, fails: $fails, stuck: $stuck, avail: $avail)';
+  return 'ExtensionInfo(slot: $slot, addr: $addr, online: $online, type: $type, rev: $rev, fw: $fw, name: $name, sw1: $sw1, sw2: $sw2, fails: $fails, stuck: $stuck, avail: $avail, presenceRaw: $presenceRaw, lastSeen: $lastSeen)';
 }
 
 
@@ -269,7 +283,7 @@ abstract mixin class _$ExtensionInfoCopyWith<$Res> implements $ExtensionInfoCopy
   factory _$ExtensionInfoCopyWith(_ExtensionInfo value, $Res Function(_ExtensionInfo) _then) = __$ExtensionInfoCopyWithImpl;
 @override @useResult
 $Res call({
- int slot, int addr, bool online, int type, int rev, String fw, String name, String sw1, String sw2, int fails, bool stuck, String? avail
+ int slot, int addr, bool online, int type, int rev, String fw, String name, String sw1, String sw2, int fails, bool stuck, String? avail,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen
 });
 
 
@@ -286,7 +300,7 @@ class __$ExtensionInfoCopyWithImpl<$Res>
 
 /// Create a copy of ExtensionInfo
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? slot = null,Object? addr = null,Object? online = null,Object? type = null,Object? rev = null,Object? fw = null,Object? name = null,Object? sw1 = null,Object? sw2 = null,Object? fails = null,Object? stuck = null,Object? avail = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? slot = null,Object? addr = null,Object? online = null,Object? type = null,Object? rev = null,Object? fw = null,Object? name = null,Object? sw1 = null,Object? sw2 = null,Object? fails = null,Object? stuck = null,Object? avail = freezed,Object? presenceRaw = null,Object? lastSeen = null,}) {
   return _then(_ExtensionInfo(
 slot: null == slot ? _self.slot : slot // ignore: cast_nullable_to_non_nullable
 as int,addr: null == addr ? _self.addr : addr // ignore: cast_nullable_to_non_nullable
@@ -300,7 +314,9 @@ as String,sw2: null == sw2 ? _self.sw2 : sw2 // ignore: cast_nullable_to_non_nul
 as String,fails: null == fails ? _self.fails : fails // ignore: cast_nullable_to_non_nullable
 as int,stuck: null == stuck ? _self.stuck : stuck // ignore: cast_nullable_to_non_nullable
 as bool,avail: freezed == avail ? _self.avail : avail // ignore: cast_nullable_to_non_nullable
-as String?,
+as String?,presenceRaw: null == presenceRaw ? _self.presenceRaw : presenceRaw // ignore: cast_nullable_to_non_nullable
+as String,lastSeen: null == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
+as int,
   ));
 }
 

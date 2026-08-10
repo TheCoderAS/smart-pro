@@ -14,6 +14,7 @@ class PasswordField extends StatefulWidget {
     this.autofocus = false,
     this.enabled = true,
     this.onSubmitted,
+    this.onChanged,
     super.key,
   });
 
@@ -26,6 +27,9 @@ class PasswordField extends StatefulWidget {
   final bool autofocus;
   final bool enabled;
   final ValueChanged<String>? onSubmitted;
+
+  /// Lets a caller re-evaluate "can save" as the user types.
+  final ValueChanged<String>? onChanged;
 
   @override
   State<PasswordField> createState() => _PasswordFieldState();
@@ -45,6 +49,7 @@ class _PasswordFieldState extends State<PasswordField> {
       autofocus: widget.autofocus,
       textInputAction: widget.textInputAction,
       onSubmitted: widget.onSubmitted,
+      onChanged: widget.onChanged,
       decoration: InputDecoration(
         labelText: widget.label,
         helperText: widget.helper,

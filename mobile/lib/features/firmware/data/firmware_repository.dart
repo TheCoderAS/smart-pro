@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/dio_client.dart';
 import '../../../core/api/endpoints.dart';
+import '../../../core/wifi/wifi_service.dart';
 import '../../auth/data/auth_repository.dart';
 import '../domain/firmware_models.dart';
 
@@ -31,23 +32,43 @@ final firmwareRepositoryProvider = Provider<FirmwareRepository>((ref) {
     ref.watch(dioProvider),
     ref.watch(cdnDioProvider),
     ref.watch(authRepositoryProvider),
+    ref.watch(wifiServiceProvider),
   );
 });
 
 class FirmwareRepository {
-  const FirmwareRepository(this._device, this._cdn, this._auth);
+  const FirmwareRepository(this._device, this._cdn, this._auth, this._wifi);
 
   final Dio _device;
   final Dio _cdn;
   final AuthRepository _auth;
+  final WifiService _wifi;
+
+  /// Runs [body] with the phone's normal routing restored.
+  ///
+  /// On Android the app pins itself to the master's network so requests
+  /// don't leak onto mobile data — which is exactly backwards for the two
+  /// things that genuinely need the internet. Unbind for the fetch, then
+  /// pin back, so a download doesn't leave the app unable to reach the
+  /// master afterwards.
+  Future<T> _viaInternet<T>(Future<T> Function() body) async {
+    await _wifi.release();
+    try {
+      return await body();
+    } finally {
+      await _wifi.bindToWifi();
+    }
+  }
 
   /// Published images, newest first per type.
   Future<List<FirmwareManifest>> fetchManifests() async {
-    final res = await _cdn.get<List<dynamic>>(firmwareManifestUrl);
-    return [
-      for (final e in res.data ?? const <dynamic>[])
-        if (e is Map<String, dynamic>) FirmwareManifest.fromJson(e),
-    ];
+    return _viaInternet(() async {
+      final res = await _cdn.get<List<dynamic>>(firmwareManifestUrl);
+      return [
+        for (final e in res.data ?? const <dynamic>[])
+          if (e is Map<String, dynamic>) FirmwareManifest.fromJson(e),
+      ];
+    });
   }
 
   /// Downloads an image, reporting progress 0..1.
@@ -55,22 +76,24 @@ class FirmwareRepository {
     FirmwareManifest manifest, {
     void Function(double progress)? onProgress,
     CancelToken? cancelToken,
-  }) async {
-    final res = await _cdn.get<List<int>>(
-      manifest.url,
-      options: Options(responseType: ResponseType.bytes),
-      cancelToken: cancelToken,
-      onReceiveProgress: (received, total) {
-        if (total > 0) onProgress?.call(received / total);
-      },
-    );
-    final bytes = Uint8List.fromList(res.data ?? const []);
-    if (manifest.size > 0 && bytes.length != manifest.size) {
-      throw StateError(
-        'size mismatch: manifest ${manifest.size}, got ${bytes.length}',
+  }) {
+    return _viaInternet(() async {
+      final res = await _cdn.get<List<int>>(
+        manifest.url,
+        options: Options(responseType: ResponseType.bytes),
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (total > 0) onProgress?.call(received / total);
+        },
       );
-    }
-    return bytes;
+      final bytes = Uint8List.fromList(res.data ?? const []);
+      if (manifest.size > 0 && bytes.length != manifest.size) {
+        throw StateError(
+          'size mismatch: manifest ${manifest.size}, got ${bytes.length}',
+        );
+      }
+      return bytes;
+    });
   }
 
   /// Images already stored in the master's signed library.

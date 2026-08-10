@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -5,6 +7,7 @@ import '../../../core/api/failure.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/connection_bar.dart';
 import '../../extensions/data/extension_repository.dart';
 import '../../extensions/domain/extension_models.dart';
 import '../data/firmware_repository.dart';
@@ -51,9 +54,15 @@ class FirmwareScreen extends ConsumerWidget {
         latestByType[m.type] = m;
       }
     }
+    // The master's own image is type 0; it installs through a different
+    // endpoint and confirms differently, so it gets its own card.
+    final masterManifest = latestByType.remove(0);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Firmware')),
+      appBar: AppBar(
+        title: const Text('Firmware'),
+        bottom: const ConnectionBar(),
+      ),
       body: RefreshIndicator(
         onRefresh: () async {
           ref.invalidate(manifestsProvider);
@@ -64,7 +73,7 @@ class FirmwareScreen extends ConsumerWidget {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(16),
           children: [
-            if (master.isNotEmpty)
+            if (master.isNotEmpty && masterManifest == null)
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.router_outlined),
@@ -72,6 +81,8 @@ class FirmwareScreen extends ConsumerWidget {
                   subtitle: Text('Firmware $master'),
                 ),
               ),
+            if (masterManifest != null)
+              _MasterCard(manifest: masterManifest, installed: master),
             if (manifests.value?.isEmpty ?? true)
               Card(
                 child: Padding(
@@ -142,6 +153,10 @@ class _ManifestCardState extends ConsumerState<_ManifestCard> {
   double? _progress;
   String? _status;
 
+  /// Held between download and install, so a Bluetooth user can fetch the
+  /// image now and install it when they are next on the master's Wi-Fi.
+  Uint8List? _bytes;
+
   bool get _busy => _progress != null || _status == 'uploading';
 
   bool get _upToDate =>
@@ -184,9 +199,28 @@ class _ManifestCardState extends ConsumerState<_ManifestCard> {
             else
               FilledButton.icon(
                 icon: const Icon(Icons.system_update_alt),
-                label: Text(_upToDate ? 'Re-send to mesh' : 'Update mesh'),
+                label: Text(
+                  _bytes != null &&
+                          ref.watch(currentTransportProvider) ==
+                              TransportKind.ble
+                      ? 'Waiting for Wi-Fi'
+                      : _upToDate
+                          ? 'Re-send to mesh'
+                          : 'Update mesh',
+                ),
                 onPressed: _busy ? null : _run,
               ),
+            if (_bytes != null &&
+                ref.watch(currentTransportProvider) == TransportKind.ble) ...[
+              const SizedBox(height: 8),
+              TextButton(
+                // Wi-Fi is never refused; no result to handle.
+                onPressed: () => ref
+                    .read(transportCoordinatorProvider)
+                    .choose(TransportPreference.wifi),
+                child: const Text('Switch to Wi-Fi to install'),
+              ),
+            ],
           ],
         ),
       ),
@@ -195,50 +229,206 @@ class _ManifestCardState extends ConsumerState<_ManifestCard> {
 
   Future<void> _run() async {
     final messenger = ScaffoldMessenger.of(context);
-    // Firmware *transfer* is Wi-Fi-only (BLE spec v2 §9). Info shows over
-    // Bluetooth, but installing needs the master's Wi-Fi.
+    final repo = ref.read(firmwareRepositoryProvider);
+
+    // Downloading works in either mode — it uses the phone's mobile data,
+    // and the master has no internet on either path. Only *installing*
+    // needs the master's Wi-Fi, so a Bluetooth user gets the file now and
+    // a clear "waiting for Wi-Fi" state, rather than being turned away
+    // before anything has been fetched.
+    if (_bytes == null) {
+      setState(() {
+        _progress = 0;
+        _status = null;
+      });
+      try {
+        final bytes = await repo.download(
+          widget.manifest,
+          onProgress: (p) => setState(() => _progress = p),
+        );
+        if (!mounted) return;
+        setState(() {
+          _bytes = bytes;
+          _progress = null;
+        });
+      } on Exception catch (e) {
+        if (!mounted) return;
+        setState(() => _progress = null);
+        messenger.showSnackBar(SnackBar(content: Text('Download failed: $e')));
+        return;
+      }
+    }
+
     if (ref.read(currentTransportProvider) == TransportKind.ble) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: const Text('Installing updates needs the switch’s Wi-Fi.'),
-          action: SnackBarAction(
-            label: 'Use Wi-Fi',
-            onPressed: () => ref
-                .read(transportCoordinatorProvider)
-                .choose(TransportPreference.wifi),
-          ),
-        ),
-      );
+      setState(() => _status = _waitingForWifi);
       return;
     }
-    final repo = ref.read(firmwareRepositoryProvider);
-    setState(() => _progress = 0);
+
+    setState(() => _status = 'uploading');
     try {
-      final bytes = await repo.download(
-        widget.manifest,
-        onProgress: (p) => setState(() => _progress = p),
+      await repo.uploadExtensionImage(
+        manifest: widget.manifest,
+        bytes: _bytes!,
       );
+      if (!mounted) return;
       setState(() {
-        _progress = null;
-        _status = 'uploading';
+        _bytes = null;
+        _status = 'Queued — switches update one at a time within about '
+            '30 seconds each.';
       });
-      await repo.uploadExtensionImage(manifest: widget.manifest, bytes: bytes);
-      setState(() => _status = 'Queued — switches update one at a time '
-          'within about 30 seconds each.');
+      // The verdict comes from the boards themselves, never from the
+      // upload: re-read the extension list so the versions on screen are
+      // the ones actually running.
+      await ref.read(extensionsProvider.notifier).refresh();
     } on ServerFailure catch (e) {
-      setState(() {
-        _progress = null;
-        _status = null;
-      });
-      messenger.showSnackBar(
-        SnackBar(content: Text(_explainUploadError(e))),
-      );
+      if (!mounted) return;
+      setState(() => _status = null);
+      messenger.showSnackBar(SnackBar(content: Text(_explainUploadError(e))));
     } on Exception catch (e) {
+      if (!mounted) return;
+      setState(() => _status = null);
+      messenger.showSnackBar(SnackBar(content: Text('Update failed: $e')));
+    }
+  }
+}
+
+const _waitingForWifi = 'Downloaded — waiting for Wi-Fi to install.';
+
+/// The master's own image. Separate from the extension cards because it
+/// installs through a different endpoint and, crucially, confirms
+/// differently: a master accepts an upload and secure boot decides at the
+/// next restart, so success is only ever read back from the device.
+class _MasterCard extends ConsumerStatefulWidget {
+  const _MasterCard({required this.manifest, required this.installed});
+
+  final FirmwareManifest manifest;
+  final String installed;
+
+  @override
+  ConsumerState<_MasterCard> createState() => _MasterCardState();
+}
+
+class _MasterCardState extends ConsumerState<_MasterCard> {
+  double? _progress;
+  String? _status;
+  Uint8List? _bytes;
+
+  bool get _upToDate =>
+      widget.installed.isNotEmpty &&
+      !_versionIsNewer(widget.manifest.version, widget.installed);
+
+  @override
+  Widget build(BuildContext context) {
+    final onBle =
+        ref.watch(currentTransportProvider) == TransportKind.ble;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This master — ${widget.manifest.version}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _upToDate
+                  ? 'Running ${widget.installed}. Up to date.'
+                  : 'Running ${widget.installed.isEmpty ? "an unknown version" : widget.installed}.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (widget.manifest.changelog.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(widget.manifest.changelog),
+            ],
+            const SizedBox(height: 12),
+            if (_progress != null)
+              LinearProgressIndicator(value: _progress)
+            else if (_status != null)
+              Text(_status!)
+            else
+              FilledButton.icon(
+                icon: const Icon(Icons.system_update_alt),
+                label: Text(
+                  _bytes != null && onBle
+                      ? 'Waiting for Wi-Fi'
+                      : _upToDate
+                          ? 'Re-install'
+                          : 'Update this master',
+                ),
+                onPressed: _run,
+              ),
+            if (_bytes != null && onBle) ...[
+              const SizedBox(height: 8),
+              TextButton(
+                // Wi-Fi is never refused; no result to handle.
+                onPressed: () => ref
+                    .read(transportCoordinatorProvider)
+                    .choose(TransportPreference.wifi),
+                child: const Text('Switch to Wi-Fi to install'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _run() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final repo = ref.read(firmwareRepositoryProvider);
+
+    if (_bytes == null) {
       setState(() {
-        _progress = null;
+        _progress = 0;
         _status = null;
       });
-      messenger.showSnackBar(SnackBar(content: Text('Update failed: $e')));
+      try {
+        final bytes = await repo.download(
+          widget.manifest,
+          onProgress: (p) => setState(() => _progress = p),
+        );
+        if (!mounted) return;
+        setState(() {
+          _bytes = bytes;
+          _progress = null;
+        });
+      } on Exception catch (e) {
+        if (!mounted) return;
+        setState(() => _progress = null);
+        messenger.showSnackBar(SnackBar(content: Text('Download failed: $e')));
+        return;
+      }
+    }
+
+    if (ref.read(currentTransportProvider) == TransportKind.ble) {
+      setState(() => _status = _waitingForWifi);
+      return;
+    }
+
+    setState(() => _status = 'Sending to the master…');
+    try {
+      await repo.uploadMasterImage(_bytes!);
+      if (!mounted) return;
+      // A master image is not signature-checked on upload — secure boot
+      // decides at the next boot. A 200 proves nothing, so wait for it to
+      // come back and read the version it is actually running.
+      setState(() => _status = 'Restarting — confirming the version…');
+      final running = await repo.confirmMasterVersion();
+      if (!mounted) return;
+      final ok = !_versionIsNewer(widget.manifest.version, running);
+      setState(() {
+        _bytes = ok ? null : _bytes;
+        _status = ok
+            ? 'Updated. Now running $running.'
+            : 'The master restarted still running $running — it rejected '
+                'the image.';
+      });
+      ref.invalidate(firmwareStatusProvider);
+    } on Exception catch (e) {
+      if (!mounted) return;
+      setState(() => _status = 'Update failed: $e');
     }
   }
 }

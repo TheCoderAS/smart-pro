@@ -44,6 +44,7 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "currentSsid" -> result.success(currentSsid())
+                "bindToWifi" -> result.success(bindToCurrentWifi())
                 "release" -> {
                     releaseJoin()
                     result.success(true)
@@ -108,6 +109,36 @@ class MainActivity : FlutterActivity() {
                 result.success(enabled)
             }
         }
+    }
+
+    /**
+     * Route this app's traffic to the Wi-Fi the phone is already on.
+     *
+     * The story's normal setup path is the user joining the master's
+     * network from Android's own settings, not through the app. Android
+     * sees a network with no internet and silently sends app traffic back
+     * to mobile data, so every request to 192.168.4.1 fails in a way that
+     * looks like broken hardware. Binding only inside join() covered the
+     * app-initiated case and missed the common one.
+     *
+     * Deliberately does NOT require NET_CAPABILITY_INTERNET: that is the
+     * whole point. Callers must release before fetching anything from the
+     * internet, because this binding is process-wide.
+     */
+    private fun bindToCurrentWifi(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val networks = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            cm.allNetworks
+        } else {
+            @Suppress("DEPRECATION")
+            cm.allNetworks
+        }
+        for (n in networks) {
+            val caps = cm.getNetworkCapabilities(n) ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            return cm.bindProcessToNetwork(n)
+        }
+        return false
     }
 
     private fun releaseJoin() {

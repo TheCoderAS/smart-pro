@@ -25,7 +25,17 @@ abstract interface class ControlTransport {
   /// Toggle a relay. Over Wi-Fi, `ch` is a separate field; over BLE the
   /// channel is already encoded in [id] (`ext<slot>_<ch>`), so `ch` is
   /// ignored there.
-  Future<void> setRelay({required String id, required bool on, int? ch});
+  ///
+  /// [masterUid] names the master that owns the switch. Null (or this
+  /// master's own uid) drives a local relay; any other uid is relayed
+  /// across the mesh — which is what makes a mesh dashboard, and Bluetooth
+  /// control of the whole mesh, work at all.
+  Future<void> setRelay({
+    required String id,
+    required bool on,
+    int? ch,
+    String? masterUid,
+  });
 
   /// Turn every switch off (one command, not a per-switch loop).
   Future<void> killAll();
@@ -42,6 +52,11 @@ abstract interface class ControlTransport {
   Future<void> renameExtension({required int slot, required String name});
   Future<void> renameSwitch({required String id, required String name});
   Future<void> renameMaster(String name);
+
+  /// Per-switch power-cut policy: restore the last state, or start off.
+  /// The master owns it; the app only asks for a change and waits for the
+  /// next snapshot to confirm.
+  Future<void> setRestore({required String id, required bool restore});
 
   /// The master's running version + the images staged in its library.
   /// Firmware *transfer* still requires Wi-Fi.

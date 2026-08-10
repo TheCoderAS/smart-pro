@@ -31,7 +31,10 @@ void main() {
     TestWidgetsFlutterBinding.ensureInitialized();
     // Default: no persisted prefs (no masters, no transport preference)
     // so the BLE cold-start paths stay dormant unless a test seeds them.
-    SharedPreferences.setMockInitialValues({});
+    // The welcome screen is marked seen: these tests exercise bootstrap
+    // *after* setup, and a fresh install short-circuits to NeedsWelcome
+    // before any network call. The welcome path has its own test below.
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
     repo = MockAuthRepository();
     store = MockSecureStore();
     when(() => store.writeToken(any(), any())).thenAnswer((_) async {});
@@ -258,5 +261,73 @@ void main() {
     final c = makeContainer();
 
     expect(await bootstrap(c), isA<MasterUnreachable>());
+  });
+
+  test('fresh install with nothing paired → NeedsWelcome, no probe', () async {
+    SharedPreferences.setMockInitialValues({});
+    when(() => repo.info()).thenThrow(const Unreachable());
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<NeedsWelcome>());
+    // The point of the screen: a first launch is a setup story, so we
+    // never reach the network and never show "can't reach your switch".
+    verifyNever(() => repo.info());
+  });
+
+  test('welcome already seen → normal bootstrap', () async {
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
+    when(() => repo.info()).thenThrow(const Unreachable());
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<MasterUnreachable>());
+  });
+
+  test('opens on the last-used master, not whoever answers', () async {
+    // Two masters set up, last on B, phone is on A's network. Opening A's
+    // dashboard under B's name is the failure the story rules out.
+    SharedPreferences.setMockInitialValues({
+      'firstrun.welcome': true,
+      'masters': '[{"uid":"AAAA1111","name":"Hall","ssid":"Unisync-AAAA"},'
+          '{"uid":"BBBB2222","name":"Garage","ssid":"Unisync-BBBB"}]',
+      'masters.lastUsed': 'BBBB2222',
+    });
+    when(() => repo.info())
+        .thenAnswer((_) async => _info.copyWith(uid: 'AAAA1111'));
+    final c = makeContainer();
+
+    final state = await bootstrap(c);
+    expect(state, isA<WrongNetwork>());
+    expect((state as WrongNetwork).wanted.uid, 'BBBB2222');
+    expect(state.found, 'Hall');
+  });
+
+  test('one master set up means whoever answers is the one', () async {
+    SharedPreferences.setMockInitialValues({
+      'firstrun.welcome': true,
+      'masters': '[{"uid":"AAAA1111","name":"Hall"}]',
+      'masters.lastUsed': 'BBBB2222',
+    });
+    when(() => repo.info())
+        .thenAnswer((_) async => _info.copyWith(uid: 'AAAA1111'));
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isNot(isA<WrongNetwork>()));
+  });
+
+  test('meshed masters are one home, so any member answering is right',
+      () async {
+    // The mesh is the switcher entry; which physical master answers is
+    // not something the user chose or should be told about.
+    SharedPreferences.setMockInitialValues({
+      'firstrun.welcome': true,
+      'masters': '[{"uid":"AAAA1111","name":"Hall","meshId":7},'
+          '{"uid":"BBBB2222","name":"Garage","meshId":7}]',
+      'masters.lastUsed': 'BBBB2222',
+    });
+    when(() => repo.info())
+        .thenAnswer((_) async => _info.copyWith(uid: 'AAAA1111'));
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isNot(isA<WrongNetwork>()));
   });
 }

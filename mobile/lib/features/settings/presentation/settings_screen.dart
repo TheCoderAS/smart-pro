@@ -8,6 +8,7 @@ import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/widgets/transport_refusal.dart';
@@ -32,7 +33,10 @@ class SettingsScreen extends ConsumerWidget {
     };
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(
+        title: const Text('Settings'),
+        bottom: const ConnectionBar(),
+      ),
       body: ListView(
         children: [
           const _SectionHeader('Appearance'),
@@ -103,11 +107,15 @@ class SettingsScreen extends ConsumerWidget {
           const Divider(),
           const _SectionHeader('Security'),
           ListTile(
-            leading: const Icon(Icons.password),
-            title: const Text('Change password'),
+            leading: const Icon(Icons.group_off_outlined),
+            // Named for what it does. There are no guest tiers and no
+            // per-person identity, so "remove someone" does not exist —
+            // pretending otherwise would be the lie (story Epic 4).
+            title: const Text('Reset access'),
             subtitle: const Text(
-              'Signs out every device everywhere — including this one, '
-              'briefly, while it reconnects.',
+              'Sets a new password. Everyone who had the old one loses '
+              'access, including you on your other devices — this is the '
+              'only way to un-share.',
             ),
             enabled: info != null,
             onTap: () => _changePassword(context, ref),
@@ -149,6 +157,34 @@ class SettingsScreen extends ConsumerWidget {
                 : () => _removeMaster(context, ref, info.uid),
           ),
           const Divider(),
+          const _SectionHeader('Sharing'),
+          const ListTile(
+            leading: Icon(Icons.people_outline),
+            title: Text('Everyone with the password has full control'),
+            subtitle: Text(
+              'Sharing the password is the whole model — it joins the '
+              'network and signs in. There are no guest accounts and no '
+              'per-person access, so anyone you tell can do anything you '
+              'can. Any number of people can control the home at once.',
+              maxLines: 5,
+            ),
+            isThreeLine: true,
+          ),
+          const Divider(),
+          const _SectionHeader('If you get stuck'),
+          const ListTile(
+            leading: Icon(Icons.restart_alt),
+            title: Text('Factory reset'),
+            subtitle: Text(
+              'Hold the reset button on the back of the box for 9 seconds. '
+              'That returns it to its out-of-box network name and card '
+              'password and forgets every name, setting and extension. It '
+              'cannot be done from the app — a shorter press does nothing.',
+              maxLines: 5,
+            ),
+            isThreeLine: true,
+          ),
+          const Divider(),
           const _SectionHeader('About'),
           const ListTile(
             leading: Icon(Icons.phone_iphone),
@@ -168,7 +204,7 @@ class SettingsScreen extends ConsumerWidget {
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Change password'),
+        title: const Text('Reset access'),
         content: StatefulBuilder(
           builder: (context, setState) {
             final fresh = controller.text;

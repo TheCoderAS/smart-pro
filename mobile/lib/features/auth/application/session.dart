@@ -8,13 +8,16 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../onboarding/application/first_run.dart';
+import '../../settings/application/master_switch.dart';
 import '../data/auth_repository.dart';
 import '../domain/models.dart';
 
 /// Where the app stands with the master it is pointed at.
 ///
 /// The lifecycle (bootstrap):
-///   probing → unreachable            can't open 192.168.4.1
+///   probing → needsWelcome           fresh install, nothing set up yet
+///           → unreachable            can't open 192.168.4.1
 ///           → needsCommissioning     info.auth == false (ops guide §A2:
 ///                                    factory-fresh, API wide open)
 ///           → needsLogin             no stored token, or token rejected
@@ -29,6 +32,40 @@ final class Probing extends SessionState {
 
 final class MasterUnreachable extends SessionState {
   const MasterUnreachable();
+}
+
+/// The session died while the app was on Bluetooth — someone reset access
+/// by changing the password.
+///
+/// Emphatically not a login form: login is Wi-Fi-only by design, so a
+/// login screen here would be a dead end. This is an instruction to go and
+/// sign in on the master's network.
+final class AccessReset extends SessionState {
+  const AccessReset({this.network});
+
+  /// The network name to join, when we know it.
+  final String? network;
+}
+
+/// The phone is on some other master's network. Distinct from unreachable
+/// on purpose: "connect to B's network" is an instruction the user can
+/// follow, "B is out of range" is not, and neither is a login problem.
+final class WrongNetwork extends SessionState {
+  const WrongNetwork({required this.wanted, this.found});
+
+  /// The master the user asked for.
+  final SavedMaster wanted;
+
+  /// The master that answered instead, when we can name it.
+  final String? found;
+}
+
+/// Fresh install with nothing configured. The story is explicit that this
+/// lands on a branded welcome screen rather than an empty dashboard or a
+/// bare login form — and, in practice, rather than "can't reach your
+/// switch", which is what a first launch used to show.
+final class NeedsWelcome extends SessionState {
+  const NeedsWelcome();
 }
 
 final class NeedsCommissioning extends SessionState {
@@ -65,6 +102,21 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   Future<SessionState> build() => _bootstrap();
 
   Future<SessionState> _bootstrap() async {
+    // Before touching the network at all: a first launch with no master
+    // ever paired is a setup story, not a connectivity failure.
+    try {
+      final flags = await ref.read(firstRunProvider.future);
+      if (!flags.welcomeSeen) {
+        final masters = await ref.read(masterRegistryProvider.future);
+        if (masters.isEmpty) return const NeedsWelcome();
+        // Something is already paired (an upgrade from a build without
+        // this screen) — don't show a welcome to an existing owner.
+        await ref.read(firstRunProvider.notifier).markWelcomeSeen();
+      }
+    } on Object catch (e) {
+      log.w('first-run check skipped: $e');
+    }
+
     final DeviceInfo info;
     try {
       info = await _repo.info();
@@ -89,8 +141,28 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       return NeedsCommissioning(info);
     }
 
+    // The app opens on the last-used master, subject to the same checks as
+    // any switch. Something else answering means the phone is on another
+    // master's network — say which one to join rather than quietly opening
+    // a dashboard the user didn't ask for.
+    //
+    // Ahead of the token check on purpose: we have no session for a master
+    // we aren't talking to, and showing a login form for that would be the
+    // exact mix-up the story calls a bug. Only when more than one master
+    // is set up; with one, whoever answers is the one.
+    final wrong = await _wrongMasterAnswered(info.uid);
+    if (wrong != null) return wrong;
+
     final stored = await _store.readToken(info.uid);
     if (stored == null) return NeedsLogin(info);
+
+    // Cache the network name the master reports for itself, so the
+    // "connect to X" copy is right even after a rename and never comes
+    // from the phone's OS.
+    await ref.read(masterRegistryProvider.notifier).ensure(
+          uid: info.uid,
+          ssid: info.ssid,
+        );
 
     ref.read(tokenProvider.notifier).set(stored);
     try {
@@ -112,6 +184,35 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     ref.read(tokenProvider.notifier).set(null);
     await _store.deleteToken(info.uid);
     return NeedsLogin(info);
+  }
+
+  /// [WrongNetwork] when a master answered that isn't the one the app was
+  /// last on, or null to carry on with whoever did answer.
+  Future<WrongNetwork?> _wrongMasterAnswered(String answeredUid) async {
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      if (masters.length < 2) return null;
+      final lastUid =
+          await ref.read(masterRegistryProvider.notifier).lastUsed();
+      if (lastUid == null || lastUid == answeredUid) return null;
+      for (final m in masters) {
+        if (m.uid != lastUid) continue;
+        // Meshed masters are one home: any member answering is the right
+        // answer, and the vault keys them on a shared mesh id.
+        final answered = masters.where((x) => x.uid == answeredUid);
+        if (answered.isNotEmpty &&
+            m.meshId != null &&
+            m.meshId != 0 &&
+            answered.first.meshId == m.meshId) {
+          return null;
+        }
+        final name = answered.isEmpty ? null : answered.first.name;
+        return WrongNetwork(wanted: m, found: name);
+      }
+    } on Object catch (e) {
+      log.w('last-used check skipped: $e');
+    }
+    return null;
   }
 
   /// Attempts a login. On success persists the token (keyed by master
@@ -207,6 +308,26 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
         TransportPreference.bluetooth.name;
   }
 
+  /// The master rejected our proof over Bluetooth: the password changed,
+  /// so every token everywhere died. Route to the instruction screen
+  /// rather than a login form Bluetooth cannot serve.
+  Future<void> handleAccessReset() async {
+    if (state.value is AccessReset) return;
+    final info = switch (state.value) {
+      Authenticated(:final info) => info,
+      _ => null,
+    };
+    ref.read(tokenProvider.notifier).set(null);
+    if (info != null) await _store.deleteToken(info.uid);
+    final masters = ref.read(masterRegistryProvider).value ?? const [];
+    String? network;
+    for (final m in masters) {
+      if (info != null && m.uid == info.uid) network = m.ssid;
+    }
+    network ??= masters.isNotEmpty ? masters.first.ssid : null;
+    state = AsyncValue.data(AccessReset(network: network));
+  }
+
   /// Local sign-out (API §2: "does nothing server side; discard the
   /// token locally").
   Future<void> signOut() async {
@@ -223,6 +344,34 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(_bootstrap);
+  }
+
+  /// Switches the app to another saved master.
+  ///
+  /// Identity is settled by a uid probe before anything is shown, so the
+  /// user never lands on a dashboard that belongs to a different master,
+  /// and never sees a login prompt for what is really a network problem.
+  /// Last-used only moves on a successful arrival — a failed switch must
+  /// not change where the app opens next time.
+  Future<void> switchTo(SavedMaster target) async {
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(() async {
+      final outcome = await ref.read(masterSwitchProvider).switchTo(target);
+      switch (outcome) {
+        case SwitchWrongNetwork(:final target, :final foundName):
+          return WrongNetwork(wanted: target, found: foundName);
+        case SwitchUnreachable():
+          return const MasterUnreachable();
+        case SwitchArrived():
+          final arrived = await _bootstrap();
+          if (arrived is Authenticated) {
+            await ref
+                .read(masterRegistryProvider.notifier)
+                .setLastUsed(target.uid);
+          }
+          return arrived;
+      }
+    });
   }
 
   /// The reconnect dance after any password change (API §6): the

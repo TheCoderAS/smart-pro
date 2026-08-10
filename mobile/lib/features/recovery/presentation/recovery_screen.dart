@@ -5,11 +5,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/ble/recovery_service.dart';
 import '../../../core/crypto/recovery_hmac.dart';
+import '../../../core/widgets/password_field.dart';
 
-/// Lost-password recovery over Bluetooth (API §8). Reachable while
-/// logged out, from the login screen. Standalone recovery returns the
-/// card password; mesh recovery generates a new mesh password and
-/// pushes it to every master — one master recovers the whole house.
+/// Lost-password recovery over Bluetooth (story Epic 8). Reachable while
+/// logged out, from the login screen and the disconnected screen.
+///
+/// The user supplies the recovery key from the card *and* the password they
+/// want. The master answers plainly — accepted or rejected — and a
+/// rejection carries the wait before the next attempt, which is shown as a
+/// countdown on the button so the slowdown reads as security rather than
+/// breakage. Scope is the master's call: recovering a meshed master
+/// recovers the whole home, a standalone one recovers that device.
 class RecoveryScreen extends ConsumerStatefulWidget {
   const RecoveryScreen({super.key});
 
@@ -23,15 +29,35 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
   _Phase _phase = _Phase.idle;
   List<RecoveryDevice> _devices = const [];
   RecoveryDevice? _selected;
-  String? _password;
+  RecoveryVerdict? _verdict;
   String? _error;
-  int _failures = 0;
   final _keyController = TextEditingController();
+  final _passController = TextEditingController();
+  final _confirmController = TextEditingController();
+
+  /// Seconds left on the device-dictated backoff. Counted down for
+  /// display only — the master refuses an early attempt regardless.
+  int _waitLeft = 0;
+  Timer? _waitTimer;
 
   @override
   void dispose() {
+    _waitTimer?.cancel();
     _keyController.dispose();
+    _passController.dispose();
+    _confirmController.dispose();
     super.dispose();
+  }
+
+  void _startCountdown(int seconds) {
+    _waitTimer?.cancel();
+    setState(() => _waitLeft = seconds);
+    if (seconds <= 0) return;
+    _waitTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return t.cancel();
+      setState(() => _waitLeft--);
+      if (_waitLeft <= 0) t.cancel();
+    });
   }
 
   @override
@@ -112,12 +138,22 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
   }
 
   Widget _keyEntry() {
+    final name = _selected?.name ?? 'this switch';
+    final locked = _waitLeft > 0;
+    final canSubmit = !locked &&
+        _passController.text.length >= 8 &&
+        _passController.text == _confirmController.text;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        Text(name, style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        // Named, so a household with several cards grabs the right one —
+        // and the recovery card is not the password card.
         Text(
-          _selected?.name ?? '',
-          style: Theme.of(context).textTheme.titleLarge,
+          'Use the recovery card for $name. It is the card with the long '
+          'key on it, not the one with the password.',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 16),
         TextField(
@@ -125,25 +161,38 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
           autocorrect: false,
           enableSuggestions: false,
           maxLength: 39, // 32 hex + separators people may type
-          decoration: InputDecoration(
+          decoration: const InputDecoration(
             labelText: 'Recovery key',
-            helperText: '32 characters, printed on the card in the box.',
-            errorText: _error,
-            errorMaxLines: 3,
+            helperText: '32 characters, printed on the recovery card.',
           ),
         ),
-        const SizedBox(height: 16),
-        FilledButton(
-          onPressed: _recover,
-          child: const Text('Recover'),
+        PasswordField(
+          controller: _passController,
+          label: 'New password',
+          helper: 'At least 8 characters. This becomes the Wi-Fi password '
+              'and the sign-in.',
+          helperMaxLines: 3,
+          onChanged: (_) => setState(() {}),
         ),
-        if (_failures >= 3) ...[
-          const SizedBox(height: 16),
+        PasswordField(
+          controller: _confirmController,
+          label: 'Repeat password',
+          onChanged: (_) => setState(() {}),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 8),
           Text(
-            'Careful: five wrong attempts lock recovery for 15 minutes.',
+            _error!,
             style: TextStyle(color: Theme.of(context).colorScheme.error),
           ),
         ],
+        const SizedBox(height: 16),
+        FilledButton(
+          onPressed: canSubmit ? _recover : null,
+          // The countdown lives on the button, so waiting reads as the
+          // switch protecting itself rather than the app hanging.
+          child: Text(locked ? 'Try again in ${_waitLeft}s' : 'Recover'),
+        ),
       ],
     );
   }
@@ -159,6 +208,7 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
   }
 
   Widget _done() {
+    final whole = _verdict?.wholeHome ?? false;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -169,28 +219,20 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
         ),
         const SizedBox(height: 16),
         Text(
-          'Password recovered',
+          whole
+              ? 'Done. Your home is being recovered.'
+              : 'Done. This switch is being recovered.',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.titleLarge,
         ),
         const SizedBox(height: 16),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: SelectableText(
-              _password ?? '',
-              textAlign: TextAlign.center,
-              style: Theme.of(context)
-                  .textTheme
-                  .headlineSmall
-                  ?.copyWith(fontFamily: 'monospace'),
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        const Text(
-          'Join the switch’s Wi-Fi with this password, then sign in '
-          'with it.',
+        Text(
+          whole
+              ? 'Every master in the mesh is taking the new password. The '
+                  'network keeps its name — join it again with the password '
+                  'you just chose, then sign in.'
+              : 'The switch is restarting its network. Join it again with '
+                  'the password you just chose, then sign in.',
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 24),
@@ -253,22 +295,35 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
       _error = null;
     });
     try {
-      final password = await ref
-          .read(recoveryServiceProvider)
-          .recover(target, _keyController.text);
+      final verdict = await ref.read(recoveryServiceProvider).recover(
+            target: target,
+            recoveryKey: _keyController.text,
+            newPassword: _passController.text,
+          );
       if (!mounted) return;
+      if (verdict.accepted) {
+        setState(() {
+          _verdict = verdict;
+          _phase = _Phase.done;
+        });
+        return;
+      }
       setState(() {
-        _password = password;
-        _phase = _Phase.done;
+        _phase = _Phase.keyEntry;
+        _error = verdict.error == 'wrong recovery key'
+            ? "That key doesn't match this switch. Check you have the "
+                'recovery card for ${target.name}.'
+            : 'The switch turned that down.';
       });
+      // Straight from the device — the app never computes a backoff.
+      _startCountdown(verdict.waitSeconds);
     } on TimeoutException {
       if (!mounted) return;
       setState(() {
-        _failures++;
         _phase = _Phase.keyEntry;
-        // Silence is the failure signal (API §8).
-        _error = 'No answer from the switch. That usually means the key '
-            'is wrong — check it against the card.';
+        // Silence now means a broken link, not a wrong key: the master
+        // answers every attempt explicitly.
+        _error = 'No answer from the switch. Move closer and try again.';
       });
     } on Exception catch (e) {
       if (!mounted) return;

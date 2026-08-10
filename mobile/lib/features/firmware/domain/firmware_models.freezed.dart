@@ -216,8 +216,8 @@ return $default(_that.type,_that.version,_that.sec,_that.size,_that.sig,_that.ur
 /// @nodoc
 @JsonSerializable()
 
-class _FirmwareManifest implements FirmwareManifest {
-  const _FirmwareManifest({required this.type, required this.version, this.sec = 0, this.size = 0, this.sig = '', this.url = '', this.changelog = ''});
+class _FirmwareManifest extends FirmwareManifest {
+  const _FirmwareManifest({required this.type, required this.version, this.sec = 0, this.size = 0, this.sig = '', this.url = '', this.changelog = ''}): super._();
   factory _FirmwareManifest.fromJson(Map<String, dynamic> json) => _$FirmwareManifestFromJson(json);
 
 @override final  int type;

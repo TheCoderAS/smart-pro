@@ -5,14 +5,16 @@ import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/ws/state_dto.dart';
 
-/// Long-press affordance on a switch tile. The new name lands via
-/// POST /api/switch/rename; the next snapshot repaints every consumer.
+/// Long-press affordance on a switch tile: rename, and the power-cut
+/// policy that the story puts in this same menu. Both land as authenticated
+/// mutations; the next snapshot repaints every consumer.
 Future<void> showRenameSwitchSheet(
   BuildContext context,
   WidgetRef ref,
   SwitchState sw,
 ) {
   final controller = TextEditingController(text: sw.name);
+  var restore = sw.restore;
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -26,18 +28,24 @@ Future<void> showRenameSwitchSheet(
       child: StatefulBuilder(
         builder: (context, setState) {
           final name = controller.text.trim();
-          final canSave = name.isNotEmpty && name != sw.name;
+          final renamed = name.isNotEmpty && name != sw.name;
+          final policyChanged = restore != sw.restore;
+          final canSave = renamed || policyChanged;
           Future<void> save() async {
             final messenger = ScaffoldMessenger.of(context);
+            final control = ref.read(activeControlProvider);
             Navigator.of(sheetContext).pop();
             try {
-              await ref
-                  .read(activeControlProvider)
-                  .renameSwitch(id: sw.id, name: name);
+              if (renamed) {
+                await control.renameSwitch(id: sw.id, name: name);
+              }
+              if (policyChanged) {
+                await control.setRestore(id: sw.id, restore: restore);
+              }
             } on Exception {
               messenger.showSnackBar(
                 const SnackBar(
-                  content: Text('Rename failed — check the connection.'),
+                  content: Text("Couldn't save — check the connection."),
                 ),
               );
             }
@@ -48,7 +56,7 @@ Future<void> showRenameSwitchSheet(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Rename switch',
+                'Switch settings',
                 style: Theme.of(sheetContext).textTheme.titleLarge,
               ),
               const SizedBox(height: 16),
@@ -61,6 +69,22 @@ Future<void> showRenameSwitchSheet(
                 onSubmitted: (_) {
                   if (canSave) save();
                 },
+              ),
+              const SizedBox(height: 8),
+              // Default is "always start off": nothing energizes after an
+              // outage unless this switch was opted in. Restoring can only
+              // ever turn a switch on, never off.
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: restore,
+                onChanged: (v) => setState(() => restore = v),
+                title: const Text('Restore after a power cut'),
+                subtitle: Text(
+                  restore
+                      ? 'Comes back on if it was on when the power went.'
+                      : 'Always starts off. Nothing turns on by itself.',
+                ),
+                isThreeLine: false,
               ),
               const SizedBox(height: 8),
               FormActions(

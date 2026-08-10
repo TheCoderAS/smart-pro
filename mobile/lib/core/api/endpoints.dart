@@ -21,6 +21,7 @@ abstract final class Api {
   static const relay = '/api/relay'; // TOKEN, id + state + ch
   static const relayKillAll = '/api/relay/killall'; // TOKEN
   static const switchRename = '/api/switch/rename'; // TOKEN, id + name
+  static const switchRestore = '/api/switch/restore'; // TOKEN, id + restore
   static const switchReorder = '/api/switch/reorder'; // TOKEN, plain
 
   // Extensions
@@ -37,6 +38,7 @@ abstract final class Api {
   static const meshInvite = '/api/mesh/invite'; // TOKEN
   static const meshJoin = '/api/mesh/join'; // TOKEN, mac + pin
   static const meshLeave = '/api/mesh/leave'; // TOKEN
+  static const meshKick = '/api/mesh/kick'; // TOKEN, uid (online only)
   static const meshRename = '/api/mesh/rename'; // TOKEN, name
   static const meshPasswd = '/api/mesh/passwd'; // TOKEN, old + pass + name
   static const meshRelay = '/api/mesh/relay'; // TOKEN, peer_uid + sw_id + ch

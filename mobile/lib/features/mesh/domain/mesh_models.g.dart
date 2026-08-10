@@ -32,14 +32,22 @@ Map<String, dynamic> _$MeshStatusToJson(_MeshStatus instance) =>
     };
 
 _MeshPeer _$MeshPeerFromJson(Map<String, dynamic> json) => _MeshPeer(
+  uid: json['uid'] as String? ?? '',
   name: json['name'] as String? ?? '',
   fw: json['fw'] as String? ?? '',
+  online: json['online'] as bool? ?? true,
+  presenceRaw: json['presence'] as String? ?? 'online',
+  lastSeen: (json['last_seen'] as num?)?.toInt() ?? 0,
   credStale: json['cred_stale'] as bool? ?? false,
 );
 
 Map<String, dynamic> _$MeshPeerToJson(_MeshPeer instance) => <String, dynamic>{
+  'uid': instance.uid,
   'name': instance.name,
   'fw': instance.fw,
+  'online': instance.online,
+  'presence': instance.presenceRaw,
+  'last_seen': instance.lastSeen,
   'cred_stale': instance.credStale,
 };
 

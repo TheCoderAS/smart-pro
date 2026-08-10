@@ -53,6 +53,10 @@ class TransportCoordinator {
     Future<void> useWifi() async {
       _ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
       await _ref.read(bleSessionProvider.notifier).deactivate();
+      // Pin this app's traffic to the master's network even when the user
+      // joined it from the phone's own settings — otherwise Android routes
+      // us back to mobile data and every request looks like dead hardware.
+      await wifi.bindToWifi();
     }
 
     Future<void> useBle() async {
@@ -63,6 +67,9 @@ class TransportCoordinator {
         return;
       }
       _ref.read(currentTransportProvider.notifier).set(TransportKind.ble);
+      // Bluetooth doesn't want the phone pinned to a network with no
+      // internet; give it its own routing back.
+      await wifi.release();
       final meshId = await _pairedMeshId();
       await _ref.read(bleSessionProvider.notifier).activate(meshId: meshId);
     }
