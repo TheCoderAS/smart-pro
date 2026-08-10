@@ -5,6 +5,9 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/storage/master_registry.dart';
+import '../../../core/transport/access_reset.dart';
+import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_coordinator.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
 import '../application/session.dart';
@@ -19,6 +22,11 @@ class SessionGate extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(sessionProvider);
 
+    // The password was changed while we were on Bluetooth, so the token
+    // died. BLE has no login — show the instruction screen, never a
+    // login form, until a Wi-Fi sign-in succeeds (v5.1 Epic 5).
+    if (ref.watch(accessResetProvider)) return const _AccessResetScreen();
+
     return switch (session.value) {
       Authenticated() => const DashboardScreen(),
       final NeedsLogin s => LoginScreen(state: s),
@@ -28,6 +36,74 @@ class SessionGate extends ConsumerWidget {
           body: Center(child: CircularProgressIndicator()),
         ),
     };
+  }
+}
+
+/// Shown when a master rejected our session over Bluetooth: the password
+/// changed, so every token everywhere died. Bluetooth mode is unusable
+/// until a Wi-Fi sign-in completes, so this is an instruction — not a
+/// login form and not a generic error (v5.1 Epic 5).
+class _AccessResetScreen extends ConsumerWidget {
+  const _AccessResetScreen();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context)!;
+    // Name the network the user has to join, when we know it.
+    final masters = ref.watch(masterRegistryProvider).value ?? const [];
+    final ssid = masters
+        .map((m) => m.ssid)
+        .firstWhere((s) => s != null && s.isNotEmpty, orElse: () => null);
+
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.lock_reset_rounded,
+                  size: 56,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  l10n.accessResetTitle,
+                  style: Theme.of(context).textTheme.titleLarge,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  ssid == null
+                      ? l10n.accessResetBodyGeneric
+                      : l10n.accessResetBody(ssid),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton.icon(
+                  onPressed: () async {
+                    // Back to Wi-Fi, clear the flag, re-probe: the normal
+                    // login screen takes it from here.
+                    await ref
+                        .read(transportCoordinatorProvider)
+                        .choose(TransportPreference.wifi);
+                    ref.read(accessResetProvider.notifier).clear();
+                    await ref.read(sessionProvider.notifier).refresh();
+                  },
+                  icon: const Icon(Icons.wifi_rounded),
+                  label: Text(l10n.joinWifi),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

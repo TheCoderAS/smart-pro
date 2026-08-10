@@ -1,12 +1,28 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/dio_client.dart';
 import '../logging/log.dart';
+import '../permissions/scan_permissions.dart';
 import '../storage/master_registry.dart';
 import '../wifi/wifi_service.dart';
 import '../ws/state_socket.dart';
 import 'ble_session.dart';
 import 'control_transport.dart';
 import 'transport_manager.dart';
+
+/// Outcome of a transport choice. Epic 5 requires both gates to run
+/// *before* the mode changes, so a refusal leaves the user in their
+/// current mode with an explanation — never half-switched.
+enum TransportChoice {
+  ok,
+
+  /// No Wi-Fi-issued session yet. BLE has no login, so the user must
+  /// sign in over Wi-Fi first.
+  needsWifiLogin,
+
+  /// The OS refused the nearby-devices/Bluetooth permission.
+  permissionDenied,
+}
 
 final transportCoordinatorProvider =
     Provider<TransportCoordinator>(TransportCoordinator.new);
@@ -40,6 +56,12 @@ class TransportCoordinator {
     }
 
     Future<void> useBle() async {
+      // Never flip into BLE without a session and permission — the mode
+      // must not change unless it can actually work (Epic 5).
+      if (await canUseBle() != TransportChoice.ok) {
+        await useWifi();
+        return;
+      }
       _ref.read(currentTransportProvider.notifier).set(TransportKind.ble);
       final meshId = await _pairedMeshId();
       await _ref.read(bleSessionProvider.notifier).activate(meshId: meshId);
@@ -90,10 +112,32 @@ class TransportCoordinator {
     }
   }
 
-  /// Explicit user choice from the status pill — persist and apply.
-  Future<void> choose(TransportPreference pref) async {
+  /// Can BLE actually be used right now? Checked *before* any mode
+  /// change: a Wi-Fi-issued session must exist (BLE has no login) and
+  /// the OS permission must be granted.
+  Future<TransportChoice> canUseBle() async {
+    if (_ref.read(tokenProvider) == null) {
+      return TransportChoice.needsWifiLogin;
+    }
+    if (!await ensureBlePermissions()) {
+      return TransportChoice.permissionDenied;
+    }
+    return TransportChoice.ok;
+  }
+
+  /// Explicit user choice from the status pill or Settings.
+  ///
+  /// For Bluetooth, both gates run **before** the preference is
+  /// persisted or the transport flipped — a refusal returns the reason
+  /// and leaves the user exactly where they were (Epic 5).
+  Future<TransportChoice> choose(TransportPreference pref) async {
+    if (pref == TransportPreference.bluetooth) {
+      final gate = await canUseBle();
+      if (gate != TransportChoice.ok) return gate;
+    }
     await _ref.read(transportPreferenceProvider.notifier).set(pref);
     await reconcile();
+    return TransportChoice.ok;
   }
 
   Future<int?> _pairedMeshId() async {
