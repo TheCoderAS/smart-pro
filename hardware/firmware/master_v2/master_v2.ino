@@ -3810,13 +3810,23 @@ static void setup_web(void) {
         name.trim();
         if (name.length() == 0) name = "Unisync";
         if (name.length() > 31) name = name.substring(0,31);
-        /* A new mesh gets a real password and a real auth key. Previously it
-         * inherited the compiled-in default, which also gated
-         * /api/ota/image -- so every new mesh shipped with 12345678. */
+        /* The mesh password is the user's to choose (UX stories v5.1
+         * Epic 7): it becomes the Wi-Fi key AND the login for the whole
+         * home, and the guided transition tells them to rejoin with it.
+         * Generating it here and only printing it to serial locked the
+         * owner out of their own network -- the AP came back on an SSID
+         * whose password nobody knew, recoverable only over BLE.
+         * Same rules as /api/mesh/passwd: >=8 chars, clamp at 63. */
+        String pass = server.arg("pass");
+        pass.trim();
+        if (pass.length() < 8) {
+            server.send(400,"application/json",
+                "{\"error\":\"Mesh password must be at least 8 characters\"}");
+            return;
+        }
+        if (pass.length() > 63) pass = pass.substring(0,63);
         {
-            char gen[13];
-            rand_hex(gen, 12);
-            strncpy(mesh_pass, gen, sizeof(mesh_pass)-1);
+            strncpy(mesh_pass, pass.c_str(), sizeof(mesh_pass)-1);
             mesh_pass[sizeof(mesh_pass)-1] = 0;
             for (int k = 0; k < 16; k += 4) {
                 uint32_t r = esp_random();
@@ -3830,7 +3840,7 @@ static void setup_web(void) {
             prefs.putBytes("authkey", mesh_auth_key, 16);
             prefs.putUInt("credver", cred_version);
             prefs.end();
-            Serial.printf("[MESH] created, password: %s\n", gen);
+            Serial.println("[MESH] created with the supplied password");
             ble_update_adv_data();
         }
         strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);

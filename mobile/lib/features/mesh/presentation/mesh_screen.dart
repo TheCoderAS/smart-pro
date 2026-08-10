@@ -242,11 +242,62 @@ class _Actions extends ConsumerWidget {
   }
 
   Future<void> _createMesh(BuildContext context, WidgetRef ref) async {
-    final name = await _promptText(context, 'Create a mesh', 'Mesh name');
-    if (name == null || name.isEmpty) return;
+    final nameController = TextEditingController();
+    final passController = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Create a mesh'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final name = nameController.text.trim();
+            final canSave = name.isNotEmpty && passController.text.length >= 8;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  autofocus: true,
+                  maxLength: 31,
+                  decoration: const InputDecoration(labelText: 'Mesh name'),
+                  onChanged: (_) => setState(() {}),
+                ),
+                PasswordField(
+                  controller: passController,
+                  label: 'Mesh password',
+                  helper: 'At least 8 characters. This becomes the Wi-Fi '
+                      'password and the sign-in for the whole home.',
+                  helperMaxLines: 3,
+                ),
+                const SizedBox(height: 12),
+                // Pre-announce the drop: the network restarts the moment
+                // the mesh is created (v5.1 Epic 7).
+                Text(
+                  'Your network will restart under the new mesh name. '
+                  'You will be asked to rejoin it with this password.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 16),
+                FormActions(
+                  saveLabel: 'Create',
+                  canSave: canSave,
+                  onCancel: () => Navigator.of(dialogContext).pop(false),
+                  onSave: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    final name = nameController.text.trim();
+    final pass = passController.text;
+    nameController.dispose();
+    passController.dispose();
+    if (!(ok ?? false) || name.isEmpty || pass.length < 8) return;
     if (!context.mounted) return;
     await _guard(context, ref, () async {
-      await ref.read(meshRepositoryProvider).create(name: name);
+      await ref.read(meshRepositoryProvider).create(name: name, pass: pass);
     });
   }
 

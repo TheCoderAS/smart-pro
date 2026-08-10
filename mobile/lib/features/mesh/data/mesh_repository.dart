@@ -43,8 +43,12 @@ class MeshRepository {
   }
 
   /// Standalone → mesh; this master becomes the first member.
-  Future<void> create({required String name}) =>
-      _post(Api.meshCreate, {'name': name});
+  ///
+  /// The password is the user's choice and becomes both the mesh Wi-Fi
+  /// key and the login for the whole home (v5.1 Epic 7). Firmware
+  /// requires at least 8 characters.
+  Future<void> create({required String name, required String pass}) =>
+      _post(Api.meshCreate, {'name': name, 'pass': pass});
 
   /// Run on a master already in the mesh; yields the mac/pin the
   /// joining master enters.
