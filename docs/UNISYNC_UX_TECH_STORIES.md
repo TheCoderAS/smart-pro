@@ -1,7 +1,9 @@
 # Unisync — UX & Tech Stories
 
-**Version 5.0 · FINAL — Signed off 10 August 2026**
-**Status: FROZEN.** This document is the signed source of truth for Unisync app UX and supporting firmware behavior. Changes after this point require a new version (5.1+) with the change and its reason recorded — no silent edits.
+**Version 5.1 · Signed off 10 August 2026**
+**Status: FROZEN.** This document is the signed source of truth for Unisync app UX and supporting firmware behavior. Changes after this point require a new version with the change and its reason recorded — no silent edits.
+
+*Changes in 5.1 (10 Aug 2026, Product Owner):* mesh removal reworked — departing master deletes its own mesh credentials before reboot, remaining mesh entirely unaffected, kick disabled for offline masters; factory reset defined as 9-second hold of the physical reset button; sold-without-reset recorded as out of product scope.
 
 Covers standalone-master operation (a master not joined to a mesh) unless stated otherwise. All product decisions in this document are made; the Open items section contains only engineering specs to be written and test coverage to be added, each of which is an output of this document, not a blocker to it.
 
@@ -88,8 +90,9 @@ As a user, I want my switches to just appear, keep their names, survive power cu
 - **An offline extension can be removed** from the extension list — in standalone and mesh mode alike — with a confirmation stating its names and settings will be forgotten. If that physical board later reappears on the bus, it's adopted as new, with default names, like any first-time extension.
 
 **Factory reset**
-- Factory reset is performed with a **physical switch on the back of the box** — never from the app. It returns the master to its out-of-box state: factory network name, card password, empty registry (names, ordering, restore policies, states, extension registrations all wiped). Correct and intended for ownership transfer: the new owner's experience is identical to unboxing.
+- Factory reset is performed by **holding the physical reset switch on the back of the box for 9 seconds** — never from the app. A shorter press does nothing destructive. It returns the master to its out-of-box state: factory network name, card password, empty registry (names, ordering, restore policies, states, extension registrations all wiped). Correct and intended for ownership transfer: the new owner's experience is identical to unboxing.
 - The previous owner's app discovers this naturally: the stored session fails, and login with the old password fails — the standard screens handle it. The stale entry can be removed from the switcher like any other.
+- A device sold or transferred *without* a factory reset is out of product scope — the product does not defend against or account for it (v5.1 decision).
 
 **Power-cycle behavior** *(standalone master; mesh behavior specified separately)*
 - Each switch has a setting: **restore last state** after a power cut, or **always start off**. It lives in the same menu as rename.
@@ -264,7 +267,9 @@ As a mesh user, I want to see every master in my mesh and remove one when it's l
 
 **Acceptance criteria**
 - A **Mesh details** menu lists all member masters with name, online/offline state, and firmware version, and offers per-master actions — including **Remove from mesh**.
+- **Remove is available only for online masters.** A master that is offline cannot be kicked — the action is disabled, with copy explaining the master must be reachable to be removed. (Removal requires the target to delete its mesh credentials; an unreachable master can't.)
 - Removing a master (or a master leaving) is explicit and confirmed — copy states plainly what happens: that master restarts as a standalone device with the network name and password it had before joining, and its switches leave the mesh dashboard.
+- **The rest of the mesh is entirely unaffected**: no restart, no credential change, no interruption for any remaining master or any connected user. Removal is invisible to everyone except the master that left.
 - The removed master keeps everything of its own: its extensions, names, ordering, restore policies, and state are untouched — leaving a mesh is a network divorce, not a reset.
 - After removal, it reappears in the app's switcher as a standalone master (its old vault entry, restored); the user logs into it with its standalone password.
 - Removing the last other master leaves a one-master mesh, which is valid; dissolving the mesh entirely (the last master reverting to standalone) is the same action applied to the final member.
@@ -289,7 +294,7 @@ As a user, I want meshes and standalone masters in one switcher, clearly told ap
 - **Grace window for transition states** *(refines the Epic 1 connection-awareness rule)*: the ~5-second "show the user" target applies to *persistent* loss. During roaming handoffs, the app holds the last-known state and connection indicator steady for a short grace period (a few seconds); only a drop that outlives the grace window surfaces as "reconnecting." This keeps the no-flap guarantee and the always-aware guarantee from fighting each other: silent when the handoff succeeds, honest when it doesn't.
 - The auto-connect tip is platform-specific under the hood (auto-join on one platform, saved-network behavior on the other) but presented as one plain sentence; shown once on first mesh entry, dismissible, findable again in settings.
 - **Switch order lives on the owning master** (as standalone); **master-card order lives in app storage only**, per user, by design.
-- **Leaving or being removed from a mesh is credential revocation, enforced cryptographically.** The departing master reboots with its retained standalone credentials (kept in its storage from before the join, exactly as the pre-mesh state). The remaining mesh rotates or invalidates the departed member's mesh credential so the departed master — or anyone who extracted its stored secrets — can no longer participate in or listen to mesh traffic. "Kicked means deaf": exclusion is enforced by the mesh, not by trusting the departed device to behave.
+- **Leaving or being removed from a mesh is self-deletion, with the mesh untouched.** The departing master deletes its mesh credentials from its own storage *before* rebooting into its retained standalone credentials — deletion first, reboot second, so a failed reboot never leaves a device holding both identities. The remaining mesh performs no rotation, restart, or credential change of any kind. This is why kick requires the target online: the removal command must reach the target and be acknowledged (credentials deleted) before the app reports success. Exclusion of a departed device is by its own deletion, not mesh-side enforcement — a deliberately trust-based model; hostile or tampered departing devices are accepted as out of product scope (v5.1 decision).
 - Mesh rename and password change follow the same restart-with-prior-confirmation mechanics as creation; scope for token invalidation is the whole mesh.
 
 
@@ -344,7 +349,7 @@ All product decisions in this document are made. What follows is implementation 
 6. A stable mesh identifier that survives mesh rename, exposed via the device info endpoint, for the app's switcher and vault; the info endpoint also reports the master's own current network name for instruction copy (Epics 6, 7).
 7. Latency and state-propagation targets for whole-mesh control through a single Bluetooth-connected master (Epic 7).
 8. Roaming parameters: handoff grace-window duration, Bluetooth signal-ranking hysteresis thresholds, and mid-handoff command queue timeout (Epic 7).
-9. Mesh member removal: credential rotation/invalidation on kick or leave, so a departed master cannot rejoin or listen ("kicked means deaf") (Epic 7).
+9. Mesh member removal protocol: removal command, credential self-deletion with acknowledgment before reboot, and the online-only kick gate (Epic 7).
 10. Recovery protocol assembly: challenge–response plus new-password wrapping under a recovery-key-derived key, and the device-side backoff schedule with mesh-synced counter (Epic 8).
 11. Bluetooth per-command proof protocol: session nonce issuance, counter handling, and device-side verification (Epic 5).
 
@@ -355,10 +360,10 @@ All product decisions in this document are made. What follows is implementation 
 15. The Epic 5 acceptance list, once built, including permission-denied paths on both platforms.
 16. Wrong-network / probe-identity switching flows, including stale vault entries after a factory reset (Epic 6).
 17. Mesh creation and 2-click join end-to-end — factory-fresh *and* previously-used masters — including guided network transitions and failed-join error states (Epic 7).
-18. Mesh member removal: departed master reverts to its standalone credentials with registry intact, and is verifiably excluded from mesh traffic afterward (Epic 7).
+18. Mesh member removal: departed master's mesh credentials verifiably deleted before reboot; it reverts to standalone credentials with registry intact; remaining mesh continues with zero interruption; kick attempt on an offline master is refused (Epic 7).
 19. Whole-mesh control and state freshness over Bluetooth; mesh peer offline/online card behavior under flapping conditions (Epic 7).
 20. Roaming walk-test in both modes: continuous control while moving through all masters' coverage, commands issued mid-handoff, no visible reconnect states on successful handoffs (Epic 7).
 21. Mesh firmware rollout: one push propagates to all masters; extension images stored by every master and applied by type; per-master version verification post-restart (Epic 3).
 22. Recovery: recorded exchange yields no recovery key and no new password; device-enforced backoff holds against a client that ignores it; backoff continues, not resets, when retrying against a different mesh master; the connected master's own key recovers, any other master's key rejects; mesh-wide recovery propagates to all peers; standalone recovery resets the single device (Epic 8).
 23. Extension removal and re-adoption: removed extension disappears; the same physical board reappearing is adopted fresh with defaults (Epic 2).
-24. Factory reset via the physical switch: full registry wipe, factory credentials restored, prior app sessions and logins fail cleanly (Epic 2).
+24. Factory reset via 9-second hold of the physical switch: full registry wipe, factory credentials restored, prior app sessions and logins fail cleanly; shorter presses have no destructive effect (Epic 2).
