@@ -11,11 +11,13 @@ import '../../../app/theme.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/link_state.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
+import '../../onboarding/presentation/first_run_prompts.dart';
 import '../../settings/presentation/master_switcher.dart';
 import '../../switches/presentation/rename_sheet.dart';
 import '../application/switch_overrides.dart';
@@ -31,9 +33,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    // Decide Wi-Fi vs BLE from the user's preference + reachability.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(transportCoordinatorProvider).reconcile();
+    // Decide Wi-Fi vs BLE from the user's preference + reachability, then
+    // ask the two once-only setup questions (story Epic 1 steps 4 and 5).
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await ref.read(transportCoordinatorProvider).reconcile();
+      if (!mounted) return;
+      await runFirstRunPrompts(context, ref);
     });
   }
 
@@ -51,6 +56,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     ref.listen(activeStateProvider, (prev, next) {
       final snap = next.value;
       if (snap != null) {
+        // A snapshot is proof the link works, on either transport — it
+        // beats waiting for the next heartbeat tick.
+        ref.read(linkStateProvider.notifier).markAlive();
         ref.read(switchOverridesProvider.notifier).reconcile(snap.switches);
         ref.read(masterRegistryProvider.notifier).ensure(
               uid: snap.selfUid,
@@ -458,12 +466,14 @@ class _QuickTools extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context)!;
+    final linkUp = ref.watch(linkStateProvider).controlsEnabled;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
       child: _QuickButton(
         icon: Icons.flash_off_rounded,
         label: l10n.allOff,
-        onTap: () => _killAll(ref),
+        // Same rule as the tiles: no acting on a link we can't confirm.
+        onTap: linkUp ? () => _killAll(ref) : null,
       ),
     ).animate().fadeIn(duration: 300.ms).slideY(begin: 0.2, curve: Curves.easeOut);
   }
@@ -494,33 +504,36 @@ class _QuickButton extends StatelessWidget {
 
   final IconData icon;
   final String label;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        onTap: onTap,
+    return Opacity(
+      opacity: onTap == null ? 0.4 : 1,
+      child: Material(
+        color: scheme.surface,
         borderRadius: BorderRadius.circular(16),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: scheme.outlineVariant),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 20, color: scheme.primary),
-              const SizedBox(width: 8),
-              Text(
-                label,
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-            ],
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: scheme.outlineVariant),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 20, color: scheme.primary),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -700,16 +713,25 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
     final on = overrides[sw.id] ?? sw.on;
     final scheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context)!;
+    // Two separate reasons a tile can't be driven, and they read
+    // differently to the user: the board is offline, or *we* are. When the
+    // link is down the states on screen are last-seen values, not truth, so
+    // the story says controls disable rather than letting someone find out
+    // by tapping (Epic 1, connection awareness).
+    final linkUp = ref.watch(linkStateProvider).controlsEnabled;
     final online = sw.online;
-    final stateLabel = online
-        ? (on ? l10n.switchOn : l10n.switchOff)
-        : l10n.switchOffline;
+    final live = online && linkUp;
+    final stateLabel = !online
+        ? l10n.switchOffline
+        : !linkUp
+            ? '${on ? l10n.switchOn : l10n.switchOff} · last seen'
+            : (on ? l10n.switchOn : l10n.switchOff);
 
     final accent = UnisyncColors.accent;
 
     return Semantics(
       label: '${sw.name.isEmpty ? sw.id : sw.name}, $stateLabel',
-      button: online,
+      button: live,
       toggled: on,
       child: AnimatedScale(
         scale: _pressed ? 0.96 : 1,
@@ -750,11 +772,11 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
           ),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
-            onTap: online ? () => _toggle(on) : null,
+            onTap: live ? () => _toggle(on) : null,
             // Rename works on either transport (firmware v11.18.0).
             onLongPress: () => showRenameSwitchSheet(context, ref, sw),
-            onTapDown: online ? (_) => setState(() => _pressed = true) : null,
-            onTapUp: online ? (_) => setState(() => _pressed = false) : null,
+            onTapDown: live ? (_) => setState(() => _pressed = true) : null,
+            onTapUp: live ? (_) => setState(() => _pressed = false) : null,
             onTapCancel: () => setState(() => _pressed = false),
             child: Padding(
               padding: const EdgeInsets.all(16),

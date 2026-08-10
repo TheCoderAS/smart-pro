@@ -19,7 +19,9 @@ void main() {
       (tester) async {
     // No paired master / no transport preference — the BLE cold-start
     // path stays dormant and the app lands on the unreachable screen.
-    SharedPreferences.setMockInitialValues({});
+    // Past the welcome screen: a fresh install lands there instead, which
+    // has its own coverage in session_test.dart.
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
     await tester.pumpWidget(
       ProviderScope(
         overrides: [

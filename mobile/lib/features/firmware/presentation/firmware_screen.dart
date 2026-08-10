@@ -5,6 +5,7 @@ import '../../../core/api/failure.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/connection_bar.dart';
 import '../../extensions/data/extension_repository.dart';
 import '../../extensions/domain/extension_models.dart';
 import '../data/firmware_repository.dart';
@@ -53,7 +54,10 @@ class FirmwareScreen extends ConsumerWidget {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Firmware')),
+      appBar: AppBar(
+        title: const Text('Firmware'),
+        bottom: const ConnectionBar(),
+      ),
       body: RefreshIndicator(
         onRefresh: () async {
           ref.invalidate(manifestsProvider);

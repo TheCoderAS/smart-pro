@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
@@ -17,7 +18,10 @@ class MeshScreen extends ConsumerWidget {
     final status = ref.watch(meshStatusProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Mesh')),
+      appBar: AppBar(
+        title: const Text('Mesh'),
+        bottom: const ConnectionBar(),
+      ),
       body: RefreshIndicator(
         onRefresh: () => ref.read(meshStatusProvider.notifier).refresh(),
         child: switch (status) {

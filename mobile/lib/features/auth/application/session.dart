@@ -8,13 +8,15 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../onboarding/application/first_run.dart';
 import '../data/auth_repository.dart';
 import '../domain/models.dart';
 
 /// Where the app stands with the master it is pointed at.
 ///
 /// The lifecycle (bootstrap):
-///   probing → unreachable            can't open 192.168.4.1
+///   probing → needsWelcome           fresh install, nothing set up yet
+///           → unreachable            can't open 192.168.4.1
 ///           → needsCommissioning     info.auth == false (ops guide §A2:
 ///                                    factory-fresh, API wide open)
 ///           → needsLogin             no stored token, or token rejected
@@ -29,6 +31,14 @@ final class Probing extends SessionState {
 
 final class MasterUnreachable extends SessionState {
   const MasterUnreachable();
+}
+
+/// Fresh install with nothing configured. The story is explicit that this
+/// lands on a branded welcome screen rather than an empty dashboard or a
+/// bare login form — and, in practice, rather than "can't reach your
+/// switch", which is what a first launch used to show.
+final class NeedsWelcome extends SessionState {
+  const NeedsWelcome();
 }
 
 final class NeedsCommissioning extends SessionState {
@@ -65,6 +75,21 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   Future<SessionState> build() => _bootstrap();
 
   Future<SessionState> _bootstrap() async {
+    // Before touching the network at all: a first launch with no master
+    // ever paired is a setup story, not a connectivity failure.
+    try {
+      final flags = await ref.read(firstRunProvider.future);
+      if (!flags.welcomeSeen) {
+        final masters = await ref.read(masterRegistryProvider.future);
+        if (masters.isEmpty) return const NeedsWelcome();
+        // Something is already paired (an upgrade from a build without
+        // this screen) — don't show a welcome to an existing owner.
+        await ref.read(firstRunProvider.notifier).markWelcomeSeen();
+      }
+    } on Object catch (e) {
+      log.w('first-run check skipped: $e');
+    }
+
     final DeviceInfo info;
     try {
       info = await _repo.info();

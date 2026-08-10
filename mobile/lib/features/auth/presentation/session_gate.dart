@@ -7,6 +7,7 @@ import '../../../app/router.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
+import '../../onboarding/presentation/welcome_screen.dart';
 import '../application/session.dart';
 import 'login_screen.dart';
 
@@ -23,6 +24,7 @@ class SessionGate extends ConsumerWidget {
       Authenticated() => const DashboardScreen(),
       final NeedsLogin s => LoginScreen(state: s),
       final NeedsCommissioning s => CommissioningScreen(state: s),
+      NeedsWelcome() => const WelcomeScreen(),
       MasterUnreachable() => const _UnreachableScreen(),
       _ => const Scaffold(
           body: Center(child: CircularProgressIndicator()),

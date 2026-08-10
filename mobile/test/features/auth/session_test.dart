@@ -31,7 +31,10 @@ void main() {
     TestWidgetsFlutterBinding.ensureInitialized();
     // Default: no persisted prefs (no masters, no transport preference)
     // so the BLE cold-start paths stay dormant unless a test seeds them.
-    SharedPreferences.setMockInitialValues({});
+    // The welcome screen is marked seen: these tests exercise bootstrap
+    // *after* setup, and a fresh install short-circuits to NeedsWelcome
+    // before any network call. The welcome path has its own test below.
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
     repo = MockAuthRepository();
     store = MockSecureStore();
     when(() => store.writeToken(any(), any())).thenAnswer((_) async {});
@@ -255,6 +258,25 @@ void main() {
     when(() => repo.info()).thenThrow(const Unreachable());
     seedPairedMaster(preference: 'bluetooth');
     when(() => store.readToken('C5F77720')).thenAnswer((_) async => null);
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<MasterUnreachable>());
+  });
+
+  test('fresh install with nothing paired → NeedsWelcome, no probe', () async {
+    SharedPreferences.setMockInitialValues({});
+    when(() => repo.info()).thenThrow(const Unreachable());
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<NeedsWelcome>());
+    // The point of the screen: a first launch is a setup story, so we
+    // never reach the network and never show "can't reach your switch".
+    verifyNever(() => repo.info());
+  });
+
+  test('welcome already seen → normal bootstrap', () async {
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
+    when(() => repo.info()).thenThrow(const Unreachable());
     final c = makeContainer();
 
     expect(await bootstrap(c), isA<MasterUnreachable>());

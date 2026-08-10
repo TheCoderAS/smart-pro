@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
@@ -17,7 +18,7 @@ class ExtensionsScreen extends ConsumerWidget {
     final extensions = ref.watch(extensionsProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Extensions')),
+      appBar: AppBar(title: const Text('Extensions'), bottom: const ConnectionBar()),
       body: RefreshIndicator(
         onRefresh: () => ref.read(extensionsProvider.notifier).refresh(),
         child: switch (extensions) {

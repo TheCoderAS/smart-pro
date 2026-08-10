@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:unisync/app/l10n/app_localizations.dart';
+import 'package:unisync/core/transport/link_state.dart';
 import 'package:unisync/core/ws/state_dto.dart';
 import 'package:unisync/features/dashboard/application/switch_overrides.dart';
 import 'package:unisync/features/dashboard/presentation/dashboard_screen.dart';
@@ -30,7 +31,13 @@ void main() {
 
   ProviderContainer makeContainer() {
     final container = ProviderContainer(
-      overrides: [switchRepositoryProvider.overrideWithValue(repo)],
+      overrides: [
+        switchRepositoryProvider.overrideWithValue(repo),
+        // A confirmed Wi-Fi link. Tiles disable when the app can't vouch
+        // for the connection (Epic 1), and the real monitor would be
+        // running a heartbeat against a master that isn't there.
+        linkStateProvider.overrideWith(_FakeLink.new),
+      ],
     );
     addTearDown(container.dispose);
     return container;
@@ -88,4 +95,9 @@ void main() {
       ),
     );
   });
+}
+
+class _FakeLink extends LinkMonitor {
+  @override
+  LinkState build() => LinkState.connectedWifi;
 }

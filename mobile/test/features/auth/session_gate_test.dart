@@ -33,7 +33,8 @@ void main() {
       '(lost-password escape hatch)', (tester) async {
     // No paired master, so the Bluetooth-control button stays hidden and
     // only the recovery affordance is present.
-    SharedPreferences.setMockInitialValues({});
+    // Past the welcome screen: this test is about the unreachable state.
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
     final container = ProviderContainer(
       overrides: [
         authRepositoryProvider.overrideWithValue(_UnreachableRepo()),
