@@ -787,6 +787,7 @@ static uint32_t fwrx_last_ms = 0;
  * not reliable enough to depend on here. */
 static void     ext_reset_identity(extension_t *e);
 static bool     switch_id_valid(const String &id);
+static void     nvs_load_switch_name(const char *id, char *name, int nlen);
 static bool     nvs_load_restore(const char *id);
 static void     nvs_save_restore(const char *id, bool restore);
 static void     master_ver_parse(const char *s, uint8_t *v);
