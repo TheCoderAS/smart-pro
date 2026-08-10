@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/storage/master_registry.dart';
+import '../../../core/transport/access_reset.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
@@ -23,98 +24,22 @@ class SessionGate extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(sessionProvider);
 
+    // The password was changed while we were on Bluetooth, so the token
+    // died. BLE has no login — show the instruction screen, never a
+    // login form, until a Wi-Fi sign-in succeeds (v5.1 Epic 5).
+    if (ref.watch(accessResetProvider)) return const _AccessResetScreen();
+
     return switch (session.value) {
       Authenticated() => const DashboardScreen(),
       final NeedsLogin s => LoginScreen(state: s),
       final NeedsCommissioning s => CommissioningScreen(state: s),
       NeedsWelcome() => const WelcomeScreen(),
       final WrongNetwork s => _WrongNetworkScreen(state: s),
-      final AccessReset s => _AccessResetScreen(state: s),
       MasterUnreachable() => const _UnreachableScreen(),
       _ => const Scaffold(
           body: Center(child: CircularProgressIndicator()),
         ),
     };
-  }
-}
-
-/// Someone reset access while this phone was on Bluetooth.
-///
-/// An instruction, not a login form. Login is Wi-Fi-only by design, so a
-/// password field here would be a dead end — the way back is the master's
-/// network. Bluetooth stays unusable until that happens, and saying so is
-/// kinder than letting the user hunt for it.
-class _AccessResetScreen extends ConsumerWidget {
-  const _AccessResetScreen({required this.state});
-
-  final AccessReset state;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    final network = state.network;
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.lock_reset_rounded,
-                    size: 56, color: scheme.onSurfaceVariant),
-                const SizedBox(height: 16),
-                Text(
-                  'Your access was reset',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  network == null
-                      ? 'Someone changed the password, so every device was '
-                          "signed out. Connect to your switch's Wi-Fi and "
-                          'sign in again with the new password.'
-                      : 'Someone changed the password, so every device was '
-                          'signed out. Connect to "$network" and sign in '
-                          'again with the new password.',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Bluetooth carries a session — it cannot create one, so '
-                  'it stays unavailable until you have signed in.',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                ),
-                const SizedBox(height: 24),
-                FilledButton.icon(
-                  onPressed: () async {
-                    await ref
-                        .read(transportCoordinatorProvider)
-                        .choose(TransportPreference.wifi);
-                    await ref.read(sessionProvider.notifier).refresh();
-                  },
-                  icon: const Icon(Icons.wifi),
-                  label: const Text("I'm on the Wi-Fi — sign in"),
-                ),
-                const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: () => context.push(Routes.recovery),
-                  icon: const Icon(Icons.bluetooth_searching),
-                  label: const Text("I don't know the new password"),
-                ),
-                const MasterSwitcherButton(),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
   }
 }
 
@@ -168,28 +93,6 @@ class _WrongNetworkScreen extends ConsumerWidget {
                   label: Text('Connect to $network'),
                 ),
                 const SizedBox(height: 8),
-                // Bluetooth reaches it without crossing networks at all,
-                // which is usually faster than fighting the OS.
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    final messenger = ScaffoldMessenger.of(context);
-                    final ok = await ref
-                        .read(sessionProvider.notifier)
-                        .connectOverBle();
-                    if (!ok) {
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Sign in to that switch over Wi-Fi once first.',
-                          ),
-                        ),
-                      );
-                    }
-                  },
-                  icon: const Icon(Icons.bluetooth_rounded),
-                  label: const Text('Use Bluetooth instead'),
-                ),
-                const SizedBox(height: 8),
                 const MasterSwitcherButton(),
               ],
             ),
@@ -215,6 +118,74 @@ class MasterSwitcherButton extends ConsumerWidget {
       onPressed: () => showMasterSwitcher(context, ref),
       icon: const Icon(Icons.swap_horizontal_circle_outlined),
       label: const Text('Switch to another switch'),
+    );
+  }
+}
+
+/// Shown when a master rejected our session over Bluetooth: the password
+/// changed, so every token everywhere died. Bluetooth mode is unusable
+/// until a Wi-Fi sign-in completes, so this is an instruction — not a
+/// login form and not a generic error (v5.1 Epic 5).
+class _AccessResetScreen extends ConsumerWidget {
+  const _AccessResetScreen();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context)!;
+    // Name the network the user has to join, when we know it.
+    final masters = ref.watch(masterRegistryProvider).value ?? const [];
+    final ssid = masters
+        .map((m) => m.ssid)
+        .firstWhere((s) => s != null && s.isNotEmpty, orElse: () => null);
+
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.lock_reset_rounded,
+                  size: 56,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  l10n.accessResetTitle,
+                  style: Theme.of(context).textTheme.titleLarge,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  ssid == null
+                      ? l10n.accessResetBodyGeneric
+                      : l10n.accessResetBody(ssid),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton.icon(
+                  onPressed: () async {
+                    // Back to Wi-Fi, clear the flag, re-probe: the normal
+                    // login screen takes it from here.
+                    await ref
+                        .read(transportCoordinatorProvider)
+                        .choose(TransportPreference.wifi);
+                    ref.read(accessResetProvider.notifier).clear();
+                    await ref.read(sessionProvider.notifier).refresh();
+                  },
+                  icon: const Icon(Icons.wifi_rounded),
+                  label: Text(l10n.joinWifi),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

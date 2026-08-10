@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ws/state_dto.dart';
 import '../ws/state_socket.dart';
+import 'access_reset.dart';
 import 'ble_session.dart';
 import 'control_transport.dart';
 import 'wifi_transport.dart';
@@ -80,7 +81,10 @@ final activeControlProvider = Provider<ControlTransport>((ref) {
     // passed — it lives inside the client and only derives proofs.
     ref.watch(bleSessionProvider);
     final session = ref.watch(bleSessionProvider.notifier);
-    return BleControlTransport(session.client);
+    return BleControlTransport(
+      session.client,
+      onTokenRejected: ref.read(accessResetProvider.notifier).flag,
+    );
   }
   return WifiControlTransport(ref);
 });

@@ -358,6 +358,42 @@ abstract class AppLocalizations {
   /// **'Switch connection'**
   String get switchTransport;
 
+  /// No description provided for @btNeedsWifiLogin.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in over Wi-Fi first — Bluetooth mode uses that sign-in.'**
+  String get btNeedsWifiLogin;
+
+  /// No description provided for @btPermissionDenied.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth permission is needed for this mode.'**
+  String get btPermissionDenied;
+
+  /// No description provided for @openSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Open settings'**
+  String get openSettings;
+
+  /// No description provided for @accessResetTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your access was reset'**
+  String get accessResetTitle;
+
+  /// No description provided for @accessResetBody.
+  ///
+  /// In en, this message translates to:
+  /// **'The password was changed, so this phone was signed out. Connect to {network} to sign in again.'**
+  String accessResetBody(String network);
+
+  /// No description provided for @accessResetBodyGeneric.
+  ///
+  /// In en, this message translates to:
+  /// **'The password was changed, so this phone was signed out. Connect to the switch\'s Wi-Fi to sign in again.'**
+  String get accessResetBodyGeneric;
+
   /// No description provided for @wifiOnlyTitle.
   ///
   /// In en, this message translates to:

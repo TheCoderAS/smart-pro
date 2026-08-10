@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app/l10n/app_localizations.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
@@ -10,6 +11,7 @@ import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
+import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../../core/ws/state_socket.dart';
@@ -31,7 +33,10 @@ class SettingsScreen extends ConsumerWidget {
     };
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings'), bottom: const ConnectionBar()),
+      appBar: AppBar(
+        title: const Text('Settings'),
+        bottom: const ConnectionBar(),
+      ),
       body: ListView(
         children: [
           const _SectionHeader('Appearance'),
@@ -66,15 +71,10 @@ class SettingsScreen extends ConsumerWidget {
             onChanged: (pref) async {
               if (pref == null) return;
               final messenger = ScaffoldMessenger.of(context);
-              // Refused before anything changes, so the radio button
-              // snapping back is the whole story the user sees.
-              final refusal =
+              final l10n = AppLocalizations.of(context)!;
+              final result =
                   await ref.read(transportCoordinatorProvider).choose(pref);
-              if (refusal != null) {
-                messenger.showSnackBar(
-                  SnackBar(content: Text(refusal.message)),
-                );
-              }
+              showTransportRefusal(messenger, l10n, result);
             },
             child: const Column(
               children: [

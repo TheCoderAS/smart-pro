@@ -3,12 +3,12 @@ import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart' show ScanMode;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../features/auth/application/session.dart';
 import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/domain/firmware_models.dart';
 import '../api/dio_client.dart';
 import '../ble/advert.dart';
 import '../ble/ble_control_client.dart';
+import '../ble/ble_proof.dart';
 import '../ble/ble_scanner.dart';
 import '../ble/endpoints_ble.dart';
 import '../ble/recovery_service.dart' show reactiveBleProvider;
@@ -199,11 +199,6 @@ class BleSessionController extends Notifier<BleSessionState> {
     try {
       final map = await client.request((p) => BleCommands.state(p));
       _emit(StateSnapshot.fromJson(map));
-    } on BleTokenRejected {
-      // The password changed while we were on Bluetooth, so every token
-      // everywhere died. Login is Wi-Fi-only, so this must route to the
-      // instruction screen and not a login form Bluetooth can't serve.
-      await _onTokenRejected();
     } on Exception catch (e) {
       log.w('initial ble state fetch failed: $e');
     }
@@ -254,19 +249,8 @@ class BleSessionController extends Notifier<BleSessionState> {
     final client = _client;
     final token = ref.read(tokenProvider);
     if (client == null || token == null) return;
-    try {
-      final map = await client.request((p) => BleCommands.state(p));
-      _emit(StateSnapshot.fromJson(map));
-    } on BleTokenRejected {
-      await _onTokenRejected();
-    }
-  }
-
-  /// Tears the session down and hands the app to the access-reset screen.
-  Future<void> _onTokenRejected() async {
-    log.w('ble token rejected — access was reset');
-    await deactivate();
-    await ref.read(sessionProvider.notifier).handleAccessReset();
+    final map = await client.request((p) => BleCommands.state(p));
+    _emit(StateSnapshot.fromJson(map));
   }
 
   Future<void> _rememberMesh(MasterBeacon beacon) async {
@@ -313,9 +297,14 @@ class BleSessionController extends Notifier<BleSessionState> {
 /// `reorder` write all work over BLE per the v2 contract; only firmware
 /// transfer stays Wi-Fi.
 class BleControlTransport implements ControlTransport {
-  const BleControlTransport(this._client);
+  const BleControlTransport(this._client, {this.onTokenRejected});
 
   final BleControlClient? _client;
+
+  /// Called when the master rejects our session (password changed).
+  /// BLE has no login, so the UI routes to a Wi-Fi sign-in instruction
+  /// screen rather than failing silently (v5.1 Epic 5).
+  final void Function()? onTokenRejected;
 
   /// The live client. The token lives inside it (used only to derive
   /// per-command proofs) — commands never carry it.
@@ -323,6 +312,19 @@ class BleControlTransport implements ControlTransport {
     final client = _client;
     if (client == null) throw StateError('BLE not connected');
     return client;
+  }
+
+  /// Single choke point for every BLE command so a dead session is
+  /// always surfaced, never swallowed by a caller's `on Exception`.
+  Future<Map<String, Object?>> _send(
+    Map<String, Object?> Function(BleProof proof) build,
+  ) async {
+    try {
+      return await _live.request(build);
+    } on BleTokenRejected {
+      onTokenRejected?.call();
+      rethrow;
+    }
   }
 
   @override
@@ -335,25 +337,22 @@ class BleControlTransport implements ControlTransport {
     int? ch,
     String? masterUid,
   }) async {
-    final client = _live;
     // id already carries the channel suffix over BLE; ch is ignored. The
     // uid, when present, tells the connected master to forward over the
     // mesh — Bluetooth controls the whole mesh, not just what's in range.
-    await client.request(
+    await _send(
       (p) => BleCommands.relay(proof: p, id: id, on: on, masterUid: masterUid),
     );
   }
 
   @override
   Future<void> killAll() async {
-    final client = _live;
-    await client.request((p) => BleCommands.killAll(p));
+    await _send((p) => BleCommands.killAll(p));
   }
 
   @override
   Future<List<ExtensionInfo>> extensions() async {
-    final client = _live;
-    final map = await client.request((p) => BleCommands.extensions(p));
+    final map = await _send((p) => BleCommands.extensions(p));
     final list = map['extensions'];
     if (list is! List) return const [];
     return [
@@ -364,45 +363,37 @@ class BleControlTransport implements ControlTransport {
 
   @override
   Future<void> reorder(List<String> orderedIds) async {
-    final client = _live;
-    await client.request(
+    await _send(
       (p) => BleCommands.reorder(proof: p, order: orderedIds.join(',')),
     );
   }
 
   @override
   Future<void> renameExtension({required int slot, required String name}) async {
-    final client = _live;
-    await client
-        .request((p) =>
+    await _send((p) =>
             BleCommands.renameExtension(proof: p, slot: slot, name: name));
   }
 
   @override
   Future<void> renameSwitch({required String id, required String name}) async {
-    final client = _live;
-    await client
-        .request((p) => BleCommands.renameSwitch(proof: p, id: id, name: name));
+    await _send((p) => BleCommands.renameSwitch(proof: p, id: id, name: name));
   }
 
   @override
   Future<void> renameMaster(String name) async {
-    final client = _live;
-    await client.request((p) => BleCommands.renameMaster(proof: p, name: name));
+    await _send((p) => BleCommands.renameMaster(proof: p, name: name));
   }
 
   @override
   Future<void> setRestore({required String id, required bool restore}) async {
-    final client = _live;
-    await client.request(
+    await _send(
       (p) => BleCommands.setRestore(proof: p, id: id, restore: restore),
     );
   }
 
   @override
   Future<FwStatus> fwStatus() async {
-    final client = _live;
-    final map = await client.request((p) => BleCommands.fwList(p));
+    final map = await _send((p) => BleCommands.fwList(p));
     return FwStatus.fromJson(Map<String, dynamic>.from(map));
   }
 }
