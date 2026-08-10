@@ -105,6 +105,11 @@ abstract class PeerState with _$PeerState {
 
     /// Seconds since the peer was last heard from.
     @JsonKey(name: 'last_seen') @Default(0) int lastSeen,
+
+    /// The peer's own switches, gossiped across the mesh. Without these a
+    /// mesh dashboard could only ever show the master the phone happens to
+    /// be talking to.
+    @Default(<SwitchState>[]) List<SwitchState> switches,
   }) = _PeerState;
 
   const PeerState._();

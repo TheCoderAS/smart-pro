@@ -29,12 +29,20 @@ abstract final class BleCommands {
   static Map<String, Object?> _cmd(BleProof proof, Map<String, Object?> body) =>
       {...proof.toFields(), ...body};
 
+  /// [masterUid] forwards the command to that master over the mesh. Absent
+  /// means the master the phone is connected to.
   static Map<String, Object?> relay({
     required BleProof proof,
     required String id,
     required bool on,
+    String? masterUid,
   }) =>
-      _cmd(proof, {'c': 'relay', 'id': id, 's': on});
+      _cmd(proof, {
+        'c': 'relay',
+        'id': id,
+        's': on,
+        if (masterUid != null && masterUid.isNotEmpty) 'uid': masterUid,
+      });
 
   /// One command turns everything off — never loop `relay`.
   static Map<String, Object?> killAll(BleProof proof) =>

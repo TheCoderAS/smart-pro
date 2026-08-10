@@ -601,7 +601,10 @@ mixin _$PeerState {
  String get uid; String get name; String get fw; bool get online;/// Debounced presence from the master. `online` is the same verdict as
 /// a bool; this distinguishes a settled outage from a flapping peer.
 @JsonKey(name: 'presence') String get presenceRaw;/// Seconds since the peer was last heard from.
-@JsonKey(name: 'last_seen') int get lastSeen;
+@JsonKey(name: 'last_seen') int get lastSeen;/// The peer's own switches, gossiped across the mesh. Without these a
+/// mesh dashboard could only ever show the master the phone happens to
+/// be talking to.
+ List<SwitchState> get switches;
 /// Create a copy of PeerState
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -614,16 +617,16 @@ $PeerStateCopyWith<PeerState> get copyWith => _$PeerStateCopyWithImpl<PeerState>
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PeerState&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.online, online) || other.online == online)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is PeerState&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.online, online) || other.online == online)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&const DeepCollectionEquality().equals(other.switches, switches));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,uid,name,fw,online,presenceRaw,lastSeen);
+int get hashCode => Object.hash(runtimeType,uid,name,fw,online,presenceRaw,lastSeen,const DeepCollectionEquality().hash(switches));
 
 @override
 String toString() {
-  return 'PeerState(uid: $uid, name: $name, fw: $fw, online: $online, presenceRaw: $presenceRaw, lastSeen: $lastSeen)';
+  return 'PeerState(uid: $uid, name: $name, fw: $fw, online: $online, presenceRaw: $presenceRaw, lastSeen: $lastSeen, switches: $switches)';
 }
 
 
@@ -634,7 +637,7 @@ abstract mixin class $PeerStateCopyWith<$Res>  {
   factory $PeerStateCopyWith(PeerState value, $Res Function(PeerState) _then) = _$PeerStateCopyWithImpl;
 @useResult
 $Res call({
- String uid, String name, String fw, bool online,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen
+ String uid, String name, String fw, bool online,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen, List<SwitchState> switches
 });
 
 
@@ -651,7 +654,7 @@ class _$PeerStateCopyWithImpl<$Res>
 
 /// Create a copy of PeerState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? uid = null,Object? name = null,Object? fw = null,Object? online = null,Object? presenceRaw = null,Object? lastSeen = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? uid = null,Object? name = null,Object? fw = null,Object? online = null,Object? presenceRaw = null,Object? lastSeen = null,Object? switches = null,}) {
   return _then(_self.copyWith(
 uid: null == uid ? _self.uid : uid // ignore: cast_nullable_to_non_nullable
 as String,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
@@ -659,7 +662,8 @@ as String,fw: null == fw ? _self.fw : fw // ignore: cast_nullable_to_non_nullabl
 as String,online: null == online ? _self.online : online // ignore: cast_nullable_to_non_nullable
 as bool,presenceRaw: null == presenceRaw ? _self.presenceRaw : presenceRaw // ignore: cast_nullable_to_non_nullable
 as String,lastSeen: null == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
-as int,
+as int,switches: null == switches ? _self.switches : switches // ignore: cast_nullable_to_non_nullable
+as List<SwitchState>,
   ));
 }
 
@@ -744,10 +748,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen,  List<SwitchState> switches)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _PeerState() when $default != null:
-return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen);case _:
+return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen,_that.switches);case _:
   return orElse();
 
 }
@@ -765,10 +769,10 @@ return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_th
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen,  List<SwitchState> switches)  $default,) {final _that = this;
 switch (_that) {
 case _PeerState():
-return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen);case _:
+return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen,_that.switches);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -785,10 +789,10 @@ return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_th
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen,  List<SwitchState> switches)?  $default,) {final _that = this;
 switch (_that) {
 case _PeerState() when $default != null:
-return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen);case _:
+return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen,_that.switches);case _:
   return null;
 
 }
@@ -800,7 +804,7 @@ return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_th
 @JsonSerializable()
 
 class _PeerState extends PeerState {
-  const _PeerState({this.uid = '', this.name = '', this.fw = '', this.online = true, @JsonKey(name: 'presence') this.presenceRaw = 'online', @JsonKey(name: 'last_seen') this.lastSeen = 0}): super._();
+  const _PeerState({this.uid = '', this.name = '', this.fw = '', this.online = true, @JsonKey(name: 'presence') this.presenceRaw = 'online', @JsonKey(name: 'last_seen') this.lastSeen = 0, final  List<SwitchState> switches = const <SwitchState>[]}): _switches = switches,super._();
   factory _PeerState.fromJson(Map<String, dynamic> json) => _$PeerStateFromJson(json);
 
 @override@JsonKey() final  String uid;
@@ -812,6 +816,19 @@ class _PeerState extends PeerState {
 @override@JsonKey(name: 'presence') final  String presenceRaw;
 /// Seconds since the peer was last heard from.
 @override@JsonKey(name: 'last_seen') final  int lastSeen;
+/// The peer's own switches, gossiped across the mesh. Without these a
+/// mesh dashboard could only ever show the master the phone happens to
+/// be talking to.
+ final  List<SwitchState> _switches;
+/// The peer's own switches, gossiped across the mesh. Without these a
+/// mesh dashboard could only ever show the master the phone happens to
+/// be talking to.
+@override@JsonKey() List<SwitchState> get switches {
+  if (_switches is EqualUnmodifiableListView) return _switches;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_switches);
+}
+
 
 /// Create a copy of PeerState
 /// with the given fields replaced by the non-null parameter values.
@@ -826,16 +843,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _PeerState&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.online, online) || other.online == online)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _PeerState&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.online, online) || other.online == online)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&const DeepCollectionEquality().equals(other._switches, _switches));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,uid,name,fw,online,presenceRaw,lastSeen);
+int get hashCode => Object.hash(runtimeType,uid,name,fw,online,presenceRaw,lastSeen,const DeepCollectionEquality().hash(_switches));
 
 @override
 String toString() {
-  return 'PeerState(uid: $uid, name: $name, fw: $fw, online: $online, presenceRaw: $presenceRaw, lastSeen: $lastSeen)';
+  return 'PeerState(uid: $uid, name: $name, fw: $fw, online: $online, presenceRaw: $presenceRaw, lastSeen: $lastSeen, switches: $switches)';
 }
 
 
@@ -846,7 +863,7 @@ abstract mixin class _$PeerStateCopyWith<$Res> implements $PeerStateCopyWith<$Re
   factory _$PeerStateCopyWith(_PeerState value, $Res Function(_PeerState) _then) = __$PeerStateCopyWithImpl;
 @override @useResult
 $Res call({
- String uid, String name, String fw, bool online,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen
+ String uid, String name, String fw, bool online,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen, List<SwitchState> switches
 });
 
 
@@ -863,7 +880,7 @@ class __$PeerStateCopyWithImpl<$Res>
 
 /// Create a copy of PeerState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? uid = null,Object? name = null,Object? fw = null,Object? online = null,Object? presenceRaw = null,Object? lastSeen = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? uid = null,Object? name = null,Object? fw = null,Object? online = null,Object? presenceRaw = null,Object? lastSeen = null,Object? switches = null,}) {
   return _then(_PeerState(
 uid: null == uid ? _self.uid : uid // ignore: cast_nullable_to_non_nullable
 as String,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
@@ -871,7 +888,8 @@ as String,fw: null == fw ? _self.fw : fw // ignore: cast_nullable_to_non_nullabl
 as String,online: null == online ? _self.online : online // ignore: cast_nullable_to_non_nullable
 as bool,presenceRaw: null == presenceRaw ? _self.presenceRaw : presenceRaw // ignore: cast_nullable_to_non_nullable
 as String,lastSeen: null == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
-as int,
+as int,switches: null == switches ? _self._switches : switches // ignore: cast_nullable_to_non_nullable
+as List<SwitchState>,
   ));
 }
 

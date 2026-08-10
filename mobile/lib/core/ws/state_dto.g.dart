@@ -62,6 +62,11 @@ _PeerState _$PeerStateFromJson(Map<String, dynamic> json) => _PeerState(
   online: json['online'] as bool? ?? true,
   presenceRaw: json['presence'] as String? ?? 'online',
   lastSeen: (json['last_seen'] as num?)?.toInt() ?? 0,
+  switches:
+      (json['switches'] as List<dynamic>?)
+          ?.map((e) => SwitchState.fromJson(e as Map<String, dynamic>))
+          .toList() ??
+      const <SwitchState>[],
 );
 
 Map<String, dynamic> _$PeerStateToJson(_PeerState instance) =>
@@ -72,4 +77,5 @@ Map<String, dynamic> _$PeerStateToJson(_PeerState instance) =>
       'online': instance.online,
       'presence': instance.presenceRaw,
       'last_seen': instance.lastSeen,
+      'switches': instance.switches,
     };

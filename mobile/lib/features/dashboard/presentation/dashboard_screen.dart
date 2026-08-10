@@ -20,6 +20,7 @@ import '../../../core/ws/state_socket.dart';
 import '../../onboarding/presentation/first_run_prompts.dart';
 import '../../settings/presentation/master_switcher.dart';
 import '../../switches/presentation/rename_sheet.dart';
+import '../application/master_cards.dart';
 import '../application/switch_overrides.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -73,11 +74,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     // on their own. The master decides presence; the app never infers it
     // from its own request failures. The extension list still shows the
     // board, marked offline with a last-seen time.
-    final switches = (snap?.switches ?? const <SwitchState>[])
-        .where((s) => s.online)
-        .toList(growable: false);
-    final hiddenOffline =
-        (snap?.switches.length ?? 0) - switches.length;
+    final sections = snap == null
+        ? const <MasterSection>[]
+        : sectionsFrom(snap, ref.watch(masterCardOrderProvider));
+    final switches = [for (final sec in sections) ...sec.switches];
+    final hiddenOffline = snap == null
+        ? 0
+        : (snap.switches.length +
+                snap.peers.fold<int>(0, (n, p) => n + p.switches.length)) -
+            switches.length;
 
     // Over BLE, a failed scan/connect would otherwise spin forever —
     // surface it with a retry instead.
@@ -115,7 +120,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             )
           else ...[
             SliverToBoxAdapter(child: _QuickTools(switches: switches)),
-            _SwitchGrid(switches: switches),
+            // One master: a flat grid, because wrapping a single master's
+            // switches in a collapsible card would just add a tap. A mesh:
+            // one card per master, one open at a time (story Epic 7).
+            if (sections.length <= 1)
+              _SwitchGrid(
+                switches: switches,
+                masterUid: sections.isEmpty ? null : sections.first.uid,
+              )
+            else
+              _MasterCards(sections: sections),
             if (hiddenOffline > 0)
               SliverToBoxAdapter(child: _OfflineNote(count: hiddenOffline)),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
@@ -664,9 +678,10 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _SwitchGrid extends StatelessWidget {
-  const _SwitchGrid({required this.switches});
+  const _SwitchGrid({required this.switches, this.masterUid});
 
   final List<SwitchState> switches;
+  final String? masterUid;
 
   @override
   Widget build(BuildContext context) {
@@ -680,7 +695,7 @@ class _SwitchGrid extends StatelessWidget {
           mainAxisSpacing: 14,
         ),
         delegate: SliverChildBuilderDelegate((context, i) {
-          return SwitchTile(sw: switches[i])
+          return SwitchTile(sw: switches[i], masterUid: masterUid)
               .animate()
               .fadeIn(duration: 260.ms, delay: (40 * i).ms)
               .slideY(begin: 0.15, curve: Curves.easeOut);
@@ -690,13 +705,125 @@ class _SwitchGrid extends StatelessWidget {
   }
 }
 
+/// One collapsible card per master, one open at a time. A master that has
+/// gone quiet keeps its card — with its switches disabled and a last-seen
+/// time — rather than disappearing, so the user sees the state before
+/// acting rather than discovering it through a failed tap.
+class _MasterCards extends ConsumerWidget {
+  const _MasterCards({required this.sections});
+
+  final List<MasterSection> sections;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final expanded = ref.watch(expandedMasterProvider);
+    // Arriving on a mesh dashboard with everything shut would read as
+    // empty, so the first card opens itself.
+    if (expanded == null && sections.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(expandedMasterProvider.notifier).defaultTo(sections.first.uid);
+      });
+    }
+    return SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      sliver: SliverList.builder(
+        itemCount: sections.length,
+        itemBuilder: (context, i) => _MasterCard(
+          section: sections[i],
+          open: sections[i].uid == expanded,
+        ),
+      ),
+    );
+  }
+}
+
+class _MasterCard extends ConsumerWidget {
+  const _MasterCard({required this.section, required this.open});
+
+  final MasterSection section;
+  final bool open;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final on = section.switches.where((s) => s.on).length;
+    final subtitle = section.online
+        ? '$on of ${section.switches.length} on'
+        : '${section.presence.label} · last seen '
+            '${lastSeenLabel(section.lastSeen)}';
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        children: [
+          ListTile(
+            leading: Icon(
+              section.isSelf ? Icons.router : Icons.router_outlined,
+              color: section.online ? scheme.primary : scheme.onSurfaceVariant,
+            ),
+            title: Text(section.name),
+            subtitle: Text(subtitle),
+            trailing: Icon(open ? Icons.expand_less : Icons.expand_more),
+            onTap: () =>
+                ref.read(expandedMasterProvider.notifier).toggle(section.uid),
+          ),
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 220),
+            crossFadeState:
+                open ? CrossFadeState.showFirst : CrossFadeState.showSecond,
+            firstChild: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: section.switches.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Text('No switches reachable right now.'),
+                    )
+                  : GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 220,
+                        mainAxisExtent: 128,
+                        crossAxisSpacing: 14,
+                        mainAxisSpacing: 14,
+                      ),
+                      itemCount: section.switches.length,
+                      itemBuilder: (context, i) => SwitchTile(
+                        sw: section.switches[i],
+                        // Self is driven directly; a peer is relayed.
+                        masterUid: section.isSelf ? null : section.uid,
+                        enabled: section.online,
+                      ),
+                    ),
+            ),
+            secondChild: const SizedBox(width: double.infinity),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// One relay. Renders the optimistic override when present, else the
 /// snapshot state. Animated accent glow + press feedback when on.
 /// Public for widget tests.
 class SwitchTile extends ConsumerStatefulWidget {
-  const SwitchTile({required this.sw, super.key});
+  const SwitchTile({
+    required this.sw,
+    this.masterUid,
+    this.enabled = true,
+    super.key,
+  });
 
   final SwitchState sw;
+
+  /// The master that owns this switch, when it isn't the one the app is
+  /// connected to. Null drives a local relay.
+  final String? masterUid;
+
+  /// False when the owning master itself is unreachable.
+  final bool enabled;
 
   @override
   ConsumerState<SwitchTile> createState() => _SwitchTileState();
@@ -719,7 +846,7 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
     // the story says controls disable rather than letting someone find out
     // by tapping (Epic 1, connection awareness).
     final linkUp = ref.watch(linkStateProvider).controlsEnabled;
-    final online = sw.online;
+    final online = sw.online && widget.enabled;
     final live = online && linkUp;
     final stateLabel = !online
         ? l10n.switchOffline
@@ -829,9 +956,12 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
     final overrides = ref.read(switchOverridesProvider.notifier);
     overrides.set(sw.id, next);
     try {
-      await ref
-          .read(activeControlProvider)
-          .setRelay(id: sw.id, on: next, ch: sw.ch);
+      await ref.read(activeControlProvider).setRelay(
+            id: sw.id,
+            on: next,
+            ch: sw.ch,
+            masterUid: widget.masterUid,
+          );
       // Leave the override in place; the next snapshot clears it.
     } on Exception {
       // Command failed — snap back to the snapshot state.
