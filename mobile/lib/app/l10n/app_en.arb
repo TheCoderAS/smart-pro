@@ -1,0 +1,88 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "Unisync",
+
+  "sessionLoading": "Connecting…",
+
+  "unreachableTitle": "Can’t reach your switch",
+  "unreachableBody": "Join the switch’s Wi-Fi network and try again. The network name is on the card in the box.",
+  "tryAgain": "Try again",
+  "addASwitch": "Add a switch",
+  "controlOverBluetooth": "Control over Bluetooth",
+  "bleNoSavedSession": "No saved Bluetooth sign-in yet. Connect over Wi-Fi once to pair this phone.",
+  "bleTroubleTitle": "Can’t reach it over Bluetooth",
+  "bleTroubleBody": "Move closer to the switch and make sure Bluetooth is on.",
+  "forgotPasswordRecover": "Forgot the password? Recover it",
+
+  "signInTitle": "Sign in",
+  "masterIdentity": "Master {uid} · firmware {fw}",
+  "@masterIdentity": {
+    "placeholders": {
+      "uid": {"type": "String"},
+      "fw": {"type": "String"}
+    }
+  },
+  "passwordLabel": "Password",
+  "passwordHelper": "The same password you used to join the Wi-Fi.",
+  "signInButton": "Sign in",
+  "forgotPassword": "Forgot password?",
+  "errorWrongPassword": "Wrong password. It is on the card in the box.",
+  "errorLockedOut": "Too many attempts. Locked for about {minutes} minutes.",
+  "@errorLockedOut": {
+    "placeholders": {
+      "minutes": {"type": "int"}
+    }
+  },
+  "errorRateLimited": "Too many requests — give it a few seconds.",
+  "errorUnreachable": "Lost the connection to the switch. Check that you are still on its Wi-Fi.",
+  "errorServer": "The switch replied with an error ({status}). Try again.",
+  "@errorServer": {
+    "placeholders": {
+      "status": {"type": "int"}
+    }
+  },
+
+  "dashboardEmptyTitle": "No switches yet",
+  "dashboardEmptyBody": "Snap an Extension onto the bus next to your Master and it will appear here.",
+  "reconnecting": "Reconnecting",
+  "reconnect": "Reconnect",
+  "connected": "Connected",
+  "switchOn": "On",
+  "switchOff": "Off",
+  "switchOffline": "Offline",
+  "onOfTotal": "{on} of {total} on",
+  "@onOfTotal": {
+    "placeholders": {
+      "on": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+  "allOn": "All on",
+  "allOff": "All off",
+  "meshBadge": "Mesh",
+  "viaWifi": "Wi-Fi",
+  "viaBluetooth": "Bluetooth",
+  "connectionSection": "Connection",
+  "transportAuto": "Automatic",
+  "transportAutoDesc": "Wi-Fi when you're on the switch's network, Bluetooth otherwise.",
+  "transportWifi": "Wi-Fi only",
+  "transportWifiDesc": "Always use the switch's Wi-Fi. Unlocks setup and updates.",
+  "transportBluetooth": "Bluetooth",
+  "transportBluetoothDesc": "Control over Bluetooth so your phone keeps its own network.",
+  "switchTransport": "Switch connection",
+  "wifiOnlyTitle": "Wi-Fi needed for this",
+  "wifiOnlyBody": "This action isn't available over Bluetooth. Join the switch's Wi-Fi network to continue.",
+  "joinWifi": "Add / join Wi-Fi",
+  "menuReorder": "Reorder switches",
+  "menuExtensions": "Extensions",
+  "menuMesh": "Mesh",
+  "menuFirmware": "Firmware",
+  "menuSettings": "Settings",
+  "menuKillAll": "Turn everything off",
+  "killAllTitle": "Turn everything off?",
+  "killAllBody": "Every switch on every master in the mesh will turn off.",
+  "cancel": "Cancel",
+  "turnOff": "Turn off",
+  "yourSwitches": "Your switches"
+}

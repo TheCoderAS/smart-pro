@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Unisync master serves plain HTTP at 192.168.4.1 on its own access
+  point (no internet path, no certificates possible). Cleartext is
+  allowed for that address ONLY; everything else - e.g. the firmware
+  CDN - must be HTTPS, and an accidental http:// call anywhere else
+  fails loudly.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.4.1</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

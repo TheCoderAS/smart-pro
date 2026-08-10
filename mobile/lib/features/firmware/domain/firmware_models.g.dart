@@ -1,0 +1,56 @@
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'firmware_models.dart';
+
+// **************************************************************************
+// JsonSerializableGenerator
+// **************************************************************************
+
+_FirmwareManifest _$FirmwareManifestFromJson(Map<String, dynamic> json) =>
+    _FirmwareManifest(
+      type: (json['type'] as num).toInt(),
+      version: json['version'] as String,
+      sec: (json['sec'] as num?)?.toInt() ?? 0,
+      size: (json['size'] as num?)?.toInt() ?? 0,
+      sig: json['sig'] as String? ?? '',
+      url: json['url'] as String? ?? '',
+      changelog: json['changelog'] as String? ?? '',
+    );
+
+Map<String, dynamic> _$FirmwareManifestToJson(_FirmwareManifest instance) =>
+    <String, dynamic>{
+      'type': instance.type,
+      'version': instance.version,
+      'sec': instance.sec,
+      'size': instance.size,
+      'sig': instance.sig,
+      'url': instance.url,
+      'changelog': instance.changelog,
+    };
+
+_StoredImage _$StoredImageFromJson(Map<String, dynamic> json) => _StoredImage(
+  type: (json['type'] as num?)?.toInt() ?? 0,
+  version: _readVersion(json, 'version') as String? ?? '',
+  size: (json['size'] as num?)?.toInt() ?? 0,
+);
+
+Map<String, dynamic> _$StoredImageToJson(_StoredImage instance) =>
+    <String, dynamic>{
+      'type': instance.type,
+      'version': instance.version,
+      'size': instance.size,
+    };
+
+_FwStatus _$FwStatusFromJson(Map<String, dynamic> json) => _FwStatus(
+  master: json['master'] as String? ?? '',
+  images:
+      (json['images'] as List<dynamic>?)
+          ?.map((e) => StoredImage.fromJson(e as Map<String, dynamic>))
+          .toList() ??
+      const <StoredImage>[],
+);
+
+Map<String, dynamic> _$FwStatusToJson(_FwStatus instance) => <String, dynamic>{
+  'master': instance.master,
+  'images': instance.images,
+};
