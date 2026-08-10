@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.25.0"
+#define MASTER_FW_VERSION  "11.26.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -1537,6 +1537,10 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             relay_cmd_t k2; k2.target=-1; k2.channel=2; k2.state=false;
             xQueueSend(master_relay_queue,&k1,0);
             xQueueSend(master_relay_queue,&k2,0);
+            /* Persist, like the local kill-all does. Last commanded state
+             * is what the restore policy reads at boot; leaving it stale
+             * would bring a killed house back lit. */
+            relay_state_save();
             Serial.println("[MESH] Kill all (remote)");
             notify_ui();
             return;
@@ -2019,11 +2023,74 @@ static bool mesh_relay_remote(const uint8_t *dst_uid, const uint8_t *dst_mac,
     /* Fire and forget -- no ACK wait.
      * State confirmed via next gossip broadcast (500ms).
      * Blocking the web task for ACK causes 500 errors. */
-    esp_err_t err = esp_now_send(dst_mac,
-                    (const uint8_t*)payload.c_str(), payload.length()+1);
-    Serial.printf("[MESH] relay_remote to %s sw=%s ch=%d state=%d err=%d\n",
-                  dst_uid_str, sw_id, ch, state, err);
-    return (err == ESP_OK);
+    /* Through mesh_send so the packet is tagged. Sent raw, it was dropped
+     * by the peer's tag check and the command silently never landed. */
+    bool ok = mesh_send(dst_mac, payload.c_str(), payload.length()+1);
+    Serial.printf("[MESH] relay_remote to %s sw=%s ch=%d state=%d ok=%d\n",
+                  dst_uid_str, sw_id, ch, state, ok ? 1 : 0);
+    return ok;
+}
+
+/* Parse an 8-hex-char uid. False if it isn't one. */
+static bool mesh_uid_parse(const char *s, uint8_t *out4) {
+    if (!s || strlen(s) != 8) return false;
+    for (int i = 0; i < 4; i++) {
+        char b[3] = { s[i*2], s[i*2+1], 0 };
+        char *end = nullptr;
+        long v = strtol(b, &end, 16);
+        if (end != b + 2) return false;
+        out4[i] = (uint8_t)v;
+    }
+    return true;
+}
+
+/* Turn everything off on every peer as well as here.
+ *
+ * "All off" is one command, and in a mesh it means the whole house -- the
+ * story puts whole-mesh control behind Bluetooth as well as Wi-Fi, and a
+ * kill-all that stops at the master you happen to be talking to is exactly
+ * the kind of half-result that makes people distrust the button. */
+static void mesh_killall_peers(void) {
+    if (!mesh_active) return;
+    char self_uid[12];
+    snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+    StaticJsonDocument<128> doc;
+    doc["type"]  = MESH_PKT_RELAY_CMD;
+    doc["uid"]   = self_uid;
+    doc["sw_id"] = "*";
+    doc["ch"]    = 0;
+    doc["state"] = false;
+    for (int i = 0; i < MAX_MESH_MASTERS; i++) {
+        if (!mesh_peers[i].online) continue;
+        char puid[12];
+        snprintf(puid, sizeof(puid), "%02X%02X%02X%02X",
+                 mesh_peers[i].uid[0], mesh_peers[i].uid[1],
+                 mesh_peers[i].uid[2], mesh_peers[i].uid[3]);
+        doc["dst_uid"] = puid;
+        String payload; serializeJson(doc, payload);
+        mesh_send(mesh_peers[i].mac, payload.c_str(), payload.length()+1);
+    }
+}
+
+/* Drive one switch on a peer to an explicit state, and reflect it in the
+ * local cache so the next state push doesn't show the old value for the
+ * half-second until gossip corrects it. False if the peer is unknown. */
+static bool mesh_relay_set(const uint8_t *peer_uid, const char *sw_id,
+                           int ch, bool state) {
+    int idx = mesh_find_peer(peer_uid);
+    if (idx < 0) return false;
+    bool ok = mesh_relay_remote(peer_uid, mesh_peers[idx].mac, sw_id, ch, state);
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    for (int i = 0; i < mesh_peers[idx].switch_count; i++) {
+        if (!strcmp(mesh_peers[idx].switches[i].id, sw_id)) {
+            mesh_peers[idx].switches[i].state = state;
+            break;
+        }
+    }
+    xSemaphoreGive(state_mutex);
+    notify_ui();
+    return ok;
 }
 
 /* Check peer timeouts */
@@ -2242,6 +2309,59 @@ static String nvs_load_switch_order(void) {
     String s = prefs.getString("sw_order", "");
     prefs.end();
     return s;
+}
+
+/* Everything a slot accumulates that is keyed by slot rather than by board:
+ * switch names, restore policies and last relay states. The registry entry
+ * is keyed by uid and cleared separately by nvs_remove.
+ *
+ * Removing an extension has to clear all of it. The story is explicit that
+ * a removed board's names and settings are forgotten, and that a board
+ * reappearing on the bus is adopted as new with default names -- but a slot
+ * is reused by whatever board lands in it next, so leftovers were inherited
+ * by a completely different device: someone else's names, and a relay that
+ * switches on at boot because the previous occupant was on. */
+static void nvs_forget_slot(int slot) {
+    char id[16], key[20];
+    for (int ch = 1; ch <= 2; ch++) {
+        switch_id(id, sizeof(id), slot, ch);
+        snprintf(key, sizeof(key), "sw:%s", id);
+        prefs.begin("sw_names", false);
+        prefs.remove(key);
+        snprintf(key, sizeof(key), "rs:%s", id);
+        prefs.remove(key);
+        prefs.end();
+    }
+    char k1[8], k2[8];
+    snprintf(k1, sizeof(k1), "e%d_r1", slot);
+    snprintf(k2, sizeof(k2), "e%d_r2", slot);
+    prefs.begin("relay_state", false);
+    prefs.remove(k1);
+    prefs.remove(k2);
+    prefs.end();
+
+    /* Drop the slot's ids from the saved order too, so a reused slot does
+     * not inherit the previous board's position. */
+    String order = nvs_load_switch_order();
+    if (order.length() == 0) return;
+    String rebuilt;
+    int start = 0;
+    while (start < (int)order.length()) {
+        int comma = order.indexOf(',', start);
+        String tok = (comma < 0) ? order.substring(start)
+                                 : order.substring(start, comma);
+        start = (comma < 0) ? order.length() : comma + 1;
+        if (tok.length() == 0) continue;
+        bool mine = false;
+        for (int ch = 1; ch <= 2 && !mine; ch++) {
+            switch_id(id, sizeof(id), slot, ch);
+            mine = (tok == id);
+        }
+        if (mine) continue;
+        if (rebuilt.length()) rebuilt += ",";
+        rebuilt += tok;
+    }
+    if (rebuilt != order) nvs_save_switch_order(rebuilt);
 }
 
 /* ================================================================
@@ -3392,8 +3512,7 @@ static void mesh_send_config(const char *cmd, const char *target_uid,
         }
         int idx = mesh_find_peer(peer_uid);
         if (idx >= 0)
-            esp_now_send(mesh_peers[idx].mac,
-                         (const uint8_t*)payload.c_str(), payload.length()+1);
+            mesh_send(mesh_peers[idx].mac, payload.c_str(), payload.length()+1);
     } else {
         /* Broadcast to all peers */
         mesh_broadcast(payload.c_str(), payload.length()+1);
@@ -3426,6 +3545,8 @@ static void setup_web(void) {
         relay_cmd_t cmd2; cmd2.target=-1; cmd2.channel=2; cmd2.state=false;
         xQueueSend(master_relay_queue,&cmd1,0);
         xQueueSend(master_relay_queue,&cmd2,0);
+        /* One command, the whole house. */
+        mesh_killall_peers();
         notify_ui();
         relay_state_save(); /* persist all-off state */
         Serial.println("[RELAY] Kill all");
@@ -3613,6 +3734,7 @@ static void setup_web(void) {
         ext_reset_identity(&extensions[slot]);
         xSemaphoreGive(state_mutex);
         nvs_remove(uid);
+        nvs_forget_slot(slot);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
     });
@@ -4527,8 +4649,7 @@ static void setup_web(void) {
             doc["ch"]      = 0;
             doc["state"]   = false;
             String payload; serializeJson(doc,payload);
-            esp_now_send(mesh_peers[idx].mac,
-                         (const uint8_t*)payload.c_str(), payload.length()+1);
+            mesh_send(mesh_peers[idx].mac, payload.c_str(), payload.length()+1);
             server.send(200,"application/json","{\"ok\":true}");
             return;
         }
@@ -4562,7 +4683,13 @@ static void setup_web(void) {
         }
         xSemaphoreGive(state_mutex);
 
-        bool new_state = !cur_state;
+        /* An explicit state when the caller sends one. Toggling was the
+         * only option before, which meant an optimistic UI and a retry
+         * could land on opposite values. */
+        String want = server.arg("state");
+        bool new_state = want.length()
+            ? (want == "1" || want == "true" || want == "on")
+            : !cur_state;
         bool ok = mesh_relay_remote(peer_uid, mesh_peers[idx].mac,
                                     sw_id.c_str(), ch, new_state);
 
@@ -5887,6 +6014,7 @@ static void ble_killall(void) {
     relay_cmd_t m2; m2.target=-1; m2.channel=2; m2.state=false;
     xQueueSend(master_relay_queue, &m1, 0);
     xQueueSend(master_relay_queue, &m2, 0);
+    mesh_killall_peers();
     relay_state_save();
     notify_ui();
 }
@@ -6016,9 +6144,37 @@ static void ble_handle_request(const char *json) {
     if (!strcmp(cmd, "relay")) {
         const char *id = req["id"] | "";
         bool st = req["s"] | false;
-        bool r = ble_set_relay_by_id(id, st);
-        Serial.printf("[BLE] relay id='%s' state=%d -> %s\n",
-                      id, st ? 1 : 0, r ? "ok" : "REJECTED");
+        /* "Bluetooth mode controls the whole mesh": an optional peer uid
+         * sends the command on over the mesh instead of driving a local
+         * relay. Without it the app could only ever reach the one master
+         * its radio happened to be talking to. */
+        const char *puid = req["uid"] | "";
+        bool r;
+        if (puid[0]) {
+            uint8_t peer_uid[4];
+            char self_uid[12];
+            snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+                     master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+            if (!strcmp(puid, self_uid)) {
+                r = ble_set_relay_by_id(id, st);
+            } else if (!mesh_active) {
+                res["err"] = "not in mesh";
+                r = false;
+            } else if (!mesh_uid_parse(puid, peer_uid)) {
+                res["err"] = "bad uid";
+                r = false;
+            } else {
+                int ch = 1;
+                const char *us = strrchr(id, '_');
+                if (us && (us[1] == '1' || us[1] == '2')) ch = us[1] - '0';
+                r = mesh_relay_set(peer_uid, id, ch, st);
+                if (!r && !res.containsKey("err")) res["err"] = "peer not found";
+            }
+        } else {
+            r = ble_set_relay_by_id(id, st);
+        }
+        Serial.printf("[BLE] relay uid='%s' id='%s' state=%d -> %s\n",
+                      puid, id, st ? 1 : 0, r ? "ok" : "REJECTED");
         res["ok"] = r;
     } else if (!strcmp(cmd, "killall")) {
         ble_killall();
