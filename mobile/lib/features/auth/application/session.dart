@@ -9,6 +9,7 @@ import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../onboarding/application/first_run.dart';
+import '../../settings/application/master_switch.dart';
 import '../data/auth_repository.dart';
 import '../domain/models.dart';
 
@@ -31,6 +32,19 @@ final class Probing extends SessionState {
 
 final class MasterUnreachable extends SessionState {
   const MasterUnreachable();
+}
+
+/// The phone is on some other master's network. Distinct from unreachable
+/// on purpose: "connect to B's network" is an instruction the user can
+/// follow, "B is out of range" is not, and neither is a login problem.
+final class WrongNetwork extends SessionState {
+  const WrongNetwork({required this.wanted, this.found});
+
+  /// The master the user asked for.
+  final SavedMaster wanted;
+
+  /// The master that answered instead, when we can name it.
+  final String? found;
 }
 
 /// Fresh install with nothing configured. The story is explicit that this
@@ -116,6 +130,14 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
 
     final stored = await _store.readToken(info.uid);
     if (stored == null) return NeedsLogin(info);
+
+    // Cache the network name the master reports for itself, so the
+    // "connect to X" copy is right even after a rename and never comes
+    // from the phone's OS.
+    await ref.read(masterRegistryProvider.notifier).ensure(
+          uid: info.uid,
+          ssid: info.ssid,
+        );
 
     ref.read(tokenProvider.notifier).set(stored);
     try {
@@ -248,6 +270,34 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(_bootstrap);
+  }
+
+  /// Switches the app to another saved master.
+  ///
+  /// Identity is settled by a uid probe before anything is shown, so the
+  /// user never lands on a dashboard that belongs to a different master,
+  /// and never sees a login prompt for what is really a network problem.
+  /// Last-used only moves on a successful arrival — a failed switch must
+  /// not change where the app opens next time.
+  Future<void> switchTo(SavedMaster target) async {
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(() async {
+      final outcome = await ref.read(masterSwitchProvider).switchTo(target);
+      switch (outcome) {
+        case SwitchWrongNetwork(:final target, :final foundName):
+          return WrongNetwork(wanted: target, found: foundName);
+        case SwitchUnreachable():
+          return const MasterUnreachable();
+        case SwitchArrived():
+          final arrived = await _bootstrap();
+          if (arrived is Authenticated) {
+            await ref
+                .read(masterRegistryProvider.notifier)
+                .setLastUsed(target.uid);
+          }
+          return arrived;
+      }
+    });
   }
 
   /// The reconnect dance after any password change (API §6): the

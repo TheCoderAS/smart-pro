@@ -12,6 +12,9 @@ _DeviceInfo _$DeviceInfoFromJson(Map<String, dynamic> json) => _DeviceInfo(
   uid: json['uid'] as String,
   fw: json['fw'] as String,
   auth: json['auth'] as bool,
+  ssid: json['ssid'] as String? ?? '',
+  mesh: json['mesh'] as bool? ?? false,
+  meshId: (json['mesh_id'] as num?)?.toInt() ?? 0,
 );
 
 Map<String, dynamic> _$DeviceInfoToJson(_DeviceInfo instance) =>
@@ -21,6 +24,9 @@ Map<String, dynamic> _$DeviceInfoToJson(_DeviceInfo instance) =>
       'uid': instance.uid,
       'fw': instance.fw,
       'auth': instance.auth,
+      'ssid': instance.ssid,
+      'mesh': instance.mesh,
+      'mesh_id': instance.meshId,
     };
 
 _LoginResult _$LoginResultFromJson(Map<String, dynamic> json) =>

@@ -17,6 +17,20 @@ abstract class DeviceInfo with _$DeviceInfo {
     required String uid,
     required String fw,
     required bool auth,
+
+    /// The network name this master is broadcasting *right now* — its own
+    /// report, not the phone's OS. Instruction copy ("connect to X") comes
+    /// from here, so it self-heals after a rename and needs no location
+    /// permission to read.
+    @Default('') String ssid,
+
+    /// True when this master is in a mesh. Meshed masters are one home and
+    /// one switcher entry, never several.
+    @Default(false) bool mesh,
+
+    /// Stable mesh identity. The mesh name is user-changeable, so the
+    /// switcher keys on this instead.
+    @JsonKey(name: 'mesh_id') @Default(0) int meshId,
   }) = _DeviceInfo;
 
   factory DeviceInfo.fromJson(Map<String, dynamic> json) =>

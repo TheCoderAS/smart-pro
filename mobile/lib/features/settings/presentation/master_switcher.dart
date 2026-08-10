@@ -4,8 +4,6 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app/router.dart';
 import '../../../core/storage/master_registry.dart';
-import '../../../core/storage/secure_store.dart';
-import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
 
 /// Bottom sheet listing saved masters. Selecting one tries to join its
@@ -29,15 +27,25 @@ Future<void> showMasterSwitcher(BuildContext context, WidgetRef ref) {
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
-              for (final m
-                  in masters.value ?? const <SavedMaster>[])
+              for (final m in _switcherEntries(
+                  masters.value ?? const <SavedMaster>[]))
                 ListTile(
-                  leading: const Icon(Icons.router_outlined),
+                  leading: Icon(
+                    m.meshId != null && m.meshId != 0
+                        ? Icons.hub_outlined
+                        : Icons.router_outlined,
+                  ),
                   title: Text(m.name),
-                  subtitle: Text(m.uid),
+                  // Typed, never ambiguous: a mesh is one home, a
+                  // standalone master is one box.
+                  subtitle: Text(
+                    m.meshId != null && m.meshId != 0
+                        ? 'Mesh · ${m.ssid ?? m.uid}'
+                        : 'Standalone · ${m.uid}',
+                  ),
                   onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    await _switchTo(ref, m);
+                    await _switchTo(context, ref, m);
                   },
                 ),
               ListTile(
@@ -57,18 +65,38 @@ Future<void> showMasterSwitcher(BuildContext context, WidgetRef ref) {
   );
 }
 
-Future<void> _switchTo(WidgetRef ref, SavedMaster master) async {
-  await ref.read(masterRegistryProvider.notifier).setLastUsed(master.uid);
-  final ssid = master.ssid;
-  if (ssid != null) {
-    // Roaming note (API §3): if both masters are in one mesh the SSID
-    // is identical and this is a no-op; distinct meshes have distinct
-    // SSIDs and need the join.
-    final password =
-        await ref.read(secureStoreProvider).readPassword(master.uid);
-    if (password != null) {
-      await ref.read(wifiServiceProvider).join(ssid, password);
+/// Masters that share a mesh id are one home and get one entry — the
+/// story is explicit that a meshed master never appears as its own
+/// switchable entry.
+List<SavedMaster> _switcherEntries(List<SavedMaster> masters) {
+  final seenMesh = <int>{};
+  final out = <SavedMaster>[];
+  for (final m in masters) {
+    final mesh = m.meshId;
+    if (mesh != null && mesh != 0) {
+      if (!seenMesh.add(mesh)) continue;
     }
+    out.add(m);
   }
-  await ref.read(sessionProvider.notifier).refresh();
+  return out;
+}
+
+Future<void> _switchTo(
+  BuildContext context,
+  WidgetRef ref,
+  SavedMaster master,
+) async {
+  // Crossing networks is slow and the OS interposes its own prompts, so
+  // the wait gets a name rather than a bare spinner (story Epic 6).
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text('Connecting to ${master.ssid ?? master.name}…'),
+      duration: const Duration(seconds: 8),
+    ),
+  );
+  // The session machine owns the probe, the outcome and last-used: a
+  // failed switch must not change where the app opens next time.
+  await ref.read(sessionProvider.notifier).switchTo(master);
+  messenger.hideCurrentSnackBar();
 }
