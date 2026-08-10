@@ -1833,7 +1833,7 @@ static void nvs_load_switch_name(const char *id, char *name, int nlen) {
     prefs.begin("sw_names", true);
     String s = prefs.getString(key, "");
     prefs.end();
-    if (s.length() > 0) { strncpy(name, s.c_str(), nlen-1); name[nlen-1]=' '; }
+    if (s.length() > 0) { strncpy(name, s.c_str(), nlen-1); name[nlen-1]='\0'; }
     else snprintf(name, nlen, "Switch");
 }
 
@@ -1847,7 +1847,7 @@ static void nvs_load_master_name(char *name, int nlen) {
     prefs.begin("sw_names", true);
     String s = prefs.getString("master_name", "Master 1");
     prefs.end();
-    strncpy(name, s.c_str(), nlen-1); name[nlen-1]=' ';
+    strncpy(name, s.c_str(), nlen-1); name[nlen-1]='\0';
 }
 
 static void nvs_save_switch_order(const String &order) {
@@ -3170,7 +3170,7 @@ static void setup_web(void) {
             server.send(400,"application/json","{\"ok\":false}"); return; }
         xSemaphoreTake(state_mutex,portMAX_DELAY);
         strncpy(master_name,name.c_str(),sizeof(master_name)-1);
-        master_name[sizeof(master_name)-1]=' ';
+        master_name[sizeof(master_name)-1]='\0';
         xSemaphoreGive(state_mutex);
         nvs_save_master_name(name.c_str());
         notify_ui();
@@ -3198,7 +3198,9 @@ static void setup_web(void) {
         char uid_str[20];
         snprintf(uid_str, sizeof(uid_str), "%02X%02X%02X%02X",
                  master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
-        StaticJsonDocument<256> doc;
+        /* 384, not 256: ssid (up to 31 chars) and uid are copied into the
+         * document, and an overflow here truncates the JSON silently. */
+        StaticJsonDocument<384> doc;
         doc["uptime"]    = millis()/1000;
         doc["free_heap"] = ESP.getFreeHeap();
         doc["uid"]       = uid_str;
@@ -3206,6 +3208,15 @@ static void setup_web(void) {
         /* So the UI knows whether to present a login before doing anything
          * else. /api/info is deliberately open; it exposes no secrets. */
         doc["auth"]      = true;   /* a credential is always set */
+        /* The app needs the network name for its "connect to X" copy and
+         * caches it per UID so a rename self-heals. It must come from the
+         * master: reading the phone's SSID would need location permission
+         * (UX stories v5.1 Epic 6). */
+        doc["ssid"]      = mesh_active ? mesh_name : unique_ssid;
+        /* Stable mesh identity for the app's switcher/vault. Survives a
+         * mesh rename; 0 = standalone (Epic 7 Tech Story). */
+        doc["mesh"]      = mesh_active;
+        doc["mesh_id"]   = mesh_active ? ble_mesh_id() : 0;
         String out; serializeJson(doc, out);
         server.send(200, "application/json", out);
     });
