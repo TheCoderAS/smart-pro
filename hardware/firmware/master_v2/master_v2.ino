@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.24.0
+ * Unisync - Master Firmware v11.27.0
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -492,6 +492,25 @@ static presence_t peer_presence(const mesh_peer_t *p, uint32_t now) {
                        p->last_drop_ms, p->drops, now);
 }
 
+/* One of this master's switches, as gossip puts it on the air. Declared up
+ * here with the other types rather than beside mesh_gossip: Arduino
+ * generates prototypes for every function in the sketch and injects them
+ * ahead of the first function definition, so any type named in a signature
+ * has to exist by then. See the forward-declaration block below. */
+#define MESH_MTU        242   /* 250 minus the auth tag mesh_send appends */
+#define GOSSIP_SW_MAX   2     /* switches per window packet */
+#define MAX_LOCAL_SW    (2 + 2 * MAX_EXTENSIONS)
+
+typedef struct {
+    char    id[16];
+    char    name[24];
+    uint8_t slot_color;   /* index into SLOT_COLORS */
+    bool    state;
+    bool    online;
+    bool    restore;
+    uint8_t ch;
+} local_sw_t;
+
 /* Pending challenge tracking */
 #define MAX_CHALLENGES 5
 typedef struct {
@@ -786,6 +805,18 @@ static uint32_t fwrx_last_ms = 0;
  * callback and the bus task far above; Arduino's auto-prototype pass is
  * not reliable enough to depend on here. */
 static void     ext_reset_identity(extension_t *e);
+/* Presence and gossip. Both name types defined above but *below* the first
+ * function definition in the sketch, so without these the auto-generated
+ * prototypes land before the typedefs and fail to parse. */
+static const char *presence_str(presence_t p);
+static presence_t presence_of(bool up, uint32_t settle_until_ms,
+                              uint32_t last_drop_ms, uint8_t drops,
+                              uint32_t now);
+static presence_t ext_presence(const extension_t *e, uint32_t now);
+static presence_t peer_presence(const mesh_peer_t *p, uint32_t now);
+static uint8_t  gossip_collect(local_sw_t *out);
+static void     gossip_add_switch(JsonArray arr, const local_sw_t *s);
+static void     gossip_emit(JsonDocument &doc, const char *what);
 static bool     switch_id_valid(const String &id);
 static void     nvs_load_switch_name(const char *id, char *name, int nlen);
 static void     relay_state_save(void);
@@ -1127,20 +1158,6 @@ static void mesh_broadcast(const void *data, size_t len) {
  * Keys inside "sw" are one character because the budget is genuinely that
  * tight -- a 23-character switch name is 29 bytes of the ~95 an entry costs.
  */
-#define MESH_MTU        242   /* 250 minus the auth tag mesh_send appends */
-#define GOSSIP_SW_MAX   2     /* switches per window packet */
-#define MAX_LOCAL_SW    (2 + 2 * MAX_EXTENSIONS)
-
-typedef struct {
-    char    id[16];
-    char    name[24];
-    uint8_t slot_color;   /* index into SLOT_COLORS */
-    bool    state;
-    bool    online;
-    bool    restore;
-    uint8_t ch;
-} local_sw_t;
-
 /* What we last put on the air, so a change can be spotted without asking
  * every consumer to tell us. */
 static bool     gossip_shadow_valid = false;
