@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:convert/convert.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unisync/core/crypto/recovery_hmac.dart';
@@ -32,52 +34,113 @@ void main() {
     });
   });
 
-  group('recoveryResponse', () {
-    // RFC 4231 test case 1 uses a 20-byte key, which a Unisync card
-    // never produces, so derive expected values with the same
-    // primitive instead: this pins OUR truncation behaviour (first 8
-    // bytes) and byte order rather than the crypto package itself.
-    test('is HMAC-SHA256 truncated to exactly 8 bytes', () {
-      final out = recoveryResponse(
-        '0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b',
-        List<int>.filled(8, 0x48),
+  group('buildRecoveryRequest', () {
+    const key = '000102030405060708090a0b0c0d0e0f';
+    final challenge = hex.decode('0001020304050607');
+
+    test('has the v2 header and the wrapped password after the proof', () {
+      final req = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: challenge,
+        newPassword: 'hunter2hunter2',
       );
-      expect(out, hasLength(8));
+      expect(req[0], 0x02);
+      expect(req[1], 14);
+      expect(req, hasLength(10 + 14));
     });
 
-    test('is deterministic and challenge-sensitive', () {
-      const key = '000102030405060708090a0b0c0d0e0f';
-      final a1 = recoveryResponse(key, [1, 2, 3, 4, 5, 6, 7, 8]);
-      final a2 = recoveryResponse(key, [1, 2, 3, 4, 5, 6, 7, 8]);
-      final b = recoveryResponse(key, [8, 7, 6, 5, 4, 3, 2, 1]);
-      expect(a1, a2);
-      expect(a1, isNot(b));
+    test('the password is never on the wire in the clear', () {
+      // The whole reason this format exists: the Bluetooth link is open
+      // and this carries the next whole-home password.
+      const password = 'correcthorse';
+      final req = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: challenge,
+        newPassword: password,
+      );
+      final onWire = req.sublist(10);
+      expect(onWire, isNot(utf8.encode(password)));
+    });
+
+    test('the same password under a different challenge looks different', () {
+      // Otherwise a recorded exchange would leak by comparison.
+      final a = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: challenge,
+        newPassword: 'correcthorse',
+      );
+      final b = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: hex.decode('0706050403020100'),
+        newPassword: 'correcthorse',
+      );
+      expect(a.sublist(10), isNot(b.sublist(10)));
+    });
+
+    test('the proof covers the wrapped password, not just the challenge', () {
+      // If it didn't, a recorded request could be replayed with someone
+      // else's password grafted on.
+      final a = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: challenge,
+        newPassword: 'passwordone',
+      );
+      final b = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: challenge,
+        newPassword: 'passwordtwo',
+      );
+      expect(a.sublist(2, 10), isNot(b.sublist(2, 10)));
     });
 
     test('is key-sensitive', () {
-      final challenge = [1, 2, 3, 4, 5, 6, 7, 8];
-      final a = recoveryResponse(
-        '000102030405060708090a0b0c0d0e0f',
-        challenge,
+      final a = buildRecoveryRequest(
+        recoveryKeyHex: key,
+        challenge: challenge,
+        newPassword: 'hunter2hunter2',
       );
-      final b = recoveryResponse(
-        'f00102030405060708090a0b0c0d0e0f',
-        challenge,
+      final b = buildRecoveryRequest(
+        recoveryKeyHex: 'f00102030405060708090a0b0c0d0e0f',
+        challenge: challenge,
+        newPassword: 'hunter2hunter2',
       );
       expect(a, isNot(b));
     });
 
-    test('matches a known HMAC-SHA256 vector prefix', () {
-      // Computed independently with:
-      //   python3 -c "import hmac,hashlib;
-      //   print(hmac.new(bytes.fromhex('000102030405060708090a0b0c0d0e0f'),
-      //   bytes.fromhex('0001020304050607'), hashlib.sha256).hexdigest())"
-      // = c1af5e13e9f35c836483aec70b15c2b10238d9f411e0a6e53f809fa01b406bfa
-      final out = recoveryResponse(
-        '000102030405060708090a0b0c0d0e0f',
-        hex.decode('0001020304050607'),
+    test('rejects a password the firmware would refuse', () {
+      expect(
+        () => buildRecoveryRequest(
+          recoveryKeyHex: key,
+          challenge: challenge,
+          newPassword: 'short',
+        ),
+        throwsFormatException,
       );
-      expect(hex.encode(out), 'c1af5e13e9f35c83');
+    });
+  });
+
+  group('RecoveryVerdict', () {
+    test('an accepted mesh recovery says the whole home', () {
+      final v = RecoveryVerdict.fromJson(const {
+        'v': 2,
+        'ok': true,
+        'scope': 'mesh',
+      });
+      expect(v.accepted, isTrue);
+      expect(v.wholeHome, isTrue);
+    });
+
+    test('a rejection carries the wait the device dictated', () {
+      // The app renders this countdown; it never computes a backoff.
+      final v = RecoveryVerdict.fromJson(const {
+        'v': 2,
+        'ok': false,
+        'wait': 8,
+        'err': 'wrong recovery key',
+      });
+      expect(v.accepted, isFalse);
+      expect(v.waitSeconds, 8);
+      expect(v.error, 'wrong recovery key');
     });
   });
 }
