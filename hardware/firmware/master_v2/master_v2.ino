@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.20.2
+ * Unisync - Master Firmware v11.24.0
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.20.2"
+#define MASTER_FW_VERSION  "11.24.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -168,6 +168,16 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 #define RELAY1_PIN    17
 #define RELAY2_PIN    21
 #define RS485_DE_PIN  23
+
+/* Factory reset button. GPIO9 is the BOOT pin on most ESP32-C6 boards and
+ * is free after startup; production hardware needs a dedicated momentary
+ * switch to ground on this pin.
+ *
+ * It is a strapping pin: held LOW during power-up the chip enters download
+ * mode instead of running. So the button must not be held while power is
+ * applied -- press it while the device is already running. */
+#define RESET_BTN_PIN     9
+#define RESET_HOLD_MS     9000UL
 #define BUS_RX_PIN    4
 #define BUS_TX_PIN    5
 
@@ -242,7 +252,9 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 #define MESH_PKT_LEAVE     0x07  /* master leaving mesh */
 #define MESH_PKT_PING      0x08  /* keepalive */
 #define MESH_PKT_PASS_CHG  0x09  /* password change broadcast */
-#define MESH_PKT_CONFIG    0x0A  /* config command: rename/reorder */
+#define MESH_PKT_CONFIG    0x0A
+#define MESH_PKT_KICK      0x0B
+#define MESH_PKT_KICK_ACK  0x0C  /* config command: rename/reorder */
 
 /* ================================================================
  * RELAY RATE LIMITING
@@ -488,6 +500,7 @@ static uint32_t       auth_lock_until = 0;
 #define BLE_REQ_UUID   "556e6973-796e-6320-5265-636f76657235"
 #define BLE_RSP_UUID   "556e6973-796e-6320-5265-636f76657236"
 #define BLE_STATE_UUID "556e6973-796e-6320-5265-636f76657237"
+#define BLE_SNONCE_UUID "556e6973-796e-6320-5265-636f76657238"
 #define BLE_CHUNK      160          /* fits the default MTU with headroom */
 #define BLE_REQ_MAX    512
 #define BLE_STATE_MIN_MS 150   /* floor between state pushes, deferred not dropped */
@@ -533,11 +546,14 @@ typedef struct {
     bool     authed;
     uint32_t opened_ms;
     uint32_t last_ms;
+    uint32_t last_counter;   /* replay guard: must strictly increase */
 } ble_conn_t;
 static ble_conn_t   ble_conns[BLE_MAX_CONN];
 static uint8_t      ble_conn_count = 0;
 static NimBLEServer *ble_server    = nullptr;
 static uint16_t     ble_req_handle = 0xFFFF;
+static NimBLECharacteristic *ble_snonce_char = nullptr;
+static uint8_t      ble_snonce[8] = {0};
 static bool     ble_connected   = false;
 
 /* Deferred credential change: reply first, then restart the AP, so the
@@ -577,6 +593,7 @@ static bool     mesh_auth_set     = false;
 static uint32_t cred_version      = 0;
 static char     mesh_join_pin[7]  = {0};  /* PIN we are joining with */
 static bool     cred_stale        = false;  /* we missed a change, re-add me */
+static volatile bool kick_acked   = false;  /* target confirmed deletion */
 
 static uint8_t  root_key[16] = {0};
 static bool     root_key_set = false;
@@ -586,6 +603,8 @@ static bool     fw_key_set   = false;
 static bool     upload_authed  = false;   /* set at UPLOAD_FILE_START */
 static void     pin_wrap(const char *pin, const uint8_t *uid4,
                          const uint8_t *nonce8, uint8_t *buf, uint16_t n);
+static void     ble_new_session_nonce(void);
+static bool     ble_proof_ok(JsonDocument &req);
 static void     ble_notify_chunked(NimBLECharacteristic *ch, const String &s);
 static void     ble_handle_request(const char *json);
 static bool     ble_set_relay_by_id(const char *id, bool st);
@@ -593,6 +612,8 @@ static void     ble_killall(void);
 static uint16_t ble_mesh_id(void);
 static void     ble_update_adv_data(void);
 static void     ble_reap_connections(void);
+static void     factory_reset(void);
+static void     reset_button_tick(void);
 static void     ble_recovery_begin(void);
 static void     ble_recovery_apply(void);
 static void     mesh_broadcast_pass_change(void);
@@ -1040,11 +1061,36 @@ static bool mesh_verify_pin(const char *pin) {
 static void mesh_recv_cb(const esp_now_recv_info_t *info,
                          const uint8_t *data, int len) {
     if (len < 2) return;
-    /* Authenticate before parsing anything. An unsigned or forged packet
-     * is dropped here, so nothing downstream ever sees attacker input. */
+    /* Authenticate before parsing anything, so nothing downstream sees
+     * attacker input.
+     *
+     * JOIN_REQ is the one exception, and it has to be: a master asking to
+     * join has no mesh key yet -- the join is what delivers it -- so it
+     * cannot possibly tag the request. That message is authenticated by
+     * the PIN instead, which is out of band, single use and rate limited.
+     * Everything else must carry a valid tag. */
     { int body = mesh_verify(data, len);
-      if (body < 0) return;
-      len = body; }
+      if (body < 0) {
+          bool is_join = false;
+          if (data[0] == '{') {
+              StaticJsonDocument<192> probe;
+              if (deserializeJson(probe, data, len) == DeserializationError::Ok)
+                  is_join = ((uint8_t)(probe["type"] | 0) == MESH_PKT_JOIN_REQ);
+          }
+          bool is_kick_ack = false;
+          if (!is_join && data[0] == '{') {
+              StaticJsonDocument<192> probe2;
+              if (deserializeJson(probe2, data, len) == DeserializationError::Ok)
+                  is_kick_ack = ((uint8_t)(probe2["type"] | 0) == MESH_PKT_KICK_ACK);
+          }
+          /* A master that has just deleted its credentials cannot tag its
+           * acknowledgment. It carries no authority -- it only confirms a
+           * removal we initiated. */
+          if (!is_join && !is_kick_ack) return;
+      } else {
+          len = body;
+      }
+    }
 
     /* Binary firmware packets share the ESP-NOW channel with the JSON
      * protocol. JSON always starts with '{' (0x7B), so a 0xFB first byte
@@ -1418,6 +1464,60 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
         const char *reason = doc["reason"] | "wrong_pin";
         Serial.printf("[MESH] JOIN_REJ: %s\n", reason);
         /* UI will show timeout error - nothing more to do */
+
+    } else if (type == MESH_PKT_KICK_ACK) {
+        const char *who = doc["uid"] | "";
+        Serial.printf("[MESH] %s confirmed it deleted its mesh credentials\n", who);
+        kick_acked = true;
+
+    } else if (type == MESH_PKT_KICK) {
+        /* Another master is removing us. The packet is tagged with
+         * mesh_auth_key, so only a genuine member can send it.
+         *
+         * Mesh credentials are wiped BEFORE the restart, deliberately: a
+         * departing master must not keep anything that would let it
+         * rejoin or listen. Note this only binds a cooperating device --
+         * see the note in the security audit about a unit that is powered
+         * off during the kick, or sold. */
+        const char *tgt = doc["target"] | "";
+        char self_uid[12];
+        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        if (strcmp(tgt, self_uid) != 0) {
+            /* Not us: drop the departing master from our own table. */
+            uint8_t tu[4];
+            if (strlen(tgt)==8) {
+                for (int k=0;k<4;k++){ char b[3]={tgt[k*2],tgt[k*2+1],0};
+                    tu[k]=(uint8_t)strtoul(b,NULL,16); }
+                int idx = mesh_find_peer(tu);
+                if (idx >= 0) {
+                    Serial.printf("[MESH] peer %s removed from the mesh\n", tgt);
+                    if (esp_now_is_peer_exist(mesh_peers[idx].mac))
+                        esp_now_del_peer(mesh_peers[idx].mac);
+                    memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
+                    master_order_remove(tgt);
+                    notify_ui();
+                }
+            }
+            return;
+        }
+        Serial.println("[MESH] we have been removed from the mesh -- reverting to standalone");
+        /* Delete first, acknowledge second, reboot last. The acknowledgment
+         * is what lets the remover report success honestly, and deleting
+         * before rebooting means a failed reboot never leaves this device
+         * holding both identities. */
+        mesh_nvs_clear();
+        {
+            StaticJsonDocument<96> ack;
+            ack["type"] = MESH_PKT_KICK_ACK;
+            ack["uid"]  = self_uid;
+            String out; serializeJson(ack, out);
+            /* mesh_nvs_clear() dropped our key, so this goes out untagged;
+             * the remover accepts KICK_ACK on that basis alone. */
+            mesh_broadcast(out.c_str(), out.length()+1);
+        }
+        delay(300);
+        ESP.restart();
 
     } else if (type == MESH_PKT_LEAVE) {
         /* Peer leaving mesh -- fully deregister it */
@@ -2514,6 +2614,7 @@ static void task_bus(void *arg) {
         static uint32_t last_reap = 0;
         if (millis() - last_reap >= 2000) { last_reap = millis(); ble_reap_connections(); }
 
+        reset_button_tick();
         ble_recovery_apply();
 
         /* Apply a deferred credential change once the HTTP reply has gone
@@ -3742,6 +3843,81 @@ static void setup_web(void) {
     });
 
     /* Leave mesh */
+    /* Remove another master from the mesh. The target wipes its mesh
+     * credentials and restarts standalone; the mesh itself is unchanged --
+     * name, password and keys all stay as they were, so nobody else is
+     * logged out and no peer is stranded. */
+    server.on("/api/mesh/kick", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        if (!mesh_active) {
+            server.send(400,"application/json","{\"error\":\"not in mesh\"}");
+            return;
+        }
+        String tgt = server.arg("uid");
+        char self_uid[12];
+        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        if (tgt.length()!=8) {
+            server.send(400,"application/json","{\"error\":\"uid must be 8 hex chars\"}");
+            return;
+        }
+        if (tgt.equalsIgnoreCase(self_uid)) {
+            server.send(400,"application/json",
+                "{\"error\":\"use /api/mesh/leave to remove this master\"}");
+            return;
+        }
+        uint8_t tu[4];
+        for (int k=0;k<4;k++){ char b[3]={tgt[k*2],tgt[k*2+1],0};
+            tu[k]=(uint8_t)strtoul(b,NULL,16); }
+        int idx = mesh_find_peer(tu);
+        if (idx < 0) {
+            server.send(404,"application/json","{\"error\":\"not a member\"}");
+            return;
+        }
+        /* Refuse an offline target. It would never hear the kick, so it
+         * would keep the mesh credentials and rejoin when powered on --
+         * the app would have shown a removal that did not happen. Enforced
+         * here rather than left to the app. */
+        if (!mesh_peers[idx].online) {
+            server.send(409,"application/json",
+                "{\"error\":\"master is offline; power it on and try again\"}");
+            return;
+        }
+
+        /* Arm before sending: a fast acknowledgment must not be cleared
+         * by a reset that happens after the broadcast. */
+        kick_acked = false;
+
+        StaticJsonDocument<128> doc;
+        doc["type"]   = MESH_PKT_KICK;
+        doc["uid"]    = self_uid;
+        doc["target"] = tgt.c_str();
+        String payload; serializeJson(doc,payload);
+        mesh_broadcast(payload.c_str(), payload.length()+1);
+        /* Wait for the target to confirm it deleted its credentials before
+         * reporting success. Without this the app would show a removal
+         * that may not have happened. */
+        uint32_t t0 = millis();
+        while (!kick_acked && (millis() - t0) < 3000) {
+            server.handleClient();
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (!kick_acked) {
+            Serial.printf("[MESH] %s never confirmed deletion\n", tgt.c_str());
+            server.send(504,"application/json",
+                "{\"error\":\"master did not confirm removal; try again\"}");
+            return;
+        }
+        /* Confirmed: now drop it locally. */
+        if (esp_now_is_peer_exist(mesh_peers[idx].mac))
+            esp_now_del_peer(mesh_peers[idx].mac);
+        memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
+        master_order_remove(tgt.c_str());
+        notify_ui();
+        Serial.printf("[MESH] kicked %s, deletion confirmed\n", tgt.c_str());
+        server.send(200,"application/json","{\"ok\":true}");
+    });
+
     server.on("/api/mesh/leave", HTTP_POST, [](){
         if (!auth_ok()) return;
         if (!mesh_active) {
@@ -4979,6 +5155,15 @@ static void task_fwsync(void *arg) {
 /* ================================================================
  * BLE RECOVERY SERVICE
  * ================================================================ */
+static void ble_new_session_nonce(void) {
+    for (int i = 0; i < 8; i += 4) {
+        uint32_t r = esp_random();
+        ble_snonce[i]=r&0xFF; ble_snonce[i+1]=(r>>8)&0xFF;
+        ble_snonce[i+2]=(r>>16)&0xFF; ble_snonce[i+3]=(r>>24)&0xFF;
+    }
+    if (ble_snonce_char) ble_snonce_char->setValue(ble_snonce, 8);
+}
+
 static void ble_new_nonce(void) {
     for (int i = 0; i < 8; i += 4) {
         uint32_t r = esp_random();
@@ -5130,6 +5315,70 @@ static void ble_notify_chunked(NimBLECharacteristic *ch, const String &s) {
     }
 }
 
+/* Per-command proof.
+ *
+ * There is no login over Bluetooth -- the password must never cross this
+ * link -- and the raw token must not either, because the link is open to
+ * anyone in range and a recorded command would otherwise yield a token
+ * that works everywhere, for ever.
+ *
+ * Instead the app proves it holds a token without sending it:
+ *     n = the token's nonce half        (16 hex)
+ *     k = a counter, strictly increasing per connection
+ *     p = HMAC(token, session_nonce || counter)[0..7]   (16 hex)
+ *
+ * The master rebuilds the token from n -- it can, because the session key
+ * is derived from the active password -- and recomputes the proof. The
+ * per-connection session nonce stops a proof being replayed on another
+ * connection; the counter stops it being replayed on this one.
+ */
+static bool ble_proof_ok(JsonDocument &req) {
+    const char *nh = req["n"] | "";
+    const char *ph = req["p"] | "";
+    uint32_t ctr   = req["k"] | 0;
+    if (strlen(nh) != 16 || strlen(ph) != 16 || ctr == 0) return false;
+
+    uint8_t nonce_t[8], given[8];
+    for (int i = 0; i < 8; i++) {
+        char b[3] = { nh[i*2], nh[i*2+1], 0 };
+        nonce_t[i] = (uint8_t)strtoul(b, NULL, 16);
+        char d[3] = { ph[i*2], ph[i*2+1], 0 };
+        given[i]   = (uint8_t)strtoul(d, NULL, 16);
+    }
+
+    /* Rebuild the token this proof claims to come from. */
+    uint8_t key[16], mac[32];
+    session_key(key);
+    hmac_sha256(key, nonce_t, 8, mac);
+    char token[AUTH_TOKEN_LEN];
+    for (int i = 0; i < 8; i++) sprintf(token + i*2,      "%02x", nonce_t[i]);
+    for (int i = 0; i < 8; i++) sprintf(token + 16 + i*2, "%02x", mac[i]);
+    token[32] = 0;
+
+    /* Expected proof over this connection's nonce and the counter. */
+    uint8_t msg[12];
+    memcpy(msg, ble_snonce, 8);
+    msg[8]=(ctr>>24)&0xFF; msg[9]=(ctr>>16)&0xFF;
+    msg[10]=(ctr>>8)&0xFF; msg[11]=ctr&0xFF;
+    uint8_t want[32];
+    hmac_sha256((const uint8_t *)token, msg, sizeof(msg), want);
+    if (!ct_equal(want, given, 8)) return false;
+
+    /* Replay guard for this connection. */
+    for (int i = 0; i < BLE_MAX_CONN; i++) {
+        if (!ble_conns[i].used || ble_conns[i].handle != ble_req_handle) continue;
+        if (ctr <= ble_conns[i].last_counter) {
+            Serial.printf("[BLE] replayed counter %lu, rejected\n",
+                          (unsigned long)ctr);
+            return false;
+        }
+        ble_conns[i].last_counter = ctr;
+        ble_conns[i].authed = true;
+        break;
+    }
+    return true;
+}
+
 /* Control commands. Deliberately a small set: switching, listing and
  * state. Firmware upload is not here and will not be -- 1.4 MB over BLE
  * is hours, and the Wi-Fi path already works. */
@@ -5141,38 +5390,17 @@ static void ble_handle_request(const char *json) {
         return;
     }
     const char *cmd = req["c"] | "";
-    String tok      = req["t"] | "";
-    Serial.printf("[BLE] cmd='%s' token=%s\n",
-                  cmd, tok.length() ? "present" : "MISSING");
+    Serial.printf("[BLE] cmd='%s' ctr=%lu\n", cmd,
+                  (unsigned long)(req["k"] | 0));
 
     StaticJsonDocument<2048> res;
 
-    if (!strcmp(cmd, "login")) {
-        const char *pw = req["p"] | "";
-        const char *want = active_pass();
-        if (strlen(pw) != strlen(want) || !safe_equal(want, pw, strlen(want))) {
-            res["err"] = "bad password";
-        } else {
-            char t[AUTH_TOKEN_LEN];
-            make_token(t);
-            res["token"] = t;
-            res["mesh"]  = mesh_active;
-        }
-        String out; serializeJson(res, out);
-        ble_notify_chunked(ble_rsp_char, out);
-        return;
-    }
-
-    /* Everything else needs the same token the Wi-Fi API uses, so one
-     * login works across both transports and across every master. */
-    if (token_valid(tok)) {
-        for (int i = 0; i < BLE_MAX_CONN; i++)
-            if (ble_conns[i].used && ble_conns[i].handle == ble_req_handle)
-                ble_conns[i].authed = true;
-    }
-    if (!token_valid(tok)) {
-        Serial.println("[BLE] token rejected -- login required");
-        res["err"] = "login required";
+    /* There is no login here, by design: the password must never cross
+     * Bluetooth. Every command carries a proof of a token obtained over
+     * Wi-Fi instead. */
+    if (!ble_proof_ok(req)) {
+        Serial.println("[BLE] proof rejected");
+        res["err"] = "invalid proof";
         String out; serializeJson(res, out);
         ble_notify_chunked(ble_rsp_char, out);
         return;
@@ -5409,10 +5637,14 @@ class BleSrvCB : public NimBLEServerCallbacks {
             ble_conns[i].handle    = h;
             ble_conns[i].opened_ms = millis();
             ble_conns[i].last_ms   = millis();
+            ble_conns[i].last_counter = 0;
             ble_conn_count++;
             break;
         }
         ble_connected = (ble_conn_count > 0);
+        /* A new session nonce per connection: a proof recorded on an
+         * earlier connection cannot be replayed on this one. */
+        ble_new_session_nonce();
         Serial.printf("[BLE] client connected (handle %u), %u open\n",
                       h, ble_conn_count);
         ble_update_adv_data();
@@ -5545,6 +5777,11 @@ static void ble_recovery_begin(void) {
     ble_state_char = svc->createCharacteristic(
         BLE_STATE_UUID, NIMBLE_PROPERTY::NOTIFY);
 
+    /* Fresh per connection; the app reads it and binds every proof to it. */
+    ble_snonce_char = svc->createCharacteristic(
+        BLE_SNONCE_UUID, NIMBLE_PROPERTY::READ);
+    ble_new_session_nonce();
+
     ble_new_nonce();
     svc->start();
 
@@ -5601,6 +5838,63 @@ static void uid_from_efuse(void) {
     master_uid[2]=base_mac[4]; master_uid[3]=base_mac[5];
 }
 
+/* Wipe everything the owner configured and restart.
+ *
+ * Deliberately NOT cleared: the "factory" namespace, which holds the
+ * password and recovery key printed on the card in the box, and the
+ * "keys" namespace, which holds the product keys needed to pair
+ * extensions. Regenerating either would make the customer's card wrong
+ * for the life of the device.
+ *
+ * Cleared: device password override, mesh membership and keys, switch
+ * names and ordering, the extension registry, and saved relay states. */
+static void factory_reset(void) {
+    Serial.println("\n[RESET] ************************************************");
+    Serial.println("[RESET] Factory reset: erasing all configuration");
+    Serial.println("[RESET] Card password and recovery key are preserved");
+    Serial.println("[RESET] ************************************************\n");
+
+    /* These are the actual namespace names used elsewhere in this file.
+     * Getting one wrong fails silently -- Preferences happily clears a
+     * namespace that was never used. */
+    const char *wipe[] = { "auth", "mesh", "ext_map", "relay_state", "sw_names" };
+    for (unsigned i = 0; i < sizeof(wipe)/sizeof(wipe[0]); i++) {
+        prefs.begin(wipe[i], false);
+        prefs.clear();
+        prefs.end();
+    }
+    delay(300);
+    ESP.restart();
+}
+
+/* Held for RESET_HOLD_MS while the device is running. No login required:
+ * a reset is exactly what someone reaches for when they cannot log in.
+ * LED feedback so a long hold reads as progress rather than a dead button. */
+static void reset_button_tick(void) {
+    static uint32_t held_since = 0;
+    static bool     announced  = false;
+
+    if (digitalRead(RESET_BTN_PIN) == LOW) {
+        if (!held_since) { held_since = millis(); announced = false; }
+        uint32_t held = millis() - held_since;
+        if (held > 2000 && !announced) {
+            announced = true;
+            Serial.printf("[RESET] hold for %lu more seconds to factory reset\n",
+                          (RESET_HOLD_MS - held) / 1000);
+        }
+        /* Blink faster the closer it gets, so the user can see it working. */
+        if (held > 2000) {
+            uint32_t period = (held > RESET_HOLD_MS - 2000) ? 100 : 400;
+            digitalWrite(RELAY1_PIN, ((millis() / period) & 1) ? HIGH : LOW);
+        }
+        if (held >= RESET_HOLD_MS) factory_reset();
+    } else if (held_since) {
+        held_since = 0;
+        if (announced) Serial.println("[RESET] released, cancelled");
+        digitalWrite(RELAY1_PIN, master_relay1 ? LOW : HIGH);
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     // while (!Serial) delay(10);
@@ -5632,14 +5926,26 @@ void setup() {
     }
     prefs.end();
 
+    /* The card values are read first: after a factory reset the device
+     * password must go back to what the card says, not to something new.
+     * Regenerating it would make the printed card wrong for ever. */
+    prefs.begin("factory", true);
+    String card_pw = prefs.getString("pass", "");
+    prefs.end();
+
     prefs.begin("auth", false);
     {
         String ap = prefs.getString("appw", "");
         if (ap.length() < PASS_MIN_LEN) {
-            char gen[13];
-            rand_hex(gen, 12);
-            prefs.putString("appw", gen);
-            ap = String(gen);
+            if (card_pw.length() >= PASS_MIN_LEN) {
+                ap = card_pw;                       /* restored after reset */
+                Serial.println("[AUTH] password restored to the card value");
+            } else {
+                char gen[13];
+                rand_hex(gen, 12);
+                ap = String(gen);                   /* genuinely first boot */
+            }
+            prefs.putString("appw", ap);
         }
         /* Standalone AP password only. mesh_pass is SHARED across a mesh
          * so a phone roams between masters and so a master-OTA pull can
@@ -5869,6 +6175,7 @@ void setup() {
     } else {
         Serial.println("[FW] filesystem UNUSABLE -- firmware library disabled");
     }
+    pinMode(RESET_BTN_PIN, INPUT_PULLUP);
     ble_recovery_begin();
     Serial.println("[MASTER] Ready - connect to Unisync -> 192.168.4.1");
 }
