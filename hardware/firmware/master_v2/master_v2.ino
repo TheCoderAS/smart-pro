@@ -5249,6 +5249,22 @@ class BleChalCB : public NimBLECharacteristicCallbacks {
     }
 };
 
+/* The recovery result carries the whole-home password in the clear. The
+ * characteristic is READ|NOTIFY (the app subscribes, but falls back to a
+ * read), so the value must not outlive the connection that earned it --
+ * otherwise anyone in radio range can connect afterwards and read the
+ * live password straight out of the device, indefinitely.
+ *
+ * Cleared on every connect and disconnect: it exists only between a
+ * successful recovery and the end of that same connection. */
+static void ble_clear_recovery_result(void) {
+    if (ble_result_char) ble_result_char->setValue((uint8_t *)"", 0);
+    /* Deliberately does NOT touch ble_new_pass: task_web consumes it in
+     * ble_recovery_apply(), which can run after the client has gone.
+     * Wiping it here would apply an empty password to the whole home.
+     * That buffer is zeroed in ble_recovery_apply() once it is spent. */
+}
+
 /* Same effect as POST /api/relay, driven from the BLE transport.
  * Mirrors the HTTP handler's semantics deliberately: id "master_1" or
  * "ext<slot>_<ch>", state applied, queued to the same task. */
@@ -5666,6 +5682,8 @@ class BleSrvCB : public NimBLEServerCallbacks {
         /* A new session nonce per connection: a proof recorded on an
          * earlier connection cannot be replayed on this one. */
         ble_new_session_nonce();
+        /* A new client never inherits a previous client's recovery result. */
+        ble_clear_recovery_result();
         Serial.printf("[BLE] client connected (handle %u), %u open\n",
                       h, ble_conn_count);
         ble_update_adv_data();
@@ -5691,6 +5709,9 @@ class BleSrvCB : public NimBLEServerCallbacks {
         }
         ble_connected = (ble_conn_count > 0);
         ble_req_len   = 0;
+        /* The delivered password dies with the connection that asked for
+         * it; it must not sit readable for the next person in range. */
+        ble_clear_recovery_result();
         Serial.printf("[BLE] client disconnected (reason %d), %u open\n",
                       reason, ble_conn_count);
         ble_update_adv_data();
@@ -5847,6 +5868,8 @@ static void ble_recovery_apply(void) {
     }
     ap_change_pending = true;
     ap_change_at_ms   = millis() + AP_APPLY_DELAY_MS;
+    /* Spent: don't leave the new whole-home password sitting in RAM. */
+    memset(ble_new_pass, 0, sizeof(ble_new_pass));
 }
 
 /* Read the UID from the factory-burned eFuse MAC. Must run before
