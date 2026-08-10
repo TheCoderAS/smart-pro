@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/storage/master_registry.dart';
+import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_coordinator.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
 import '../../onboarding/presentation/welcome_screen.dart';
@@ -27,11 +29,92 @@ class SessionGate extends ConsumerWidget {
       final NeedsCommissioning s => CommissioningScreen(state: s),
       NeedsWelcome() => const WelcomeScreen(),
       final WrongNetwork s => _WrongNetworkScreen(state: s),
+      final AccessReset s => _AccessResetScreen(state: s),
       MasterUnreachable() => const _UnreachableScreen(),
       _ => const Scaffold(
           body: Center(child: CircularProgressIndicator()),
         ),
     };
+  }
+}
+
+/// Someone reset access while this phone was on Bluetooth.
+///
+/// An instruction, not a login form. Login is Wi-Fi-only by design, so a
+/// password field here would be a dead end — the way back is the master's
+/// network. Bluetooth stays unusable until that happens, and saying so is
+/// kinder than letting the user hunt for it.
+class _AccessResetScreen extends ConsumerWidget {
+  const _AccessResetScreen({required this.state});
+
+  final AccessReset state;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final network = state.network;
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.lock_reset_rounded,
+                    size: 56, color: scheme.onSurfaceVariant),
+                const SizedBox(height: 16),
+                Text(
+                  'Your access was reset',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  network == null
+                      ? 'Someone changed the password, so every device was '
+                          "signed out. Connect to your switch's Wi-Fi and "
+                          'sign in again with the new password.'
+                      : 'Someone changed the password, so every device was '
+                          'signed out. Connect to "$network" and sign in '
+                          'again with the new password.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Bluetooth carries a session — it cannot create one, so '
+                  'it stays unavailable until you have signed in.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await ref
+                        .read(transportCoordinatorProvider)
+                        .choose(TransportPreference.wifi);
+                    await ref.read(sessionProvider.notifier).refresh();
+                  },
+                  icon: const Icon(Icons.wifi),
+                  label: const Text("I'm on the Wi-Fi — sign in"),
+                ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: () => context.push(Routes.recovery),
+                  icon: const Icon(Icons.bluetooth_searching),
+                  label: const Text("I don't know the new password"),
+                ),
+                const MasterSwitcherButton(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

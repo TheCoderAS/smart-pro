@@ -34,6 +34,19 @@ final class MasterUnreachable extends SessionState {
   const MasterUnreachable();
 }
 
+/// The session died while the app was on Bluetooth — someone reset access
+/// by changing the password.
+///
+/// Emphatically not a login form: login is Wi-Fi-only by design, so a
+/// login screen here would be a dead end. This is an instruction to go and
+/// sign in on the master's network.
+final class AccessReset extends SessionState {
+  const AccessReset({this.network});
+
+  /// The network name to join, when we know it.
+  final String? network;
+}
+
 /// The phone is on some other master's network. Distinct from unreachable
 /// on purpose: "connect to B's network" is an instruction the user can
 /// follow, "B is out of range" is not, and neither is a login problem.
@@ -252,6 +265,26 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(TransportPreferenceNotifier.key) ==
         TransportPreference.bluetooth.name;
+  }
+
+  /// The master rejected our proof over Bluetooth: the password changed,
+  /// so every token everywhere died. Route to the instruction screen
+  /// rather than a login form Bluetooth cannot serve.
+  Future<void> handleAccessReset() async {
+    if (state.value is AccessReset) return;
+    final info = switch (state.value) {
+      Authenticated(:final info) => info,
+      _ => null,
+    };
+    ref.read(tokenProvider.notifier).set(null);
+    if (info != null) await _store.deleteToken(info.uid);
+    final masters = ref.read(masterRegistryProvider).value ?? const [];
+    String? network;
+    for (final m in masters) {
+      if (info != null && m.uid == info.uid) network = m.ssid;
+    }
+    network ??= masters.isNotEmpty ? masters.first.ssid : null;
+    state = AsyncValue.data(AccessReset(network: network));
   }
 
   /// Local sign-out (API §2: "does nothing server side; discard the

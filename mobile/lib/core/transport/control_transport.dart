@@ -10,6 +10,26 @@ enum TransportKind { wifi, ble }
 /// even when Wi-Fi is reachable, so the phone keeps its own network.
 enum TransportPreference { auto, wifi, bluetooth }
 
+/// Why the app would not switch to Bluetooth. Checked before the mode
+/// changes so the user is never left half-switched.
+enum TransportRefusal {
+  /// No session yet. Login is Wi-Fi-only by design, so there is nothing
+  /// for Bluetooth to carry.
+  needsWifiLogin,
+
+  /// The OS refused the nearby-devices permission.
+  permissionDenied;
+
+  String get message => switch (this) {
+        TransportRefusal.needsWifiLogin =>
+          "Sign in over your switch's Wi-Fi once first. Bluetooth carries "
+              'that session — it can\'t create one.',
+        TransportRefusal.permissionDenied =>
+          'Unisync needs the nearby-devices permission to reach your switch '
+              'over Bluetooth. You can grant it in Settings.',
+      };
+}
+
 /// The control operations the UI issues, independent of transport.
 /// Both `WifiControlTransport` (HTTP) and `BleControlTransport` (GATT)
 /// implement this. The token is shared across transports, so switching

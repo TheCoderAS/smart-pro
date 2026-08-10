@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart' show ScanMode;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/auth/application/session.dart';
 import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/domain/firmware_models.dart';
 import '../api/dio_client.dart';
@@ -198,6 +199,11 @@ class BleSessionController extends Notifier<BleSessionState> {
     try {
       final map = await client.request((p) => BleCommands.state(p));
       _emit(StateSnapshot.fromJson(map));
+    } on BleTokenRejected {
+      // The password changed while we were on Bluetooth, so every token
+      // everywhere died. Login is Wi-Fi-only, so this must route to the
+      // instruction screen and not a login form Bluetooth can't serve.
+      await _onTokenRejected();
     } on Exception catch (e) {
       log.w('initial ble state fetch failed: $e');
     }
@@ -248,8 +254,19 @@ class BleSessionController extends Notifier<BleSessionState> {
     final client = _client;
     final token = ref.read(tokenProvider);
     if (client == null || token == null) return;
-    final map = await client.request((p) => BleCommands.state(p));
-    _emit(StateSnapshot.fromJson(map));
+    try {
+      final map = await client.request((p) => BleCommands.state(p));
+      _emit(StateSnapshot.fromJson(map));
+    } on BleTokenRejected {
+      await _onTokenRejected();
+    }
+  }
+
+  /// Tears the session down and hands the app to the access-reset screen.
+  Future<void> _onTokenRejected() async {
+    log.w('ble token rejected — access was reset');
+    await deactivate();
+    await ref.read(sessionProvider.notifier).handleAccessReset();
   }
 
   Future<void> _rememberMesh(MasterBeacon beacon) async {

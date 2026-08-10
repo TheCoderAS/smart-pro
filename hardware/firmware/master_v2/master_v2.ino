@@ -788,6 +788,8 @@ static uint32_t fwrx_last_ms = 0;
 static void     ext_reset_identity(extension_t *e);
 static bool     switch_id_valid(const String &id);
 static void     nvs_load_switch_name(const char *id, char *name, int nlen);
+static void     relay_state_save(void);
+static void     relay_state_save_now(void);
 static bool     nvs_load_restore(const char *id);
 static void     nvs_save_restore(const char *id, bool restore);
 static void     master_ver_parse(const char *s, uint8_t *v);
@@ -1556,7 +1558,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             /* Persist, like the local kill-all does. Last commanded state
              * is what the restore policy reads at boot; leaving it stale
              * would bring a killed house back lit. */
-            relay_state_save();
+            relay_state_save_now();
             Serial.println("[MESH] Kill all (remote)");
             notify_ui();
             return;
@@ -2515,7 +2517,17 @@ static void mesh_nvs_clear(void) {
 /* ================================================================
  * RELAY STATE NVS
  * ================================================================ */
-static void relay_state_save(void) {
+/* Every toggle used to write NVS inline. The tech story asks for these
+ * writes to be debounced -- written shortly after the last toggle in a
+ * burst, not on every one -- to limit flash wear, and a wall switch being
+ * flipped repeatedly is exactly the burst it means. The in-RAM state is
+ * already authoritative for everything that reads it; only the flash write
+ * waits. Same treatment the extension firmware got. */
+#define RELAY_NVS_DEBOUNCE_MS 3000UL
+static bool     relay_nvs_dirty    = false;
+static uint32_t relay_nvs_dirty_ms = 0;
+
+static void relay_state_flush(void) {
     prefs.begin("relay_state",false);
     prefs.putBool("m_r1",master_relay1);
     prefs.putBool("m_r2",master_relay2);
@@ -2530,6 +2542,29 @@ static void relay_state_save(void) {
     }
     xSemaphoreGive(state_mutex);
     prefs.end();
+    relay_nvs_dirty = false;
+}
+
+/* Mark the saved state stale; the bus task commits it once the flipping
+ * stops. */
+static void relay_state_save(void) {
+    relay_nvs_dirty    = true;
+    relay_nvs_dirty_ms = millis();
+}
+
+/* Commit now, cancelling any pending debounce. For the deliberate
+ * everything-off and for credential changes, where losing the write to a
+ * power cut would be worse than a flash write. */
+static void relay_state_save_now(void) {
+    relay_state_flush();
+}
+
+/* Called from the bus loop. Never writes during an OTA: the flash driver
+ * is busy with the image and a page write there is not worth the risk. */
+static void relay_state_tick(void) {
+    if (!relay_nvs_dirty || ota_in_progress) return;
+    if ((millis() - relay_nvs_dirty_ms) < RELAY_NVS_DEBOUNCE_MS) return;
+    relay_state_flush();
 }
 
 /* Applies each channel's restore policy to the state just read from NVS.
@@ -3130,6 +3165,8 @@ static void task_bus(void *arg) {
             }
         }
 
+        relay_state_tick();   /* commit any debounced relay-state write */
+
         /* Poll registered extensions -- skip during OTA */
         if ((now-last_poll)>=POLL_MS) {
             last_poll=now;
@@ -3582,7 +3619,7 @@ static void setup_web(void) {
         /* One command, the whole house. */
         mesh_killall_peers();
         notify_ui();
-        relay_state_save(); /* persist all-off state */
+        relay_state_save_now(); /* persist all-off state */
         Serial.println("[RELAY] Kill all");
         server.send(200,"application/json","{\"ok\":true}");
     });

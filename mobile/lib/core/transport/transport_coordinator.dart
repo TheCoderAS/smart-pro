@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/dio_client.dart';
 import '../logging/log.dart';
+import '../permissions/scan_permissions.dart';
 import '../storage/master_registry.dart';
 import '../wifi/wifi_service.dart';
 import '../ws/state_socket.dart';
@@ -97,10 +99,41 @@ class TransportCoordinator {
     }
   }
 
-  /// Explicit user choice from the status pill — persist and apply.
-  Future<void> choose(TransportPreference pref) async {
+  /// Why a switch to Bluetooth was refused, so the caller can say so.
+  ///
+  /// Checked *before* the mode changes, never after: the story rules out a
+  /// half-switched state and a silent failure, so a user who declines the
+  /// permission or has never signed in stays where they are with an
+  /// explanation rather than landing in a dead Bluetooth mode.
+  Future<TransportRefusal?> canUseBle() async {
+    if (_ref.read(tokenProvider) == null) {
+      return TransportRefusal.needsWifiLogin;
+    }
+    try {
+      if (!await ensureBlePermissions()) {
+        return TransportRefusal.permissionDenied;
+      }
+    } on Object catch (e) {
+      log.w('ble permission check failed: $e');
+      return TransportRefusal.permissionDenied;
+    }
+    return null;
+  }
+
+  /// Explicit user choice from Settings or the status pill.
+  ///
+  /// Returns the reason it was refused, or null when the mode changed.
+  /// The preference is only persisted once the checks pass — otherwise a
+  /// refused switch would still be remembered and reapplied on next
+  /// launch.
+  Future<TransportRefusal?> choose(TransportPreference pref) async {
+    if (pref == TransportPreference.bluetooth) {
+      final refusal = await canUseBle();
+      if (refusal != null) return refusal;
+    }
     await _ref.read(transportPreferenceProvider.notifier).set(pref);
     await reconcile();
+    return null;
   }
 
   Future<int?> _pairedMeshId() async {

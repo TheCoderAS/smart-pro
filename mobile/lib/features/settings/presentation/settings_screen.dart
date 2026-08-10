@@ -63,9 +63,17 @@ class SettingsScreen extends ConsumerWidget {
           const _SectionHeader('Connection'),
           RadioGroup<TransportPreference>(
             groupValue: transportPref,
-            onChanged: (pref) {
-              if (pref != null) {
-                ref.read(transportCoordinatorProvider).choose(pref);
+            onChanged: (pref) async {
+              if (pref == null) return;
+              final messenger = ScaffoldMessenger.of(context);
+              // Refused before anything changes, so the radio button
+              // snapping back is the whole story the user sees.
+              final refusal =
+                  await ref.read(transportCoordinatorProvider).choose(pref);
+              if (refusal != null) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text(refusal.message)),
+                );
               }
             },
             child: const Column(

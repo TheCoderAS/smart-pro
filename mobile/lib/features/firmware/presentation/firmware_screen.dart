@@ -214,6 +214,7 @@ class _ManifestCardState extends ConsumerState<_ManifestCard> {
                 ref.watch(currentTransportProvider) == TransportKind.ble) ...[
               const SizedBox(height: 8),
               TextButton(
+                // Wi-Fi is never refused; no result to handle.
                 onPressed: () => ref
                     .read(transportCoordinatorProvider)
                     .choose(TransportPreference.wifi),
@@ -361,6 +362,7 @@ class _MasterCardState extends ConsumerState<_MasterCard> {
             if (_bytes != null && onBle) ...[
               const SizedBox(height: 8),
               TextButton(
+                // Wi-Fi is never refused; no result to handle.
                 onPressed: () => ref
                     .read(transportCoordinatorProvider)
                     .choose(TransportPreference.wifi),
