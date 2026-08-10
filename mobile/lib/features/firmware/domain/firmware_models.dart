@@ -20,6 +20,12 @@ abstract class FirmwareManifest with _$FirmwareManifest {
     @Default('') String changelog,
   }) = _FirmwareManifest;
 
+  const FirmwareManifest._();
+
+  /// Type 0 is the master's own image. Everything else is an extension
+  /// image, matched to boards by type.
+  bool get isMaster => type == 0;
+
   factory FirmwareManifest.fromJson(Map<String, dynamic> json) =>
       _$FirmwareManifestFromJson(json);
 }

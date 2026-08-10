@@ -7,6 +7,8 @@ import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
+import '../../firmware/domain/firmware_models.dart';
+import '../../firmware/presentation/firmware_screen.dart' show manifestsProvider;
 import '../data/extension_repository.dart';
 import '../domain/extension_models.dart';
 
@@ -136,9 +138,13 @@ class ExtensionTile extends ConsumerWidget {
           children: [
             Text(_switchNames(ext)),
             Text(_presenceLine(ext)),
-            if (ext.avail != null)
+            // `avail` reflects only what is already staged in THIS
+            // master's library, so an image the app has downloaded but not
+            // uploaded is invisible there. Availability is the app's call,
+            // from its own manifest against the version actually running.
+            if (_updateAvailable(ref, ext) case final version?)
               Text(
-                'Update available: ${ext.avail}',
+                'Update available: $version',
                 style: TextStyle(color: scheme.primary),
               ),
             if (ext.stuck)
@@ -167,6 +173,37 @@ class ExtensionTile extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// The newest manifest entry for this board's type, when it beats what
+  /// the board is running. Null when it is up to date or the manifest
+  /// hasn't loaded (offline on the master's Wi-Fi, which is normal).
+  String? _updateAvailable(WidgetRef ref, ExtensionInfo ext) {
+    final List<FirmwareManifest>? manifests =
+        ref.watch(manifestsProvider).value;
+    if (manifests == null) return null;
+    String? best;
+    for (final m in manifests) {
+      if (m.type != ext.type) continue;
+      if (!_newer(m.version, ext.fw)) continue;
+      if (best == null || _newer(m.version, best)) best = m.version;
+    }
+    return best;
+  }
+
+  static bool _newer(String a, String b) {
+    List<int> parse(String v) => [
+          for (final part in v.split('.'))
+            int.tryParse(part.replaceAll(RegExp('[^0-9]'), '')) ?? 0,
+        ];
+    final pa = parse(a);
+    final pb = parse(b);
+    for (var i = 0; i < pa.length || i < pb.length; i++) {
+      final x = i < pa.length ? pa[i] : 0;
+      final y = i < pb.length ? pb[i] : 0;
+      if (x != y) return x > y;
+    }
+    return false;
   }
 
   /// Default switch names are per-board, so every extension would otherwise

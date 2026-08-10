@@ -79,7 +79,9 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
                 ] else ...[
                   _MeshStatusCard(status: s),
                   const SizedBox(height: 12),
-                  ...s.peers.map((p) => _PeerTile(peer: p)),
+                  ...s.peers.map(
+                    (p) => _PeerTile(peer: p, rolloutTarget: _newest(s)),
+                  ),
                 ],
                 const SizedBox(height: 24),
                 _Actions(status: s),
@@ -104,6 +106,32 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
       ),
     );
   }
+}
+
+/// The newest firmware version anywhere in the mesh — this master or any
+/// peer. Everything behind it is still catching up.
+String _newest(MeshStatus s) {
+  var best = s.fw;
+  for (final p in s.peers) {
+    if (p.fw.isEmpty) continue;
+    if (best.isEmpty || _fwNewer(p.fw, best)) best = p.fw;
+  }
+  return best;
+}
+
+bool _fwNewer(String a, String b) {
+  List<int> parse(String v) => [
+        for (final part in v.split('.'))
+          int.tryParse(part.replaceAll(RegExp('[^0-9]'), '')) ?? 0,
+      ];
+  final pa = parse(a);
+  final pb = parse(b);
+  for (var i = 0; i < pa.length || i < pb.length; i++) {
+    final x = i < pa.length ? pa[i] : 0;
+    final y = i < pb.length ? pb[i] : 0;
+    if (x != y) return x > y;
+  }
+  return false;
 }
 
 /// The one unrecoverable state (API §5): this master missed a
@@ -201,9 +229,13 @@ class _MeshStatusCard extends StatelessWidget {
 /// that vanishes when a master goes quiet is exactly the flapping the story
 /// rules out, and the user has to see the state before acting on it.
 class _PeerTile extends ConsumerWidget {
-  const _PeerTile({required this.peer});
+  const _PeerTile({required this.peer, this.rolloutTarget = ''});
 
   final MeshPeer peer;
+
+  /// The newest version anywhere in the mesh. A peer behind it is mid
+  /// rollout, not broken.
+  final String rolloutTarget;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -218,6 +250,13 @@ class _PeerTile extends ConsumerWidget {
           };
 
     final line = StringBuffer('Firmware ${peer.fw}');
+    // Mid-rollout a mesh legitimately runs several versions: one push
+    // propagates master-to-master and each applies at its own pace. That
+    // is progress, not a fault, so it reads as "updating" rather than a
+    // mismatch warning.
+    if (rolloutTarget.isNotEmpty && peer.fw != rolloutTarget) {
+      line.write(' · updating to $rolloutTarget');
+    }
     if (peer.presence != Presence.online) {
       line
         ..write(' · ${peer.presence.label.toLowerCase()}')
