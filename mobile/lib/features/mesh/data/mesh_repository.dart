@@ -68,6 +68,15 @@ class MeshRepository {
   /// Restores the device password (API §1).
   Future<void> leave() => _post(Api.meshLeave, const {});
 
+  /// Remove another master from the mesh, by uid.
+  ///
+  /// The master must be reachable: it deletes its own mesh credentials and
+  /// acknowledges before this resolves, so a success here means the removal
+  /// actually happened. The firmware refuses an offline target (409) rather
+  /// than leaving the app to report a removal that didn't occur.
+  Future<void> kick({required String uid}) =>
+      _post(Api.meshKick, {'uid': uid});
+
   Future<void> rename({required String name}) =>
       _post(Api.meshRename, {'name': name});
 

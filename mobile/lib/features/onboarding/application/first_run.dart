@@ -13,6 +13,7 @@ class FirstRunFlags {
     required this.welcomeSeen,
     required this.passwordPromptSeen,
     required this.transportAsked,
+    required this.meshTipSeen,
   });
 
   /// Nothing has been read yet — callers should wait rather than assume a
@@ -20,11 +21,16 @@ class FirstRunFlags {
   const FirstRunFlags.unknown()
       : welcomeSeen = true,
         passwordPromptSeen = true,
-        transportAsked = true;
+        transportAsked = true,
+        meshTipSeen = true;
 
   final bool welcomeSeen;
   final bool passwordPromptSeen;
   final bool transportAsked;
+
+  /// The keep-auto-join-on tip, shown once on first mesh entry. A tip, not
+  /// a nag — the story is explicit about the difference.
+  final bool meshTipSeen;
 }
 
 final firstRunProvider =
@@ -36,6 +42,7 @@ class FirstRunNotifier extends AsyncNotifier<FirstRunFlags> {
   static const _welcome = 'firstrun.welcome';
   static const _password = 'firstrun.passwordPrompt';
   static const _transport = 'firstrun.transportAsked';
+  static const _meshTip = 'firstrun.meshTip';
 
   @override
   Future<FirstRunFlags> build() async {
@@ -44,6 +51,7 @@ class FirstRunNotifier extends AsyncNotifier<FirstRunFlags> {
       welcomeSeen: prefs.getBool(_welcome) ?? false,
       passwordPromptSeen: prefs.getBool(_password) ?? false,
       transportAsked: prefs.getBool(_transport) ?? false,
+      meshTipSeen: prefs.getBool(_meshTip) ?? false,
     );
   }
 
@@ -57,4 +65,5 @@ class FirstRunNotifier extends AsyncNotifier<FirstRunFlags> {
   Future<void> markWelcomeSeen() => _mark(_welcome);
   Future<void> markPasswordPromptSeen() => _mark(_password);
   Future<void> markTransportAsked() => _mark(_transport);
+  Future<void> markMeshTipSeen() => _mark(_meshTip);
 }

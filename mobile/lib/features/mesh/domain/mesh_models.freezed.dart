@@ -302,7 +302,11 @@ as List<MeshPeer>,
 /// @nodoc
 mixin _$MeshPeer {
 
- String get name; String get fw;@JsonKey(name: 'cred_stale') bool get credStale;
+/// Stable identity. The mesh screen keys removal on this, never on the
+/// name — names are user-changeable.
+ String get uid; String get name; String get fw; bool get online;/// Debounced presence from the master, same rule as extensions.
+@JsonKey(name: 'presence') String get presenceRaw;/// Seconds since the mesh last heard from this master.
+@JsonKey(name: 'last_seen') int get lastSeen;@JsonKey(name: 'cred_stale') bool get credStale;
 /// Create a copy of MeshPeer
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -315,16 +319,16 @@ $MeshPeerCopyWith<MeshPeer> get copyWith => _$MeshPeerCopyWithImpl<MeshPeer>(thi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is MeshPeer&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.credStale, credStale) || other.credStale == credStale));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is MeshPeer&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.online, online) || other.online == online)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&(identical(other.credStale, credStale) || other.credStale == credStale));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,name,fw,credStale);
+int get hashCode => Object.hash(runtimeType,uid,name,fw,online,presenceRaw,lastSeen,credStale);
 
 @override
 String toString() {
-  return 'MeshPeer(name: $name, fw: $fw, credStale: $credStale)';
+  return 'MeshPeer(uid: $uid, name: $name, fw: $fw, online: $online, presenceRaw: $presenceRaw, lastSeen: $lastSeen, credStale: $credStale)';
 }
 
 
@@ -335,7 +339,7 @@ abstract mixin class $MeshPeerCopyWith<$Res>  {
   factory $MeshPeerCopyWith(MeshPeer value, $Res Function(MeshPeer) _then) = _$MeshPeerCopyWithImpl;
 @useResult
 $Res call({
- String name, String fw,@JsonKey(name: 'cred_stale') bool credStale
+ String uid, String name, String fw, bool online,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen,@JsonKey(name: 'cred_stale') bool credStale
 });
 
 
@@ -352,11 +356,15 @@ class _$MeshPeerCopyWithImpl<$Res>
 
 /// Create a copy of MeshPeer
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? name = null,Object? fw = null,Object? credStale = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? uid = null,Object? name = null,Object? fw = null,Object? online = null,Object? presenceRaw = null,Object? lastSeen = null,Object? credStale = null,}) {
   return _then(_self.copyWith(
-name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
+uid: null == uid ? _self.uid : uid // ignore: cast_nullable_to_non_nullable
+as String,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
 as String,fw: null == fw ? _self.fw : fw // ignore: cast_nullable_to_non_nullable
-as String,credStale: null == credStale ? _self.credStale : credStale // ignore: cast_nullable_to_non_nullable
+as String,online: null == online ? _self.online : online // ignore: cast_nullable_to_non_nullable
+as bool,presenceRaw: null == presenceRaw ? _self.presenceRaw : presenceRaw // ignore: cast_nullable_to_non_nullable
+as String,lastSeen: null == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
+as int,credStale: null == credStale ? _self.credStale : credStale // ignore: cast_nullable_to_non_nullable
 as bool,
   ));
 }
@@ -442,10 +450,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String name,  String fw, @JsonKey(name: 'cred_stale')  bool credStale)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen, @JsonKey(name: 'cred_stale')  bool credStale)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _MeshPeer() when $default != null:
-return $default(_that.name,_that.fw,_that.credStale);case _:
+return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen,_that.credStale);case _:
   return orElse();
 
 }
@@ -463,10 +471,10 @@ return $default(_that.name,_that.fw,_that.credStale);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String name,  String fw, @JsonKey(name: 'cred_stale')  bool credStale)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen, @JsonKey(name: 'cred_stale')  bool credStale)  $default,) {final _that = this;
 switch (_that) {
 case _MeshPeer():
-return $default(_that.name,_that.fw,_that.credStale);case _:
+return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen,_that.credStale);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -483,10 +491,10 @@ return $default(_that.name,_that.fw,_that.credStale);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String name,  String fw, @JsonKey(name: 'cred_stale')  bool credStale)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String uid,  String name,  String fw,  bool online, @JsonKey(name: 'presence')  String presenceRaw, @JsonKey(name: 'last_seen')  int lastSeen, @JsonKey(name: 'cred_stale')  bool credStale)?  $default,) {final _that = this;
 switch (_that) {
 case _MeshPeer() when $default != null:
-return $default(_that.name,_that.fw,_that.credStale);case _:
+return $default(_that.uid,_that.name,_that.fw,_that.online,_that.presenceRaw,_that.lastSeen,_that.credStale);case _:
   return null;
 
 }
@@ -497,12 +505,20 @@ return $default(_that.name,_that.fw,_that.credStale);case _:
 /// @nodoc
 @JsonSerializable()
 
-class _MeshPeer implements MeshPeer {
-  const _MeshPeer({this.name = '', this.fw = '', @JsonKey(name: 'cred_stale') this.credStale = false});
+class _MeshPeer extends MeshPeer {
+  const _MeshPeer({this.uid = '', this.name = '', this.fw = '', this.online = true, @JsonKey(name: 'presence') this.presenceRaw = 'online', @JsonKey(name: 'last_seen') this.lastSeen = 0, @JsonKey(name: 'cred_stale') this.credStale = false}): super._();
   factory _MeshPeer.fromJson(Map<String, dynamic> json) => _$MeshPeerFromJson(json);
 
+/// Stable identity. The mesh screen keys removal on this, never on the
+/// name — names are user-changeable.
+@override@JsonKey() final  String uid;
 @override@JsonKey() final  String name;
 @override@JsonKey() final  String fw;
+@override@JsonKey() final  bool online;
+/// Debounced presence from the master, same rule as extensions.
+@override@JsonKey(name: 'presence') final  String presenceRaw;
+/// Seconds since the mesh last heard from this master.
+@override@JsonKey(name: 'last_seen') final  int lastSeen;
 @override@JsonKey(name: 'cred_stale') final  bool credStale;
 
 /// Create a copy of MeshPeer
@@ -518,16 +534,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _MeshPeer&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.credStale, credStale) || other.credStale == credStale));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _MeshPeer&&(identical(other.uid, uid) || other.uid == uid)&&(identical(other.name, name) || other.name == name)&&(identical(other.fw, fw) || other.fw == fw)&&(identical(other.online, online) || other.online == online)&&(identical(other.presenceRaw, presenceRaw) || other.presenceRaw == presenceRaw)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&(identical(other.credStale, credStale) || other.credStale == credStale));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,name,fw,credStale);
+int get hashCode => Object.hash(runtimeType,uid,name,fw,online,presenceRaw,lastSeen,credStale);
 
 @override
 String toString() {
-  return 'MeshPeer(name: $name, fw: $fw, credStale: $credStale)';
+  return 'MeshPeer(uid: $uid, name: $name, fw: $fw, online: $online, presenceRaw: $presenceRaw, lastSeen: $lastSeen, credStale: $credStale)';
 }
 
 
@@ -538,7 +554,7 @@ abstract mixin class _$MeshPeerCopyWith<$Res> implements $MeshPeerCopyWith<$Res>
   factory _$MeshPeerCopyWith(_MeshPeer value, $Res Function(_MeshPeer) _then) = __$MeshPeerCopyWithImpl;
 @override @useResult
 $Res call({
- String name, String fw,@JsonKey(name: 'cred_stale') bool credStale
+ String uid, String name, String fw, bool online,@JsonKey(name: 'presence') String presenceRaw,@JsonKey(name: 'last_seen') int lastSeen,@JsonKey(name: 'cred_stale') bool credStale
 });
 
 
@@ -555,11 +571,15 @@ class __$MeshPeerCopyWithImpl<$Res>
 
 /// Create a copy of MeshPeer
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? name = null,Object? fw = null,Object? credStale = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? uid = null,Object? name = null,Object? fw = null,Object? online = null,Object? presenceRaw = null,Object? lastSeen = null,Object? credStale = null,}) {
   return _then(_MeshPeer(
-name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
+uid: null == uid ? _self.uid : uid // ignore: cast_nullable_to_non_nullable
+as String,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
 as String,fw: null == fw ? _self.fw : fw // ignore: cast_nullable_to_non_nullable
-as String,credStale: null == credStale ? _self.credStale : credStale // ignore: cast_nullable_to_non_nullable
+as String,online: null == online ? _self.online : online // ignore: cast_nullable_to_non_nullable
+as bool,presenceRaw: null == presenceRaw ? _self.presenceRaw : presenceRaw // ignore: cast_nullable_to_non_nullable
+as String,lastSeen: null == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
+as int,credStale: null == credStale ? _self.credStale : credStale // ignore: cast_nullable_to_non_nullable
 as bool,
   ));
 }
