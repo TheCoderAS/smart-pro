@@ -436,6 +436,8 @@ class _OverflowMenu extends ConsumerWidget {
         switch (v) {
           case 'reorder':
             unawaited(context.push(Routes.reorder));
+          case 'reorderMasters':
+            unawaited(context.push(Routes.reorderMasters));
           case 'extensions':
             unawaited(context.push(Routes.extensions));
           case 'mesh':
@@ -451,10 +453,16 @@ class _OverflowMenu extends ConsumerWidget {
         _menuItem('mesh', Icons.hub_rounded, l10n.menuMesh),
         _menuItem('firmware', Icons.system_update_rounded, l10n.menuFirmware),
         _menuItem('reorder', Icons.swap_vert_rounded, l10n.menuReorder),
+        // Only worth offering once there is more than one master card.
+        if (_hasSeveralMasters(ref))
+          _menuItem('reorderMasters', Icons.reorder_rounded, 'Reorder masters'),
         _menuItem('settings', Icons.settings_rounded, l10n.menuSettings),
       ],
     );
   }
+
+  bool _hasSeveralMasters(WidgetRef ref) =>
+      (ref.read(activeStateProvider).value?.peers.length ?? 0) > 0;
 
   PopupMenuItem<String> _menuItem(String value, IconData icon, String label) {
     return PopupMenuItem(

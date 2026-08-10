@@ -53,8 +53,14 @@ import UIKit
         NEHotspotNetwork.fetchCurrent { network in
           result(network?.ssid)
         }
+      case "bindToWifi":
+        // Not available on iOS; see the note below.
+        result(false)
       case "release":
-        // No process-level binding on iOS; nothing to undo.
+        // No process-level binding on iOS; nothing to undo. iOS routes
+        // link-local traffic to the associated Wi-Fi on its own, and offers
+        // no equivalent of bindProcessToNetwork — the "no internet" warning
+        // it shows instead is expected and harmless here.
         result(true)
       default:
         result(FlutterMethodNotImplemented)

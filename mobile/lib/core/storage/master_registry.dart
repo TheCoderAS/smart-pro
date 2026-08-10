@@ -56,6 +56,9 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
   static const _key = 'masters';
   static const _lastUsedKey = 'masters.lastUsed';
 
+  /// Bookkeeping only — uid, display name, cached network name, mesh id.
+  /// The secrets the vault exists to protect (tokens, remembered
+  /// passwords) live in [SecureStore] and never touch this file.
   @override
   Future<List<SavedMaster>> build() => _load();
 
