@@ -742,6 +742,8 @@ static void     reset_button_tick(void);
 static void     ble_recovery_begin(void);
 static void     ble_recovery_apply(void);
 static void     mesh_broadcast_pass_change(void);
+static bool     mesh_send(const uint8_t *mac, const void *data, size_t len);
+static void     mesh_broadcast(const void *data, size_t len);
 static int      mesh_verify(const uint8_t *data, int len);
 static bool     fs_ready       = false;
 static uint32_t last_reconcile = 0;
@@ -1040,9 +1042,19 @@ static void mesh_broadcast_pass_change(void) {
 
 static bool mesh_send(const uint8_t *mac, const void *data, size_t len) {
     if (!mesh_active) return false;
-    if (!mesh_auth_set || len + MESH_TAG_LEN > 250) {
+    if (!mesh_auth_set) {
+        /* Before a mesh exists there is no key to tag with; the join
+         * exchange is authenticated by the PIN instead. */
         esp_err_t r0 = esp_now_send(mac, (const uint8_t*)data, len);
         return (r0 == ESP_OK);
+    }
+    if (len + MESH_TAG_LEN > 250) {
+        /* Sending it untagged would be worse than not sending it: the peer
+         * drops untagged packets, so the caller would believe it succeeded
+         * while nothing arrived. Say so instead. */
+        Serial.printf("[MESH] packet %u bytes exceeds the ESP-NOW limit, not sent\n",
+                      (unsigned)len);
+        return false;
     }
     uint8_t buf[250];
     memcpy(buf, data, len);
@@ -1064,11 +1076,138 @@ static int mesh_verify(const uint8_t *data, int len) {
     return body;
 }
 
-/* Broadcast to all known mesh peers */
+/* Broadcast to all known mesh peers.
+ *
+ * Through mesh_send, so the packet carries the auth tag. It used to call
+ * esp_now_send directly and therefore went out untagged -- and mesh_recv_cb
+ * drops every untagged packet that is not a join, so gossip, config relays,
+ * password changes and kicks were all thrown away by their recipients. */
 static void mesh_broadcast(const void *data, size_t len) {
     if (!mesh_active) return;
     uint8_t broadcast_mac[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-    esp_now_send(broadcast_mac, (const uint8_t*)data, len);
+    mesh_send(broadcast_mac, data, len);
+}
+
+/* ---- Gossip ------------------------------------------------------------
+ * ESP-NOW carries at most 250 bytes, and mesh_send spends 8 of them on the
+ * auth tag. A master's full switch list does not come close to fitting: even
+ * a bare two-channel master with no extensions serialised to well over 250,
+ * so esp_now_send rejected every gossip packet outright and no peer ever saw
+ * another peer's switches.
+ *
+ * State is therefore gossiped incrementally, in packets that fit:
+ *
+ *   header  {"type":1,"uid":..,"nm":..,"fw":..,"cv":..,"t":<count>}
+ *   window  {"type":1,"uid":..,"t":<count>,"sw":[ up to two switches ]}
+ *
+ * Receivers merge switch entries by id, so windows may arrive in any order
+ * and a lost packet costs one round rather than a corrupted list. Changed
+ * switches jump the queue: a wall touch propagates on the next tick instead
+ * of waiting for the sweep to come round. The periodic sweep continues
+ * underneath so a master that joins or reboots converges on its own.
+ *
+ * Keys inside "sw" are one character because the budget is genuinely that
+ * tight -- a 23-character switch name is 29 bytes of the ~95 an entry costs.
+ */
+#define MESH_MTU        242   /* 250 minus the auth tag mesh_send appends */
+#define GOSSIP_SW_MAX   2     /* switches per window packet */
+#define MAX_LOCAL_SW    (2 + 2 * MAX_EXTENSIONS)
+
+typedef struct {
+    char    id[16];
+    char    name[24];
+    uint8_t slot_color;   /* index into SLOT_COLORS */
+    bool    state;
+    bool    online;
+    bool    restore;
+    uint8_t ch;
+} local_sw_t;
+
+/* What we last put on the air, so a change can be spotted without asking
+ * every consumer to tell us. */
+static bool     gossip_shadow_valid = false;
+static uint8_t  gossip_shadow_count = 0;
+static char     gossip_shadow_id[MAX_LOCAL_SW][16];
+static bool     gossip_shadow_state[MAX_LOCAL_SW];
+static bool     gossip_shadow_online[MAX_LOCAL_SW];
+static uint8_t  gossip_cursor = 0;    /* 0 = header, then switch windows */
+
+/* Snapshot this master's switches. Reads NVS, so it must not run with the
+ * state mutex held; it takes and releases the mutex itself. */
+static uint8_t gossip_collect(local_sw_t *out) {
+    uint8_t n = 0;
+    char sw_name[24];
+
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    bool r1 = master_relay1, r2 = master_relay2;
+    xSemaphoreGive(state_mutex);
+
+    for (int ch = 1; ch <= 2; ch++) {
+        local_sw_t *s = &out[n++];
+        snprintf(s->id, sizeof(s->id), "master_%d", ch);
+        nvs_load_switch_name(s->id, sw_name, sizeof(sw_name));
+        if (!strcmp(sw_name, "Switch")) snprintf(sw_name, sizeof(sw_name), "Switch %d", ch);
+        strncpy(s->name, sw_name, sizeof(s->name)-1); s->name[sizeof(s->name)-1] = 0;
+        s->slot_color = 0;
+        s->state   = (ch == 1) ? r1 : r2;
+        s->online  = true;
+        s->restore = nvs_load_restore(s->id);
+        s->ch      = ch;
+    }
+
+    uint32_t now_ms = millis();
+    for (int i = 0; i < MAX_EXTENSIONS; i++) {
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool empty = (extensions[i].state == EXT_EMPTY);
+        bool er1 = extensions[i].relay1, er2 = extensions[i].relay2;
+        bool eon = (ext_presence(&extensions[i], now_ms) == PRES_ONLINE);
+        xSemaphoreGive(state_mutex);
+        if (empty) continue;
+        for (int ch = 1; ch <= 2; ch++) {
+            local_sw_t *s = &out[n++];
+            snprintf(s->id, sizeof(s->id), "ext%d_%d", i, ch);
+            nvs_load_switch_name(s->id, sw_name, sizeof(sw_name));
+            if (!strcmp(sw_name, "Switch"))
+                snprintf(sw_name, sizeof(sw_name), "Switch %d", ch + i*2 + 2);
+            strncpy(s->name, sw_name, sizeof(s->name)-1); s->name[sizeof(s->name)-1] = 0;
+            s->slot_color = (i + 1 < 6) ? (i + 1) : 5;
+            s->state   = (ch == 1) ? er1 : er2;
+            s->online  = eon;
+            s->restore = nvs_load_restore(s->id);
+            s->ch      = ch;
+        }
+    }
+    return n;
+}
+
+/* Serialise and send one packet, dropping optional fields until it fits.
+ * Silently oversized packets are what broke gossip in the first place, so
+ * anything still too large after trimming is logged rather than dropped. */
+static void gossip_emit(JsonDocument &doc, const char *what) {
+    String payload;
+    serializeJson(doc, payload);
+    if (payload.length() + 1 > MESH_MTU && doc.containsKey("o")) {
+        doc.remove("o");            /* master order re-broadcasts on change */
+        payload = "";
+        serializeJson(doc, payload);
+    }
+    if (payload.length() + 1 > MESH_MTU) {
+        Serial.printf("[MESH] %s packet %u bytes, over the %u limit -- dropped\n",
+                      what, (unsigned)payload.length()+1, (unsigned)MESH_MTU);
+        return;
+    }
+    mesh_broadcast(payload.c_str(), payload.length()+1);
+}
+
+static void gossip_add_switch(JsonArray arr, const local_sw_t *s) {
+    JsonObject o = arr.createNestedObject();
+    o["d"] = s->id;
+    o["n"] = s->name;
+    o["c"] = SLOT_COLORS[s->slot_color];
+    o["s"] = s->state;
+    o["o"] = s->online;
+    o["r"] = s->restore;
+    o["h"] = s->ch;
 }
 
 /* Build and broadcast local state to all peers */
@@ -1078,76 +1217,85 @@ static void mesh_gossip(void) {
      * de-initialised ESP-NOW just logs "esp now not init!" every cycle. */
     if (master_pull_active) return;
 
-    /* Build state packet */
-    StaticJsonDocument<1024> doc;
-    doc["type"]         = MESH_PKT_STATE;
-    doc["name"]         = master_name;
-    doc["fw"]           = MASTER_FW_VERSION;
-    doc["cv"]           = cred_version;
-    doc["master_order"] = master_order_str;
+    /* Static, not stack: mesh_gossip runs on task_bus, which has 4 KB. */
+    static local_sw_t sw[MAX_LOCAL_SW];
+    uint8_t n = gossip_collect(sw);
 
-    xSemaphoreTake(state_mutex, portMAX_DELAY);
-    /* Snapshot local switches */
-    String ord = switch_order.length()>0 ? switch_order : "";
-    if (ord.length()==0) {
-        ord = "master_1,master_2";
-        for (int i=0;i<MAX_EXTENSIONS;i++) {
-            if (extensions[i].state==EXT_EMPTY) continue;
-            char a[16],b[16];
-            snprintf(a,sizeof(a),"ext%d_1",i);
-            snprintf(b,sizeof(b),"ext%d_2",i);
-            ord+=","; ord+=a; ord+=","; ord+=b;
-        }
-    }
-    bool r1=master_relay1, r2=master_relay2;
-    xSemaphoreGive(state_mutex);
-
-    JsonArray sw = doc.createNestedArray("switches");
-
-    /* Add master switches */
-    char sw_name[24];
-    JsonObject s1=sw.createNestedObject();
-    s1["id"]="master_1"; s1["ch"]=1;
-    nvs_load_switch_name("master_1",sw_name,sizeof(sw_name));
-    s1["name"]=(String(sw_name)=="Switch")?"Switch 1":sw_name;
-    s1["color"]=SLOT_COLORS[0]; s1["state"]=r1; s1["online"]=true;
-    s1["restore"]=nvs_load_restore("master_1");
-
-    JsonObject s2=sw.createNestedObject();
-    s2["id"]="master_2"; s2["ch"]=2;
-    nvs_load_switch_name("master_2",sw_name,sizeof(sw_name));
-    s2["name"]=(String(sw_name)=="Switch")?"Switch 2":sw_name;
-    s2["color"]=SLOT_COLORS[0]; s2["state"]=r2; s2["online"]=true;
-    s2["restore"]=nvs_load_restore("master_2");
-
-    /* Add extension switches */
-    uint32_t now_ms = millis();
-    xSemaphoreTake(state_mutex, portMAX_DELAY);
-    for (int i=0;i<MAX_EXTENSIONS;i++) {
-        if (extensions[i].state==EXT_EMPTY) continue;
-        for (int ch=1;ch<=2;ch++) {
-            char id[16]; snprintf(id,sizeof(id),"ext%d_%d",i,ch);
-            nvs_load_switch_name(id,sw_name,sizeof(sw_name));
-            JsonObject s=sw.createNestedObject();
-            s["id"]=id; s["ch"]=ch;
-            s["name"]=(String(sw_name)=="Switch")?
-                      ("Switch "+String(ch+i*2+2)):sw_name;
-            s["color"]=SLOT_COLORS[i+1<6?i+1:5];
-            s["state"]=(ch==1)?extensions[i].relay1:extensions[i].relay2;
-            s["online"]=(ext_presence(&extensions[i],now_ms)==PRES_ONLINE);
-            s["restore"]=nvs_load_restore(id);
-        }
-    }
-    xSemaphoreGive(state_mutex);
-
-    /* Add src_uid */
     char uid_str[12];
-    snprintf(uid_str,sizeof(uid_str),"%02X%02X%02X%02X",
-             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-    doc["uid"] = uid_str;
+    snprintf(uid_str, sizeof(uid_str), "%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
 
-    String payload; serializeJson(doc, payload);
-    mesh_broadcast(payload.c_str(), payload.length()+1);
+    /* A changed switch list length invalidates the shadow wholesale: the
+     * indices no longer line up, and peers need a fresh sweep anyway. */
+    if (gossip_shadow_valid && gossip_shadow_count != n) gossip_shadow_valid = false;
+
+    /* Anything that changed since the last packet goes out first. */
+    int changed[MAX_LOCAL_SW]; int nchanged = 0;
+    if (gossip_shadow_valid) {
+        for (int i = 0; i < n && nchanged < GOSSIP_SW_MAX; i++) {
+            if (strcmp(gossip_shadow_id[i], sw[i].id) != 0 ||
+                gossip_shadow_state[i]  != sw[i].state ||
+                gossip_shadow_online[i] != sw[i].online)
+                changed[nchanged++] = i;
+        }
+    }
+
+    if (nchanged > 0) {
+        StaticJsonDocument<MESH_MTU + 64> doc;
+        doc["type"] = MESH_PKT_STATE;
+        doc["uid"]  = uid_str;
+        doc["t"]    = n;
+        JsonArray a = doc.createNestedArray("sw");
+        for (int i = 0; i < nchanged; i++) {
+            gossip_add_switch(a, &sw[changed[i]]);
+            gossip_shadow_state[changed[i]]  = sw[changed[i]].state;
+            gossip_shadow_online[changed[i]] = sw[changed[i]].online;
+            strncpy(gossip_shadow_id[changed[i]], sw[changed[i]].id, 15);
+            gossip_shadow_id[changed[i]][15] = 0;
+        }
+        gossip_emit(doc, "delta");
+        return;
+    }
+
+    /* Otherwise advance the periodic sweep: header, then switch windows. */
+    if (gossip_cursor == 0) {
+        StaticJsonDocument<MESH_MTU + 64> doc;
+        doc["type"] = MESH_PKT_STATE;
+        doc["uid"]  = uid_str;
+        doc["nm"]   = master_name;
+        doc["fw"]   = MASTER_FW_VERSION;
+        doc["cv"]   = cred_version;
+        doc["t"]    = n;
+        doc["o"]    = master_order_str;   /* dropped by gossip_emit if tight */
+        gossip_emit(doc, "header");
+        gossip_cursor = 1;
+        return;
+    }
+
+    uint8_t first = (uint8_t)((gossip_cursor - 1) * GOSSIP_SW_MAX);
+    if (first >= n) { gossip_cursor = 0; return; }
+
+    StaticJsonDocument<MESH_MTU + 64> doc;
+    doc["type"] = MESH_PKT_STATE;
+    doc["uid"]  = uid_str;
+    doc["t"]    = n;
+    JsonArray a = doc.createNestedArray("sw");
+    for (uint8_t i = first; i < n && i < first + GOSSIP_SW_MAX; i++) {
+        gossip_add_switch(a, &sw[i]);
+        gossip_shadow_state[i]  = sw[i].state;
+        gossip_shadow_online[i] = sw[i].online;
+        strncpy(gossip_shadow_id[i], sw[i].id, 15);
+        gossip_shadow_id[i][15] = 0;
+    }
+    gossip_emit(doc, "window");
+
+    gossip_cursor++;
+    if ((uint8_t)((gossip_cursor - 1) * GOSSIP_SW_MAX) >= n) {
+        /* Swept the whole list -- the shadow is now a complete picture. */
+        gossip_shadow_count = n;
+        gossip_shadow_valid = true;
+        gossip_cursor = 0;
+    }
 }
 
 /* Generate 6-digit mesh PIN */
@@ -1294,38 +1442,60 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
               Serial.println("[MESH] credentials out of date -- remove and re-add this master");
               notify_ui();
           } }
-        master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
         /* ESP-NOW carries far further than a usable TCP association, so a
          * peer we can hear is not necessarily a peer we can download 1.1 MB
          * from. Keep the signal level and prefer close peers when pulling. */
         if (info->rx_ctrl) mesh_peers[idx].rssi = info->rx_ctrl->rssi;
-        const char *pname = doc["name"] | "Master";
-        strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
         memcpy(mesh_peers[idx].mac, info->src_addr, 6);
+
+        /* Gossip arrives in pieces (see mesh_gossip): a header packet with
+         * the peer's identity, and window/delta packets carrying switches.
+         * Only overwrite what a packet actually carries -- taking a default
+         * for an absent key would blank the peer's name on every window. */
+        if (doc.containsKey("nm")) {
+            const char *pname = doc["nm"] | "Master";
+            strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
+            mesh_peers[idx].name[sizeof(mesh_peers[idx].name)-1] = 0;
+        }
+        if (doc.containsKey("fw"))
+            master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
         /* Sync master_order from gossip if peer has a non-empty one */
-        const char *peer_order = doc["master_order"] | "";
+        const char *peer_order = doc["o"] | "";
         if (strlen(peer_order) > strlen(master_order_str)) {
             /* Peer has more entries -- use theirs as it's more complete */
             strncpy(master_order_str, peer_order, sizeof(master_order_str)-1);
             mesh_nvs_save();
         }
 
-        JsonArray sw = doc["switches"];
-        mesh_peers[idx].switch_count = 0;
+        /* The peer's switch count. A change means its extension list moved,
+         * so the merged list is rebuilt from the coming windows rather than
+         * left holding entries for switches that no longer exist. */
+        uint8_t total = (uint8_t)(doc["t"] | 0);
+        if (total > 12) total = 12;
+        if (total && mesh_peers[idx].switch_count > total)
+            mesh_peers[idx].switch_count = 0;
+
+        /* Merge by id, so windows may arrive in any order and a lost packet
+         * costs one sweep rather than a scrambled list. */
+        JsonArray sw = doc["sw"];
         for (JsonObject s : sw) {
-            int i = mesh_peers[idx].switch_count;
-            if (i >= 12) break;
-            strncpy(mesh_peers[idx].switches[i].id,
-                    s["id"]|"", sizeof(mesh_peers[idx].switches[i].id)-1);
-            strncpy(mesh_peers[idx].switches[i].name,
-                    s["name"]|"", sizeof(mesh_peers[idx].switches[i].name)-1);
-            strncpy(mesh_peers[idx].switches[i].color,
-                    s["color"]|"#444", sizeof(mesh_peers[idx].switches[i].color)-1);
-            mesh_peers[idx].switches[i].state  = s["state"]|false;
-            mesh_peers[idx].switches[i].online = s["online"]|false;
-            mesh_peers[idx].switches[i].restore = s["restore"]|false;
-            mesh_peers[idx].switches[i].ch     = s["ch"]|1;
-            mesh_peers[idx].switch_count++;
+            const char *sid = s["d"] | "";
+            if (!sid[0]) continue;
+            int j = -1;
+            for (int k = 0; k < mesh_peers[idx].switch_count; k++)
+                if (!strcmp(mesh_peers[idx].switches[k].id, sid)) { j = k; break; }
+            if (j < 0) {
+                if (mesh_peers[idx].switch_count >= 12) continue;
+                j = mesh_peers[idx].switch_count++;
+            }
+            mesh_switch_t *ms = &mesh_peers[idx].switches[j];
+            strncpy(ms->id,   sid,             sizeof(ms->id)-1);   ms->id[sizeof(ms->id)-1]=0;
+            strncpy(ms->name, s["n"] | "",     sizeof(ms->name)-1); ms->name[sizeof(ms->name)-1]=0;
+            strncpy(ms->color,s["c"] | "#444", sizeof(ms->color)-1);ms->color[sizeof(ms->color)-1]=0;
+            ms->state   = s["s"] | false;
+            ms->online  = s["o"] | false;
+            ms->restore = s["r"] | false;
+            ms->ch      = s["h"] | 1;
         }
         xSemaphoreGive(state_mutex);
         notify_ui();
@@ -3137,6 +3307,9 @@ static String build_state_json(void) {
         p["last_seen"] = seconds_since(mesh_peers[i].last_seen_ms, now_ms);
         JsonArray psw = p.createNestedArray("switches");
         for (int j=0;j<mesh_peers[i].switch_count;j++) {
+            /* A window packet can be lost mid-sweep, leaving a slot the
+             * peer has announced but not yet described. Don't render it. */
+            if (!mesh_peers[i].switches[j].id[0]) continue;
             JsonObject s = psw.createNestedObject();
             s["id"]     = mesh_peers[i].switches[j].id;
             s["name"]   = mesh_peers[i].switches[j].name;
