@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.26.0"
+#define MASTER_FW_VERSION  "11.27.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -275,6 +275,7 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
 #define MESH_PKT_CONFIG    0x0A
 #define MESH_PKT_KICK      0x0B
 #define MESH_PKT_KICK_ACK  0x0C  /* config command: rename/reorder */
+#define MESH_PKT_RECFAIL   0x0D  /* recovery backoff, shared across the mesh */
 
 /* ================================================================
  * RELAY RATE LIMITING
@@ -649,14 +650,21 @@ static uint32_t       auth_lock_until = 0;
  * registers one with the Bluetooth SIG. */
 #define BLE_COMPANY_ID 0xFFFF
 #define BLE_MFG_VER    0x01
-#define BLE_MAX_FAILS  5
-#define BLE_LOCKOUT_MS 900000UL      /* 15 min after 5 wrong answers */
+/* Recovery backoff: two seconds, doubling per rejection, capped. The
+ * schedule lives here rather than in the app, and every rejection carries
+ * the remaining wait so the app only renders a countdown it was given. */
+#define REC_BACKOFF_BASE_S 2
+#define REC_BACKOFF_MAX_S  300
 
 static NimBLECharacteristic *ble_chal_char   = nullptr;
 static NimBLECharacteristic *ble_result_char = nullptr;
 static uint8_t  ble_nonce[8]      = {0};
-static uint8_t  ble_fails         = 0;
-static uint32_t ble_lock_until    = 0;
+/* Rejection count and the moment the next attempt is allowed. Synchronised
+ * across the mesh, because the story requires one recovery gate for the
+ * whole home -- hopping to another master must continue the same countdown
+ * rather than resetting it. */
+static uint8_t  rec_fails         = 0;
+static uint32_t rec_next_ms       = 0;
 static bool     ble_recover_ready = false;   /* apply from task_web */
 static char     ble_new_pass[64]  = {0};
 static NimBLECharacteristic *ble_rsp_char   = nullptr;
@@ -1008,7 +1016,14 @@ static void pin_wrap(const char *pin, const uint8_t *uid4,
     uint8_t seed[12], key[32], ks[32];
     memcpy(seed, uid4, 4);
     memcpy(seed + 4, nonce8, 8);
-    hmac_sha256((const uint8_t *)pin, seed, sizeof(seed), key);
+    /* hmac_sha256 always reads sixteen key bytes. mesh_pin is a seven-byte
+     * buffer, so passing it straight in read nine bytes of whatever globals
+     * followed it -- deterministic within one build, and different in the
+     * next, which would have made a join between two firmware versions fail
+     * in a way nobody could explain. Pad explicitly instead. */
+    uint8_t pk[16] = {0};
+    for (int i = 0; i < 16 && pin[i]; i++) pk[i] = (uint8_t)pin[i];
+    hmac_sha256(pk, seed, sizeof(seed), key);
     for (uint16_t off = 0; off < n; off += 32) {
         uint8_t ctr[36];
         memcpy(ctr, key, 32);
@@ -1939,6 +1954,24 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 Serial.printf("[MESH] Switch order updated: %s\n", order);
                 notify_ui();
             }
+        }
+
+    } else if (type == MESH_PKT_RECFAIL) {
+        /* One recovery gate for the whole home: a rejection anywhere in the
+         * mesh advances everyone's backoff, so hopping to another master
+         * continues the same countdown instead of resetting it. Only ever
+         * moves the gate later, never earlier -- except an explicit reset
+         * after a successful recovery. */
+        uint8_t f = (uint8_t)(doc["f"] | 0);
+        uint32_t w = (uint32_t)(doc["w"] | 0);
+        if (f == 0) {
+            rec_fails   = 0;
+            rec_next_ms = 0;
+        } else if (f >= rec_fails) {
+            rec_fails = f;
+            uint32_t until = millis() + w * 1000UL;
+            if (!rec_next_ms || (int32_t)(until - rec_next_ms) > 0)
+                rec_next_ms = until ? until : 1;
         }
 
     } else if (type == MESH_PKT_PASS_CHG) {
@@ -5873,50 +5906,153 @@ static void ble_new_nonce(void) {
     if (ble_chal_char) ble_chal_char->setValue(ble_nonce, 8);
 }
 
+/* Keystream from the recovery key and the challenge nonce. XOR is its own
+ * inverse, so one routine both wraps and unwraps.
+ *
+ * This is what keeps the new whole-home password off the air in the clear.
+ * The old flow had the *master* choose the password and notify it back
+ * unencrypted over an open link -- anyone in radio range with a sniffer got
+ * the key to the house. */
+static void rkey_wrap(const uint8_t *rkey, const uint8_t *nonce8,
+                      uint8_t *buf, uint16_t n) {
+    uint8_t key[32], ks[32];
+    hmac_sha256(rkey, nonce8, 8, key);
+    for (uint16_t off = 0; off < n; off += 32) {
+        uint8_t ctr[36];
+        memcpy(ctr, key, 32);
+        ctr[32]=(off>>24)&0xFF; ctr[33]=(off>>16)&0xFF;
+        ctr[34]=(off>>8)&0xFF;  ctr[35]=off&0xFF;
+        hmac_sha256(key, ctr, sizeof(ctr), ks);
+        for (uint16_t k = 0; k < 32 && off + k < n; k++)
+            buf[off + k] ^= ks[k];
+    }
+}
+
+/* Seconds still to wait, 0 when an attempt is allowed now. */
+static uint32_t rec_wait_s(void) {
+    if (!rec_next_ms) return 0;
+    int32_t left = (int32_t)(rec_next_ms - millis());
+    if (left <= 0) return 0;
+    return (uint32_t)((left + 999) / 1000);
+}
+
+static void rec_broadcast_gate(void) {
+    if (!mesh_active) return;
+    char self_uid[12];
+    snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+    StaticJsonDocument<128> doc;
+    doc["type"] = MESH_PKT_RECFAIL;
+    doc["uid"]  = self_uid;
+    doc["f"]    = rec_fails;
+    doc["w"]    = rec_wait_s();
+    String payload; serializeJson(doc, payload);
+    mesh_broadcast(payload.c_str(), payload.length() + 1);
+}
+
+/* One rejection: advance the schedule and tell the rest of the mesh. */
+static void rec_note_failure(void) {
+    if (rec_fails < 16) rec_fails++;
+    uint32_t wait_s = REC_BACKOFF_BASE_S;
+    for (uint8_t i = 1; i < rec_fails && wait_s < REC_BACKOFF_MAX_S; i++)
+        wait_s *= 2;
+    if (wait_s > REC_BACKOFF_MAX_S) wait_s = REC_BACKOFF_MAX_S;
+    rec_next_ms = millis() + wait_s * 1000UL;
+    rec_broadcast_gate();
+}
+
+static void rec_clear_gate(void) {
+    rec_fails   = 0;
+    rec_next_ms = 0;
+    rec_broadcast_gate();
+}
+
+/* The verdict, as the app reads it. Explicit accept/reject replaced the
+ * old silent timeout: the recovery key's entropy plus a device-enforced
+ * doubling backoff is what makes a straight answer safe to give. */
+static void rec_reply(bool ok, const char *why) {
+    StaticJsonDocument<128> doc;
+    doc["v"]  = 2;
+    doc["ok"] = ok;
+    if (ok) {
+        /* The master decides the scope, never the app: it is the one that
+         * knows whether it is meshed. */
+        doc["scope"] = mesh_active ? "mesh" : "device";
+    } else {
+        doc["wait"] = rec_wait_s();
+        if (why) doc["err"] = why;
+    }
+    String out; serializeJson(doc, out);
+    if (ble_result_char) {
+        ble_result_char->setValue((uint8_t *)out.c_str(), out.length());
+        ble_result_char->notify();
+    }
+}
+
 class BleRespCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
         /* Runs on the BLE task. Do the cheap checks here, hand the actual
          * credential change to task_web -- NVS writes and an AP restart do
-         * not belong on this stack. */
-        if (ble_lock_until && (int32_t)(millis() - ble_lock_until) < 0) return;
-
-        /* Arduino ESP32 core 3.x returns an Arduino String here; the 2.x
-         * API returned std::string. Use the Arduino type. */
+         * not belong on this stack.
+         *
+         * Request (v2), written in one go:
+         *   [0]      version, 0x02
+         *   [1]      password length, 8..63
+         *   [2..9]   HMAC-SHA256(recovery_key, nonce8 || ver || len || wrapped)[0..7]
+         *   [10..]   the new password, wrapped with rkey_wrap
+         *
+         * The app chooses the password and it never crosses in the clear;
+         * the proof authenticates the whole request, so neither the key nor
+         * the password can be lifted from a recorded exchange. */
         NimBLEAttValue av = ch->getValue();
-        if (av.length() != 8 || !factory_set) return;
+        const uint8_t *req = av.data();
+        uint16_t rlen = av.length();
 
-        uint8_t want[32];
-        hmac_sha256(recovery_key, ble_nonce, 8, want);
-        if (!ct_equal(want, av.data(), 8)) {
-            /* Silent on failure: no distinguishable response, so the
-             * service cannot be probed for near-misses. */
-            if (++ble_fails >= BLE_MAX_FAILS) {
-                ble_lock_until = millis() + BLE_LOCKOUT_MS;
-                ble_fails = 0;
-            }
+        if (!factory_set) { rec_reply(false, "not provisioned"); return; }
+
+        /* The gate is enforced here, whatever the client believes. */
+        if (rec_wait_s() > 0) { rec_reply(false, "too soon"); return; }
+
+        if (rlen < 10 + 8 || req[0] != 0x02) {
+            rec_note_failure();
+            rec_reply(false, "malformed");
             ble_new_nonce();
             return;
         }
-        ble_fails = 0;
-
-        if (mesh_active) {
-            /* A mesh password is shared, so it cannot be restored from
-             * this device's card. Issue a fresh one and push it to every
-             * peer, authenticated with mesh_auth_key which they all still
-             * hold. One master recovers the whole house. */
-            char gen[13];
-            rand_hex(gen, 12);
-            strncpy(ble_new_pass, gen, sizeof(ble_new_pass)-1);
-        } else {
-            /* Standalone: go back to the value printed on the card. */
-            strncpy(ble_new_pass, factory_pass, sizeof(ble_new_pass)-1);
+        uint8_t plen = req[1];
+        if (plen < PASS_MIN_LEN || plen > 63 || (uint16_t)(10 + plen) != rlen) {
+            rec_note_failure();
+            rec_reply(false, "malformed");
+            ble_new_nonce();
+            return;
         }
-        ble_new_pass[sizeof(ble_new_pass)-1] = 0;
 
-        if (ble_result_char) {
-            ble_result_char->setValue((uint8_t*)ble_new_pass, strlen(ble_new_pass));
-            ble_result_char->notify();
+        /* Proof covers the wrapped password too, so a recorded request
+         * cannot be replayed with a different one grafted on. */
+        uint8_t msg[8 + 2 + 64];
+        memcpy(msg, ble_nonce, 8);
+        msg[8] = req[0];
+        msg[9] = req[1];
+        memcpy(msg + 10, req + 10, plen);
+        uint8_t want[32];
+        hmac_sha256(recovery_key, msg, 10 + plen, want);
+        if (!ct_equal(want, req + 2, 8)) {
+            rec_note_failure();
+            rec_reply(false, "wrong recovery key");
+            ble_new_nonce();
+            return;
         }
+
+        uint8_t clear[64];
+        memcpy(clear, req + 10, plen);
+        rkey_wrap(recovery_key, ble_nonce, clear, plen);
+        memcpy(ble_new_pass, clear, plen);
+        ble_new_pass[plen] = 0;
+        memset(clear, 0, sizeof(clear));
+        memset(msg, 0, sizeof(msg));
+
+        rec_clear_gate();
+        rec_reply(true, nullptr);
         ble_recover_ready = true;
         ble_new_nonce();
     }
@@ -5939,14 +6075,11 @@ class BleChalCB : public NimBLECharacteristicCallbacks {
     }
 };
 
-/* The recovery result carries the whole-home password in the clear. The
- * characteristic is READ|NOTIFY (the app subscribes, but falls back to a
- * read), so the value must not outlive the connection that earned it --
- * otherwise anyone in radio range can connect afterwards and read the
- * live password straight out of the device, indefinitely.
- *
- * Cleared on every connect and disconnect: it exists only between a
- * successful recovery and the end of that same connection. */
+/* The result characteristic now carries a verdict, not a credential -- the
+ * password travels the other way, wrapped, and is chosen by the app. It is
+ * still cleared on every connect and disconnect: a stale "accepted" left
+ * readable would tell the next person in radio range that a recovery just
+ * succeeded, and there is no reason to hand that out. */
 static void ble_clear_recovery_result(void) {
     if (ble_result_char) ble_result_char->setValue((uint8_t *)"", 0);
     /* Deliberately does NOT touch ble_new_pass: task_web consumes it in
@@ -6606,7 +6739,7 @@ static void ble_recovery_apply(void) {
         strncpy(device_pass, ble_new_pass, sizeof(device_pass)-1);
         device_pass[sizeof(device_pass)-1] = 0;
         prefs.begin("auth", false); prefs.putString("appw", device_pass); prefs.end();
-        Serial.println("[BLE] device password restored to the card value");
+        Serial.println("[BLE] device password set from recovery");
     }
     ap_change_pending = true;
     ap_change_at_ms   = millis() + AP_APPLY_DELAY_MS;
