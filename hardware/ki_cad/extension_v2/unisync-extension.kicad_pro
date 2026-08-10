@@ -764,7 +764,7 @@
         "uuid": "bc7c70d1-6d82-49d4-8728-70af27bd11e1"
       }
     ],
-    "used_designators": "SW1,C_in1,U1-5,D1-3,Q1-2,R_swdio1,C_by3,J1-2,J5,C_out1,#PWR1-46,R_led2-3,R_b2,#FLG1-2,C_cs2,R1,LED2-3,C_rst1,C1,R_swdclk1",
+    "used_designators": "#FLG1-2,R_b2,R_led2-3,#PWR1-46,C_out1,J1-2,J5,R_swdclk1,C1,C_rst1,LED2-3,R1,C_cs2,SW1,C_in1,Q1-2,R_swdio1,D1-3,U1-5,C_by3",
     "variants": []
   },
   "sheets": [

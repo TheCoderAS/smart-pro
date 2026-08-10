@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.13.2
+ * Unisync - Master Firmware v11.20.2
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.13.2"
+#define MASTER_FW_VERSION  "11.20.2"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -47,7 +47,6 @@
 #include "esp_mac.h"
 #include "esp_wifi.h"
 #include "driver/gpio.h"
-#include "html_content.h"
 
 /* Placed directly after the includes on purpose: the Arduino build
  * generates function prototypes and inserts them above the first
@@ -467,7 +466,6 @@ static uint8_t  master_fw[3]       = {0,0,0}; /* our own version, parsed   */
 #define AUTH_LOCKOUT_MS    300000UL    /* 5 min after 5 bad passwords */
 #define RATE_WINDOW_MS     10000UL
 #define RATE_MAX_REQS      40          /* per client per window */
-#define AUDIT_ENTRIES      24
 
 static uint8_t        auth_fails      = 0;
 static uint32_t       auth_lock_until = 0;
@@ -483,6 +481,37 @@ static uint32_t       auth_lock_until = 0;
 #define BLE_CHAL_UUID  "556e6973-796e-6320-5265-636f76657232"
 #define BLE_RESP_UUID  "556e6973-796e-6320-5265-636f76657233"
 #define BLE_RESULT_UUID "556e6973-796e-6320-5265-636f76657234"
+/* Control transport. BLE is the second way in: when the phone has no
+ * cellular and needs the home Wi-Fi for internet, it can still reach the
+ * nearest master over BLE instead of leaving that network. Control and
+ * state only -- firmware upload stays on Wi-Fi, where the throughput is. */
+#define BLE_REQ_UUID   "556e6973-796e-6320-5265-636f76657235"
+#define BLE_RSP_UUID   "556e6973-796e-6320-5265-636f76657236"
+#define BLE_STATE_UUID "556e6973-796e-6320-5265-636f76657237"
+#define BLE_CHUNK      160          /* fits the default MTU with headroom */
+#define BLE_REQ_MAX    512
+#define BLE_STATE_MIN_MS 150   /* floor between state pushes, deferred not dropped */
+
+/* A BLE connection is a scarce resource: NimBLE stops advertising while
+ * one is open, so a client that connects and never leaves makes the
+ * master invisible to everyone, the owner included, without needing any
+ * credential. Three defences: keep advertising, drop clients that never
+ * authenticate, and drop authenticated clients that go idle. */
+#define BLE_MAX_CONN      3
+#define BLE_AUTH_GRACE_MS 15000UL     /* prove yourself within 15 s */
+#define BLE_MAX_UNAUTH    1           /* only one unproven client at a time */
+
+/* Manufacturer data in the advertisement, so the app can find masters
+ * without knowing their UIDs in advance and can tell which mesh each one
+ * belongs to before connecting.
+ *   [0..1] company id, little endian
+ *   [2]    format version
+ *   [3..4] mesh id, 0000 when standalone
+ *   [5]    flags: bit0 in a mesh, bit1 provisioned, bit2 client connected
+ * 0xFFFF is the reserved "not assigned" company id. Replace it if Unisync
+ * registers one with the Bluetooth SIG. */
+#define BLE_COMPANY_ID 0xFFFF
+#define BLE_MFG_VER    0x01
 #define BLE_MAX_FAILS  5
 #define BLE_LOCKOUT_MS 900000UL      /* 15 min after 5 wrong answers */
 
@@ -493,6 +522,23 @@ static uint8_t  ble_fails         = 0;
 static uint32_t ble_lock_until    = 0;
 static bool     ble_recover_ready = false;   /* apply from task_web */
 static char     ble_new_pass[64]  = {0};
+static NimBLECharacteristic *ble_rsp_char   = nullptr;
+static NimBLECharacteristic *ble_state_char = nullptr;
+static char     ble_req_buf[BLE_REQ_MAX];
+static uint16_t ble_req_len     = 0;
+static bool     ble_req_ready   = false;
+typedef struct {
+    uint16_t handle;
+    bool     used;
+    bool     authed;
+    uint32_t opened_ms;
+    uint32_t last_ms;
+} ble_conn_t;
+static ble_conn_t   ble_conns[BLE_MAX_CONN];
+static uint8_t      ble_conn_count = 0;
+static NimBLEServer *ble_server    = nullptr;
+static uint16_t     ble_req_handle = 0xFFFF;
+static bool     ble_connected   = false;
 
 /* Deferred credential change: reply first, then restart the AP, so the
  * caller learns the outcome instead of inferring it from a dropped
@@ -507,13 +553,6 @@ typedef struct {
 } rate_bucket_t;
 static rate_bucket_t rate_buckets[8];
 
-typedef struct {
-    uint32_t at_s;
-    uint32_t ip;
-    char     what[40];
-} audit_entry_t;
-static audit_entry_t audit_log[AUDIT_ENTRIES];
-static uint8_t       audit_head = 0;
 
 /* Root key for bus authentication. Each extension is provisioned with
  * HMAC(root_key, its uid), so the master derives any device's key from
@@ -547,6 +586,13 @@ static bool     fw_key_set   = false;
 static bool     upload_authed  = false;   /* set at UPLOAD_FILE_START */
 static void     pin_wrap(const char *pin, const uint8_t *uid4,
                          const uint8_t *nonce8, uint8_t *buf, uint16_t n);
+static void     ble_notify_chunked(NimBLECharacteristic *ch, const String &s);
+static void     ble_handle_request(const char *json);
+static bool     ble_set_relay_by_id(const char *id, bool st);
+static void     ble_killall(void);
+static uint16_t ble_mesh_id(void);
+static void     ble_update_adv_data(void);
+static void     ble_reap_connections(void);
 static void     ble_recovery_begin(void);
 static void     ble_recovery_apply(void);
 static void     mesh_broadcast_pass_change(void);
@@ -599,7 +645,6 @@ static void     make_token(char *out);
 static bool     token_valid(const String &tok);
 static bool     auth_valid(void);
 static bool     auth_ok(void);
-static void     audit(const char *what);
 static uint32_t master_image_size(void);
 static void     master_fw_sync(void);
 static uint32_t fw_crc32(const uint8_t *d, uint32_t n);
@@ -1341,6 +1386,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 prefs.putUInt("credver", cred_version);
                 prefs.end();
                 Serial.println("[MESH] credentials unwrapped and stored");
+                ble_update_adv_data();
             }
             const char *mo = doc["master_order"] | "";
             strncpy(master_order_str, mo, sizeof(master_order_str)-1);
@@ -1828,6 +1874,7 @@ static void mesh_nvs_clear(void) {
         prefs.remove("authkey"); prefs.remove("credver"); prefs.remove("mesh_pass");
         prefs.end();
         strncpy(mesh_pass,"12345678",sizeof(mesh_pass)-1);
+        ble_update_adv_data();
 }
 
 /* ================================================================
@@ -2455,6 +2502,18 @@ static void task_bus(void *arg) {
             fw_reconcile();
         }
 
+        /* BLE requests are assembled on the BLE task but executed here:
+         * relay queues, NVS writes and JSON building do not belong on
+         * that stack. */
+        if (ble_req_ready) {
+            ble_req_ready = false;
+            ble_handle_request(ble_req_buf);
+        }
+
+        /* Reclaim BLE slots held by squatters or stale clients. */
+        static uint32_t last_reap = 0;
+        if (millis() - last_reap >= 2000) { last_reap = millis(); ble_reap_connections(); }
+
         ble_recovery_apply();
 
         /* Apply a deferred credential change once the HTTP reply has gone
@@ -2705,22 +2764,38 @@ static void task_web(void *arg) {
     for (;;) {
         server.handleClient();
         wss.loop();
+        static uint32_t last_ble_push  = 0;
+        static bool     ble_state_dirty = false;
+
         uint8_t sig;
         if (xQueueReceive(ws_notify_queue,&sig,0)==pdTRUE) {
             while (xQueueReceive(ws_notify_queue,&sig,0)==pdTRUE);
             String json=build_state_json();
             wss.broadcastTXT(json);
+            /* Mark the BLE client as needing an update rather than pushing
+             * immediately. A full state document is several chunks, so one
+             * push per relay toggle saturates the link. */
+            ble_state_dirty = true;
         }
+
+        /* Send the pending update as soon as the rate window allows.
+         * Rate limiting must DEFER, never DISCARD -- dropping the push
+         * left the app showing stale state until some later change
+         * happened to fall outside the window. */
+        if (ble_connected && ble_state_dirty &&
+            (millis() - last_ble_push) >= BLE_STATE_MIN_MS) {
+            ble_state_dirty = false;
+            last_ble_push   = millis();
+            ble_notify_chunked(ble_state_char, build_state_json());
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-/* ================================================================
- * HTML UI
- * ================================================================ */
-/* SETTINGS_HTML defined in html_content.h */
-
-/* HTML defined in html_content.h */
+/* The served web UI has been removed. The Flutter app is the only client,
+ * and every endpoint below returns JSON. This reclaimed roughly 70 KB of
+ * source plus the page handlers and their string tables. */
 
 /* ================================================================
  * WEB ROUTES
@@ -2758,15 +2833,10 @@ static void mesh_send_config(const char *cmd, const char *target_uid,
 }
 
 static void setup_web(void) {
-    server.on("/", HTTP_GET, [](){
-        server.send_P(200,"text/html",HTML);
-    });
-
     /* Relay toggle - immediate, with rate limiting */
     /* Kill all switches on this master */
     server.on("/api/relay/killall", HTTP_POST, [](){
         if (!auth_ok()) return;
-        audit("all relays off");
         /* Update master relay state immediately under mutex so
          * notify_ui() snapshot reflects the new OFF state */
         xSemaphoreTake(state_mutex,portMAX_DELAY);
@@ -2961,7 +3031,6 @@ static void setup_web(void) {
     /* Remove extension */
     server.on("/api/remove", HTTP_POST, [](){
         if (!auth_ok()) return;
-        audit("switch removed");
         int slot=server.arg("slot").toInt();
         if (slot<0||slot>=MAX_EXTENSIONS) {
             server.send(400,"application/json","{\"error\":\"bad slot\"}"); return; }
@@ -3023,12 +3092,6 @@ static void setup_web(void) {
     });
 
     /* -- OTA Upload -- */
-    /* Settings page */
-    /* Settings page */
-    server.on("/settings", HTTP_GET, [](){
-        server.send_P(200, "text/html", SETTINGS_HTML);
-    });
-
     /* Device info API */
     server.on("/api/info", HTTP_GET, [](){
         char uid_str[20];
@@ -3222,7 +3285,6 @@ static void setup_web(void) {
         prefs.putBytes("fw",   fw_key,   sizeof(fw_key));
         prefs.end();
         root_key_set = fw_key_set = true;
-        audit("keys provisioned");
         Serial.println("[SEC] keys provisioned");
         server.send(200, "application/json", F("{\"ok\":true}"));
     });
@@ -3247,14 +3309,12 @@ static void setup_web(void) {
                 auth_fails = 0;
                 Serial.println("[AUTH] too many failures, locked out");
             }
-            audit("login failed");
             server.send(401, "application/json", F("{\"error\":\"wrong password\"}"));
             return;
         }
         auth_fails = 0;
         char tok[AUTH_TOKEN_LEN];
         make_token(tok);
-        audit("login ok");
         StaticJsonDocument<128> d;
         d["token"] = tok;
         d["mesh"]  = mesh_active;
@@ -3298,7 +3358,6 @@ static void setup_web(void) {
             device_pass[sizeof(device_pass)-1] = 0;
             prefs.begin("auth", false); prefs.putString("appw", device_pass); prefs.end();
         }
-        audit("password changed");
         StaticJsonDocument<192> d;
         d["ok"]    = true;
         d["scope"] = mesh_active ? "mesh" : "device";
@@ -3313,21 +3372,7 @@ static void setup_web(void) {
     });
 ;
 
-    server.on("/api/audit", HTTP_GET, [](){
-        if (!auth_ok()) return;
-        StaticJsonDocument<2048> doc;
-        JsonArray a = doc.createNestedArray("events");
-        for (int n = 0; n < AUDIT_ENTRIES; n++) {
-            int i = (audit_head + n) % AUDIT_ENTRIES;
-            if (!audit_log[i].what[0]) continue;
-            JsonObject o = a.createNestedObject();
-            o["t"]  = audit_log[i].at_s;
-            o["ip"] = IPAddress(audit_log[i].ip).toString();
-            o["what"] = audit_log[i].what;
-        }
-        String out; serializeJson(doc, out);
-        server.send(200, "application/json", out);
-    });
+;
 
         /* -- Firmware library -- */
     server.on("/api/fw/list", HTTP_GET, [](){
@@ -3644,7 +3689,6 @@ static void setup_web(void) {
     /* Create a new mesh (first master) */
     server.on("/api/mesh/create", HTTP_POST, [](){
         if (!auth_ok()) return;
-        audit("created mesh");
         if (mesh_active) {
             server.send(400,"application/json","{\"error\":\"already in mesh\"}");
             return;
@@ -3675,6 +3719,7 @@ static void setup_web(void) {
             prefs.putUInt("credver", cred_version);
             prefs.end();
             Serial.printf("[MESH] created, password: %s\n", gen);
+            ble_update_adv_data();
         }
         strncpy(mesh_name, name.c_str(), sizeof(mesh_name)-1);
         /* Generate random mesh ID */
@@ -3699,7 +3744,6 @@ static void setup_web(void) {
     /* Leave mesh */
     server.on("/api/mesh/leave", HTTP_POST, [](){
         if (!auth_ok()) return;
-        audit("left mesh");
         if (!mesh_active) {
             server.send(400,"application/json","{\"error\":\"not in mesh\"}");
             return;
@@ -3730,7 +3774,15 @@ static void setup_web(void) {
                      tmac[4], tmac[5]);
             WiFi.softAPdisconnect(false);
             delay(100);
-            WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
+            /* Never start an open access point. If the credential is somehow
+     * missing, fall back to the factory value rather than broadcasting
+     * an unprotected network. */
+    if (strlen(device_pass) < PASS_MIN_LEN) {
+        Serial.println("[AUTH] device password missing at AP start -- using factory value");
+        strncpy(device_pass, factory_pass, sizeof(device_pass)-1);
+        device_pass[sizeof(device_pass)-1] = 0;
+    }
+    WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
             Serial.printf("[WIFI] Reverted to unique SSID: %s\n", unique_ssid);
         }
         strncpy(mesh_name, "Unisync", sizeof(mesh_name)-1);
@@ -4115,9 +4167,20 @@ static void sha256_hex(const char *in, const char *salt, char *out65) {
     out65[64] = 0;
 }
 
+/* Writes exactly hex_chars characters plus a terminator.
+ *
+ * The previous version used sprintf("%08x") in steps of 8, but sprintf
+ * also writes a NUL -- so the final call wrote 9 bytes. For a length that
+ * is not a multiple of 8 (12, as used for passwords) that ran 4 bytes
+ * past the caller's buffer and smashed the stack. Emit nibbles directly
+ * so the write is exactly bounded whatever the length. */
 static void rand_hex(char *out, int hex_chars) {
-    for (int i = 0; i < hex_chars; i += 8)
-        sprintf(out + i, "%08x", (unsigned)esp_random());
+    static const char H[] = "0123456789abcdef";
+    uint32_t r = 0;
+    for (int i = 0; i < hex_chars; i++) {
+        if ((i & 7) == 0) r = esp_random();
+        out[i] = H[(r >> ((i & 7) * 4)) & 0x0F];
+    }
     out[hex_chars] = 0;
 }
 
@@ -4129,14 +4192,6 @@ static bool safe_equal(const char *a, const char *b, size_t n) {
     return diff == 0;
 }
 
-static void audit(const char *what) {
-    audit_entry_t *e = &audit_log[audit_head];
-    e->at_s = millis() / 1000;
-    e->ip   = (uint32_t)server.client().remoteIP();
-    strncpy(e->what, what, sizeof(e->what) - 1);
-    e->what[sizeof(e->what) - 1] = 0;
-    audit_head = (audit_head + 1) % AUDIT_ENTRIES;
-}
 
 /* Too many requests from one client in a short window. Relays are
  * mechanical and have a finite cycle life, so a flood is a hardware
@@ -4942,12 +4997,12 @@ class BleRespCB : public NimBLECharacteristicCallbacks {
 
         /* Arduino ESP32 core 3.x returns an Arduino String here; the 2.x
          * API returned std::string. Use the Arduino type. */
-        String v = ch->getValue();
-        if (v.length() != 8 || !factory_set) return;
+        NimBLEAttValue av = ch->getValue();
+        if (av.length() != 8 || !factory_set) return;
 
         uint8_t want[32];
         hmac_sha256(recovery_key, ble_nonce, 8, want);
-        if (!ct_equal(want, (const uint8_t*)v.c_str(), 8)) {
+        if (!ct_equal(want, av.data(), 8)) {
             /* Silent on failure: no distinguishable response, so the
              * service cannot be probed for near-misses. */
             if (++ble_fails >= BLE_MAX_FAILS) {
@@ -4988,12 +5043,483 @@ class BleChalCB : public NimBLECharacteristicCallbacks {
     }
 };
 
+/* Same effect as POST /api/relay, driven from the BLE transport.
+ * Mirrors the HTTP handler's semantics deliberately: id "master_1" or
+ * "ext<slot>_<ch>", state applied, queued to the same task. */
+static bool ble_set_relay_by_id(const char *id_c, bool st) {
+    String id(id_c);
+    int us = id.indexOf('_');
+    if (us <= 0) {
+        Serial.printf("[BLE] id '%s' has no '_<channel>' suffix\n", id_c);
+        return false;
+    }
+    int ch = id.substring(us+1).toInt();
+    if (ch != 1 && ch != 2) {
+        Serial.printf("[BLE] id '%s' channel must be 1 or 2\n", id_c);
+        return false;
+    }
+
+    if (id.startsWith("master")) {
+        relay_cmd_t cmd; cmd.target = -1; cmd.channel = ch; cmd.state = st;
+        xQueueSend(master_relay_queue, &cmd, 0);
+        return true;
+    }
+    if (id.startsWith("ext")) {
+        int slot = id.substring(3, us).toInt();
+        if (slot < 0 || slot >= MAX_EXTENSIONS) {
+            Serial.printf("[BLE] slot %d out of range\n", slot);
+            return false;
+        }
+        relay_cmd_t cmd; cmd.target = slot; cmd.channel = ch; cmd.state = st;
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (ch == 1) extensions[slot].relay1 = st;
+        else         extensions[slot].relay2 = st;
+        xSemaphoreGive(state_mutex);
+        xQueueSend(ext_relay_queue, &cmd, 0);
+        relay_state_save();
+        notify_ui();
+        return true;
+    }
+    Serial.printf("[BLE] id '%s' is neither master nor ext\n", id_c);
+    return false;
+}
+
+static void ble_killall(void) {
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    master_relay1 = false;
+    master_relay2 = false;
+    for (int i = 0; i < MAX_EXTENSIONS; i++) {
+        if (extensions[i].state == EXT_EMPTY) continue;
+        extensions[i].relay1 = false;
+        extensions[i].relay2 = false;
+        relay_cmd_t e1; e1.target=i; e1.channel=1; e1.state=false;
+        relay_cmd_t e2; e2.target=i; e2.channel=2; e2.state=false;
+        xQueueSend(ext_relay_queue, &e1, 0);
+        xQueueSend(ext_relay_queue, &e2, 0);
+    }
+    xSemaphoreGive(state_mutex);
+    relay_cmd_t m1; m1.target=-1; m1.channel=1; m1.state=false;
+    relay_cmd_t m2; m2.target=-1; m2.channel=2; m2.state=false;
+    xQueueSend(master_relay_queue, &m1, 0);
+    xQueueSend(master_relay_queue, &m2, 0);
+    relay_state_save();
+    notify_ui();
+}
+
+/* Notifications are capped by the negotiated MTU, and a state document is
+ * larger than that, so responses go out in numbered chunks:
+ *   byte 0 = index, byte 1 = total, rest = payload.
+ * The app reassembles in order and parses once index == total-1. */
+static void ble_notify_chunked(NimBLECharacteristic *ch, const String &s) {
+    if (!ch || !ble_connected) {
+        Serial.println("[BLE] notify skipped: no client");
+        return;
+    }
+    uint16_t n = s.length();
+    uint8_t total = (uint8_t)((n + BLE_CHUNK - 1) / BLE_CHUNK);
+    if (total == 0) total = 1;
+    for (uint8_t i = 0; i < total; i++) {
+        uint16_t off = (uint16_t)i * BLE_CHUNK;
+        uint16_t len = (n - off > BLE_CHUNK) ? BLE_CHUNK : (n - off);
+        uint8_t pkt[BLE_CHUNK + 2];
+        pkt[0] = i; pkt[1] = total;
+        memcpy(pkt + 2, s.c_str() + off, len);
+        ch->setValue(pkt, len + 2);
+        ch->notify();
+        if (total > 1) vTaskDelay(pdMS_TO_TICKS(4));  /* pace multi-chunk only */
+    }
+}
+
+/* Control commands. Deliberately a small set: switching, listing and
+ * state. Firmware upload is not here and will not be -- 1.4 MB over BLE
+ * is hours, and the Wi-Fi path already works. */
+static void ble_handle_request(const char *json) {
+    StaticJsonDocument<384> req;
+    DeserializationError perr = deserializeJson(req, json);
+    if (perr) {
+        Serial.printf("[BLE] JSON parse failed: %s\n", perr.c_str());
+        return;
+    }
+    const char *cmd = req["c"] | "";
+    String tok      = req["t"] | "";
+    Serial.printf("[BLE] cmd='%s' token=%s\n",
+                  cmd, tok.length() ? "present" : "MISSING");
+
+    StaticJsonDocument<2048> res;
+
+    if (!strcmp(cmd, "login")) {
+        const char *pw = req["p"] | "";
+        const char *want = active_pass();
+        if (strlen(pw) != strlen(want) || !safe_equal(want, pw, strlen(want))) {
+            res["err"] = "bad password";
+        } else {
+            char t[AUTH_TOKEN_LEN];
+            make_token(t);
+            res["token"] = t;
+            res["mesh"]  = mesh_active;
+        }
+        String out; serializeJson(res, out);
+        ble_notify_chunked(ble_rsp_char, out);
+        return;
+    }
+
+    /* Everything else needs the same token the Wi-Fi API uses, so one
+     * login works across both transports and across every master. */
+    if (token_valid(tok)) {
+        for (int i = 0; i < BLE_MAX_CONN; i++)
+            if (ble_conns[i].used && ble_conns[i].handle == ble_req_handle)
+                ble_conns[i].authed = true;
+    }
+    if (!token_valid(tok)) {
+        Serial.println("[BLE] token rejected -- login required");
+        res["err"] = "login required";
+        String out; serializeJson(res, out);
+        ble_notify_chunked(ble_rsp_char, out);
+        return;
+    }
+
+    if (!strcmp(cmd, "relay")) {
+        const char *id = req["id"] | "";
+        bool st = req["s"] | false;
+        bool r = ble_set_relay_by_id(id, st);
+        Serial.printf("[BLE] relay id='%s' state=%d -> %s\n",
+                      id, st ? 1 : 0, r ? "ok" : "REJECTED");
+        res["ok"] = r;
+    } else if (!strcmp(cmd, "killall")) {
+        ble_killall();
+        res["ok"] = true;
+    } else if (!strcmp(cmd, "state")) {
+        String s = build_state_json();
+        ble_notify_chunked(ble_rsp_char, s);
+        return;
+    } else if (!strcmp(cmd, "exts")) {
+        /* Same shape as GET /api/extensions so the app has one model
+         * regardless of transport. "avail" reflects only what is already
+         * in THIS master's library -- an image the app has downloaded but
+         * not yet uploaded is invisible here, so the app decides what is
+         * available by comparing its own manifest against "fw". */
+        JsonArray a = res.createNestedArray("extensions");
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        for (int i = 0; i < MAX_EXTENSIONS; i++) {
+            if (extensions[i].state == EXT_EMPTY) continue;
+            JsonObject o = a.createNestedObject();
+            o["slot"]   = i;
+            o["addr"]   = extensions[i].address;
+            o["online"] = (extensions[i].state == EXT_ONLINE);
+            o["type"]   = extensions[i].hw_type;
+            o["rev"]    = extensions[i].hw_rev;
+            o["name"]   = extensions[i].name;
+            o["fails"]  = extensions[i].ota_fails;
+            o["stuck"]  = (extensions[i].ota_fails >= OTA_MAX_FAILS);
+            char vb[16];
+            snprintf(vb,sizeof(vb),"%u.%u.%u",extensions[i].fw_ver[0],
+                     extensions[i].fw_ver[1],extensions[i].fw_ver[2]);
+            o["fw"] = vb;
+            char id1[16], id2[16], n1[24], n2[24];
+            snprintf(id1,sizeof(id1),"ext%d_1",i);
+            snprintf(id2,sizeof(id2),"ext%d_2",i);
+            nvs_load_switch_name(id1,n1,sizeof(n1));
+            nvs_load_switch_name(id2,n2,sizeof(n2));
+            o["sw1"] = n1;
+            o["sw2"] = n2;
+            fw_entry_t av;
+            if (extensions[i].hw_type && extensions[i].hw_type != 0xFF &&
+                fw_lookup(extensions[i].hw_type, &av) &&
+                fw_ver_newer(av.ver, extensions[i].fw_ver)) {
+                char ab[16];
+                snprintf(ab,sizeof(ab),"%u.%u.%u",av.ver[0],av.ver[1],av.ver[2]);
+                o["avail"] = ab;
+            }
+        }
+        xSemaphoreGive(state_mutex);
+    } else if (!strcmp(cmd, "rename_ext")) {
+        /* Rename an extension device (the slot), not its switches. */
+        int slot = req["slot"] | -1;
+        const char *nm = req["name"] | "";
+        if (slot < 0 || slot >= MAX_EXTENSIONS || !nm[0]) {
+            res["err"] = "bad slot or name";
+        } else {
+            uint8_t uid[4]; bool okr = false;
+            xSemaphoreTake(state_mutex, portMAX_DELAY);
+            if (extensions[slot].state != EXT_EMPTY) {
+                strncpy(extensions[slot].name, nm, sizeof(extensions[slot].name)-1);
+                extensions[slot].name[sizeof(extensions[slot].name)-1] = 0;
+                memcpy(uid, extensions[slot].uid, 4);
+                okr = true;
+            }
+            xSemaphoreGive(state_mutex);
+            if (okr) { nvs_save(uid, slot, nm); notify_ui(); res["ok"] = true; }
+            else       res["err"] = "empty slot";
+        }
+    } else if (!strcmp(cmd, "rename_sw")) {
+        /* Rename one switch, e.g. id "ext0_1" or "master_2". */
+        const char *id = req["id"]   | "";
+        const char *nm = req["name"] | "";
+        if (!id[0] || !nm[0]) { res["err"] = "bad id or name"; }
+        else {
+            nvs_save_switch_name(id, nm);
+            notify_ui();
+            res["ok"] = true;
+        }
+    } else if (!strcmp(cmd, "rename_master")) {
+        const char *nm = req["name"] | "";
+        if (!nm[0]) { res["err"] = "bad name"; }
+        else {
+            xSemaphoreTake(state_mutex, portMAX_DELAY);
+            strncpy(master_name, nm, sizeof(master_name)-1);
+            master_name[sizeof(master_name)-1] = 0;
+            xSemaphoreGive(state_mutex);
+            nvs_save_master_name(nm);
+            notify_ui();
+            res["ok"] = true;
+        }
+    } else if (!strcmp(cmd, "reorder")) {
+        /* Body is the same comma-separated switch id list the HTTP
+         * endpoint takes. */
+        const char *ord = req["order"] | "";
+        if (!ord[0]) { res["err"] = "empty order"; }
+        else {
+            xSemaphoreTake(state_mutex, portMAX_DELAY);
+            switch_order = String(ord);
+            xSemaphoreGive(state_mutex);
+            nvs_save_switch_order(switch_order);
+            notify_ui();
+            Serial.printf("[BLE] switch order updated\n");
+            res["ok"] = true;
+        }
+    } else if (!strcmp(cmd, "fwlist")) {
+        /* What is already staged on THIS master. The app compares this
+         * against its own cache to decide whether an upload is still
+         * needed before it prompts the user to switch to Wi-Fi. */
+        res["fs"]     = fs_ready;
+        res["master"] = MASTER_FW_VERSION;
+        JsonArray a = res.createNestedArray("images");
+        if (fs_ready) {
+            File f = LittleFS.open(FW_MANIFEST_PATH, "r");
+            if (f) {
+                StaticJsonDocument<1024> man;
+                if (deserializeJson(man, f) == DeserializationError::Ok) {
+                    for (JsonObject e : man["images"].as<JsonArray>()) {
+                        JsonObject o = a.createNestedObject();
+                        o["type"] = e["type"];
+                        o["size"] = e["size"];
+                        char vb[16];
+                        snprintf(vb,sizeof(vb),"%u.%u.%u",
+                                 (uint8_t)(e["ver"][0] | 0),
+                                 (uint8_t)(e["ver"][1] | 0),
+                                 (uint8_t)(e["ver"][2] | 0));
+                        o["ver"] = vb;
+                    }
+                }
+                f.close();
+            }
+        }
+    } else if (!strcmp(cmd, "mesh")) {
+        res["active"]    = mesh_active;
+        res["mesh_name"] = mesh_name;
+        res["fw"]        = MASTER_FW_VERSION;
+        int online = 0;
+        for (int i=0;i<MAX_MESH_MASTERS;i++) if (mesh_peers[i].online) online++;
+        res["peer_count"] = online;
+    } else {
+        Serial.printf("[BLE] unknown command '%s'\n", cmd);
+        res["err"] = "unknown command";
+    }
+    String out; serializeJson(res, out);
+    ble_notify_chunked(ble_rsp_char, out);
+}
+
+class BleReqCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        /* Read NimBLEAttValue directly. Assigning it to an Arduino String
+         * loses the buffer and yields length 0, which looked exactly like
+         * "the app sent nothing". */
+        ble_req_handle = info.getConnHandle();
+        for (int i = 0; i < BLE_MAX_CONN; i++)
+            if (ble_conns[i].used && ble_conns[i].handle == ble_req_handle)
+                ble_conns[i].last_ms = millis();
+
+        NimBLEAttValue av = ch->getValue();
+        const uint8_t *v = av.data();
+        uint16_t vlen     = av.length();
+        Serial.printf("[BLE] write %u bytes:", vlen);
+        for (uint16_t i = 0; i < vlen && i < 16; i++)
+            Serial.printf(" %02X", v[i]);
+        Serial.println();
+        if (vlen == 0) return;
+
+        /* Accept both framings. A payload starting with '{' is plain JSON
+         * sent in one write -- the common case, and what a client that
+         * ignores the chunk header produces. Anything else is treated as
+         * [index][total][payload]. Guessing wrong used to fail silently. */
+        if (v[0] == '{') {
+            uint16_t len = vlen;
+            if (len >= BLE_REQ_MAX) { Serial.println("[BLE] request too long"); return; }
+            memcpy(ble_req_buf, v, len);
+            ble_req_buf[len] = 0;
+            ble_req_len = len;
+            Serial.printf("[BLE] unframed request: %s\n", ble_req_buf);
+            ble_req_ready = true;
+            return;
+        }
+
+        if (vlen < 2) { Serial.println("[BLE] short frame ignored"); return; }
+        uint8_t idx = v[0], total = v[1];
+        if (total == 0) { Serial.println("[BLE] bad chunk total"); return; }
+        if (idx == 0) ble_req_len = 0;
+        uint16_t len = vlen - 2;
+        if (ble_req_len + len >= BLE_REQ_MAX) {
+            Serial.println("[BLE] request overflow, dropped");
+            ble_req_len = 0; return;
+        }
+        memcpy(ble_req_buf + ble_req_len, v + 2, len);
+        ble_req_len += len;
+        Serial.printf("[BLE] chunk %u/%u, %u bytes buffered\n",
+                      idx + 1, total, ble_req_len);
+        if (idx + 1 >= total) {
+            ble_req_buf[ble_req_len] = 0;
+            Serial.printf("[BLE] request complete: %s\n", ble_req_buf);
+            ble_req_ready = true;    /* handled off this task */
+        }
+    }
+};
+
+class BleSrvCB : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer *s, NimBLEConnInfo &info) override {
+        uint16_t h = info.getConnHandle();
+
+        /* A connection cannot be refused on credentials -- the link is up
+         * before the client has sent anything, and recovery must stay
+         * reachable to someone with no credentials at all. What we can do
+         * is stop unproven clients occupying more than one slot, so a
+         * squatter can never lock the owner out. */
+        uint8_t unauth = 0;
+        for (int i = 0; i < BLE_MAX_CONN; i++)
+            if (ble_conns[i].used && !ble_conns[i].authed) unauth++;
+        if (unauth >= BLE_MAX_UNAUTH) {
+            Serial.printf("[BLE] refusing handle %u: an unproven client already holds a slot\n", h);
+            s->disconnect(h);
+            return;
+        }
+
+        for (int i = 0; i < BLE_MAX_CONN; i++) {
+            if (ble_conns[i].used) continue;
+            ble_conns[i].used      = true;
+            ble_conns[i].authed    = false;
+            ble_conns[i].handle    = h;
+            ble_conns[i].opened_ms = millis();
+            ble_conns[i].last_ms   = millis();
+            ble_conn_count++;
+            break;
+        }
+        ble_connected = (ble_conn_count > 0);
+        Serial.printf("[BLE] client connected (handle %u), %u open\n",
+                      h, ble_conn_count);
+        ble_update_adv_data();
+        /* Keep advertising while slots remain. Without this one client --
+         * hostile or merely forgotten -- hides the master from everyone. */
+        if (ble_conn_count < BLE_MAX_CONN) NimBLEDevice::startAdvertising();
+        /* Ask for a larger MTU so a state document needs fewer chunks.
+         * The phone may refuse; chunking copes either way. */
+        s->setDataLen(info.getConnHandle(), 251);
+        /* Default intervals are tuned for battery sensors and make every
+         * round trip feel sluggish. Ask for 15-30 ms; the phone may refuse
+         * or negotiate something else, which is fine. */
+        s->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
+    }
+    void onDisconnect(NimBLEServer *s, NimBLEConnInfo &info, int reason) override {
+        uint16_t h = info.getConnHandle();
+        for (int i = 0; i < BLE_MAX_CONN; i++) {
+            if (ble_conns[i].used && ble_conns[i].handle == h) {
+                ble_conns[i].used = false;
+                if (ble_conn_count) ble_conn_count--;
+                break;
+            }
+        }
+        ble_connected = (ble_conn_count > 0);
+        ble_req_len   = 0;
+        Serial.printf("[BLE] client disconnected (reason %d), %u open\n",
+                      reason, ble_conn_count);
+        ble_update_adv_data();
+        /* Keep advertising so the phone can hop to whichever master is
+         * nearest as the user moves, without any manual step. */
+        NimBLEDevice::startAdvertising();
+    }
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
+        Serial.printf("[BLE] MTU now %u\n", mtu);
+    }
+};
+
+/* A stable identifier for the mesh, derived from mesh_auth_key: fixed for
+ * the life of the mesh, identical on every member, and unaffected by the
+ * user renaming the mesh or changing its password. Standalone masters
+ * report 0000. */
+static uint16_t ble_mesh_id(void) {
+    if (!mesh_active || !mesh_auth_set) return 0;
+    uint8_t mac[32];
+    hmac_sha256(mesh_auth_key, (const uint8_t *)"unisync-meshid-v1", 17, mac);
+    uint16_t id = ((uint16_t)mac[0] << 8) | mac[1];
+    return id ? id : 1;            /* never collide with "standalone" */
+}
+
+/* Rebuilt whenever mesh membership or connection state changes, so a
+ * scanning app always sees current information. */
+static void ble_update_adv_data(void) {
+    NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+    uint16_t mid = ble_mesh_id();
+    uint8_t mfg[6];
+    mfg[0] = BLE_COMPANY_ID & 0xFF;
+    mfg[1] = (BLE_COMPANY_ID >> 8) & 0xFF;
+    mfg[2] = BLE_MFG_VER;
+    mfg[3] = (mid >> 8) & 0xFF;
+    mfg[4] = mid & 0xFF;
+    mfg[5] = (mesh_active ? 0x01 : 0)
+           | ((root_key_set && fw_key_set) ? 0x02 : 0)
+           | (ble_connected ? 0x04 : 0);
+
+    char name[24];
+    snprintf(name, sizeof(name), "U%02X%02X%02X%02X",
+             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+
+    NimBLEAdvertisementData ad;
+    ad.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+    ad.setName(name);
+    ad.setManufacturerData(std::string((char *)mfg, sizeof(mfg)));
+    adv->setAdvertisementData(ad);
+}
+
+/* Free slots held by clients that never authenticated, or that
+ * authenticated and then went quiet. Runs from task_web. Without this a
+ * single squatter can occupy a connection for ever. */
+static void ble_reap_connections(void) {
+    if (!ble_server) return;
+    uint32_t now = millis();
+    for (int i = 0; i < BLE_MAX_CONN; i++) {
+        if (!ble_conns[i].used) continue;
+        /* Authenticated clients are never reaped -- a phone sitting idle
+         * on a bedside table is a normal state, not an attack. */
+        bool drop = false;
+        const char *why = "";
+        if (!ble_conns[i].authed &&
+            (now - ble_conns[i].opened_ms) > BLE_AUTH_GRACE_MS) {
+            drop = true; why = "never authenticated";
+        }
+        if (drop) {
+            Serial.printf("[BLE] dropping handle %u: %s\n",
+                          ble_conns[i].handle, why);
+            ble_server->disconnect(ble_conns[i].handle);
+        }
+    }
+}
+
 static void ble_recovery_begin(void) {
     char name[24];
     snprintf(name, sizeof(name), "U%02X%02X%02X%02X",
              master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
     NimBLEDevice::init(name);
     NimBLEServer *srv = NimBLEDevice::createServer();
+    ble_server = srv;
+    srv->setCallbacks(new BleSrvCB());
     NimBLEService *svc = srv->createService(BLE_SVC_UUID);
 
     ble_chal_char = svc->createCharacteristic(
@@ -5008,13 +5534,36 @@ static void ble_recovery_begin(void) {
     ble_result_char = svc->createCharacteristic(
         BLE_RESULT_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
 
+    /* Control transport on the same service, so one connection serves both
+     * recovery and everyday switching. */
+    NimBLECharacteristic *req = svc->createCharacteristic(
+        BLE_REQ_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    req->setCallbacks(new BleReqCB());
+
+    ble_rsp_char = svc->createCharacteristic(
+        BLE_RSP_UUID, NIMBLE_PROPERTY::NOTIFY);
+    ble_state_char = svc->createCharacteristic(
+        BLE_STATE_UUID, NIMBLE_PROPERTY::NOTIFY);
+
     ble_new_nonce();
     svc->start();
+
+    /* A legacy advertising packet holds 31 bytes. Flags take 3, the name
+     * takes 2+9, and a 128-bit service UUID takes 2+16 -- 32 in total, so
+     * putting the UUID in the main packet overflows it and nothing is
+     * advertised at all. Keep the name in the advertisement and move the
+     * UUID into the scan response, which gets its own 31 bytes. */
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
-    adv->addServiceUUID(BLE_SVC_UUID);
+    ble_update_adv_data();
+
+    NimBLEAdvertisementData scanRsp;
+    scanRsp.setCompleteServices(NimBLEUUID(BLE_SVC_UUID));
+    adv->setScanResponseData(scanRsp);
     adv->enableScanResponse(true);
-    NimBLEDevice::startAdvertising();
-    Serial.printf("[BLE] recovery service advertising as %s\n", name);
+
+    bool started = NimBLEDevice::startAdvertising();
+    Serial.printf("[BLE] control + recovery advertising as %s mesh=%04X : %s\n",
+                  name, ble_mesh_id(), started ? "OK" : "FAILED");
 }
 
 /* Called from task_web: performs the change the BLE callback authorised. */
@@ -5038,9 +5587,18 @@ static void ble_recovery_apply(void) {
         prefs.begin("auth", false); prefs.putString("appw", device_pass); prefs.end();
         Serial.println("[BLE] device password restored to the card value");
     }
-    audit("BLE recovery");
     ap_change_pending = true;
     ap_change_at_ms   = millis() + AP_APPLY_DELAY_MS;
+}
+
+/* Read the UID from the factory-burned eFuse MAC. Must run before
+ * anything that prints or advertises it -- the card block used to print
+ * U00000000 because it ran first. */
+static void uid_from_efuse(void) {
+    uint8_t base_mac[6];
+    esp_read_mac(base_mac, ESP_MAC_WIFI_STA);
+    master_uid[0]=base_mac[2]; master_uid[1]=base_mac[3];
+    master_uid[2]=base_mac[4]; master_uid[3]=base_mac[5];
 }
 
 void setup() {
@@ -5060,6 +5618,97 @@ void setup() {
     gpio_config(&relay_cfg);
     gpio_set_level((gpio_num_t)RELAY1_PIN, 1); /* HIGH = relay OFF (active LOW) */
     gpio_set_level((gpio_num_t)RELAY2_PIN, 1);
+
+    /* Credentials must be loaded BEFORE any radio starts. The access point
+     * takes its password from device_pass, and starting it first brought
+     * the AP up with an empty string -- an OPEN network on every boot. */
+    uid_from_efuse();
+
+    prefs.begin("mesh", true);
+    {
+        size_t n = prefs.getBytes("authkey", mesh_auth_key, 16);
+        mesh_auth_set = (n == 16);
+        cred_version  = prefs.getUInt("credver", 0);
+    }
+    prefs.end();
+
+    prefs.begin("auth", false);
+    {
+        String ap = prefs.getString("appw", "");
+        if (ap.length() < PASS_MIN_LEN) {
+            char gen[13];
+            rand_hex(gen, 12);
+            prefs.putString("appw", gen);
+            ap = String(gen);
+        }
+        /* Standalone AP password only. mesh_pass is SHARED across a mesh
+         * so a phone roams between masters and so a master-OTA pull can
+         * associate with a peer; overwriting it per device would split the
+         * mesh. Change the mesh password through /api/mesh/passwd. */
+        strncpy(device_pass, ap.c_str(), sizeof(device_pass)-1);
+        device_pass[sizeof(device_pass)-1] = 0;
+    }
+    prefs.end();
+
+    /* Factory namespace: written once, never regenerated, never cleared by
+     * a reset. These two values are what the card in the box says, so the
+     * card remains accurate for the life of the device. */
+    prefs.begin("factory", false);
+    {
+        String fp = prefs.getString("pass", "");
+        size_t  n = prefs.getBytes("rkey", recovery_key, 16);
+        if (fp.length() < PASS_MIN_LEN || n != 16) {
+            fp = String(device_pass);
+            for (int i = 0; i < 16; i += 4) {
+                uint32_t r = esp_random();
+                recovery_key[i]=r&0xFF; recovery_key[i+1]=(r>>8)&0xFF;
+                recovery_key[i+2]=(r>>16)&0xFF; recovery_key[i+3]=(r>>24)&0xFF;
+            }
+            prefs.putString("pass", fp);
+            prefs.putBytes("rkey", recovery_key, 16);
+            char rk[33];
+            for (int i=0;i<16;i++) sprintf(rk+i*2, "%02x", recovery_key[i]);
+            rk[32]=0;
+            Serial.printf("\n[CARD] **************************************************\n");
+            Serial.printf("[CARD] Model        : U%02X%02X%02X%02X\n",
+                          master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            Serial.printf("[CARD] Password     : %s\n", fp.c_str());
+            Serial.printf("[CARD] Recovery key : %s\n", rk);
+            Serial.printf("[CARD] Print these on the card. Shown once, never again.\n");
+            Serial.printf("[CARD] **************************************************\n\n");
+        }
+        strncpy(factory_pass, fp.c_str(), sizeof(factory_pass)-1);
+        factory_pass[sizeof(factory_pass)-1] = 0;
+        factory_set = true;
+    }
+    prefs.end();
+    /* There is never an unclaimed window: the credential is set before the
+     * device ever boots for a user, so /api/password always needs auth. */
+
+    prefs.begin("keys", true);
+    {
+        size_t n1 = prefs.getBytes("root", root_key, sizeof(root_key));
+        size_t n2 = prefs.getBytes("fw",   fw_key,   sizeof(fw_key));
+        root_key_set = (n1 == sizeof(root_key));
+        fw_key_set   = (n2 == sizeof(fw_key));
+    }
+    prefs.end();
+    if (mesh_active && !mesh_auth_set) {
+        Serial.println("[MESH] ****************************************************");
+        Serial.println("[MESH] This mesh was formed before packet authentication");
+        Serial.println("[MESH] existed, so it has no auth key. Mesh packets are");
+        Serial.println("[MESH] NOT authenticated and the app cannot identify this");
+        Serial.println("[MESH] mesh (it advertises 0000).");
+        Serial.println("[MESH] Fix: leave the mesh on every master, then create");
+        Serial.println("[MESH] and re-join it. The key cannot be derived locally");
+        Serial.println("[MESH] because every master must hold the same one.");
+        Serial.println("[MESH] ****************************************************");
+    }
+    if (!root_key_set)
+        Serial.println("[SEC] no root key -- extensions cannot pair until provisioned");
+    if (!fw_key_set)
+        Serial.println("[SEC] no firmware key -- images cannot be verified");
+
 
     pinMode(RELAY1_PIN,   OUTPUT); digitalWrite(RELAY1_PIN,   HIGH); /* active LOW */
     pinMode(RELAY2_PIN,   OUTPUT); digitalWrite(RELAY2_PIN,   HIGH); /* active LOW */
@@ -5151,7 +5800,15 @@ void setup() {
         esp_read_mac(tmac, ESP_MAC_WIFI_STA);
         snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
                  tmac[4], tmac[5]);
-        WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
+        /* Never start an open access point. If the credential is somehow
+     * missing, fall back to the factory value rather than broadcasting
+     * an unprotected network. */
+    if (strlen(device_pass) < PASS_MIN_LEN) {
+        Serial.println("[AUTH] device password missing at AP start -- using factory value");
+        strncpy(device_pass, factory_pass, sizeof(device_pass)-1);
+        device_pass[sizeof(device_pass)-1] = 0;
+    }
+    WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
         Serial.printf("[WIFI] AP (unique): %s\n", unique_ssid);
     } else {
         /* Use mesh name as SSID -- all masters in same mesh share this SSID */
@@ -5160,16 +5817,12 @@ void setup() {
     }
     Serial.printf("[WIFI] IP: %s\n", AP_IP.toString().c_str());
 
+    /* (UID already read at the top of setup -- see uid_from_efuse.) */
     /* Get master UID from factory-burned efuse MAC.
      * esp_read_mac() reads the base MAC from efuse   guaranteed unique
      * per chip from factory, does not depend on WiFi init order.
      * Use bytes 2-5 (skip OUI bytes 0-1 which are Espressif OUI = same on all) */
-    {
-        uint8_t base_mac[6];
-        esp_read_mac(base_mac, ESP_MAC_WIFI_STA);
-        master_uid[0]=base_mac[2]; master_uid[1]=base_mac[3];
-        master_uid[2]=base_mac[4]; master_uid[3]=base_mac[5];
-    }
+    uid_from_efuse();
     Serial.printf("[MASTER] UID=%02X%02X%02X%02X\n",
                   master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
     {
@@ -5199,80 +5852,6 @@ void setup() {
     /* A shipped default of "12345678" made every other control useless.
      * Generate a unique one on first boot and print it once for the
      * installer; it is stored and reused from then on. */
-    prefs.begin("mesh", true);
-    {
-        size_t n = prefs.getBytes("authkey", mesh_auth_key, 16);
-        mesh_auth_set = (n == 16);
-        cred_version  = prefs.getUInt("credver", 0);
-    }
-    prefs.end();
-
-    prefs.begin("auth", false);
-    {
-        String ap = prefs.getString("appw", "");
-        if (ap.length() < PASS_MIN_LEN) {
-            char gen[13];
-            rand_hex(gen, 12);
-            prefs.putString("appw", gen);
-            ap = String(gen);
-        }
-        /* Standalone AP password only. mesh_pass is SHARED across a mesh
-         * so a phone roams between masters and so a master-OTA pull can
-         * associate with a peer; overwriting it per device would split the
-         * mesh. Change the mesh password through /api/mesh/passwd. */
-        strncpy(device_pass, ap.c_str(), sizeof(device_pass)-1);
-        device_pass[sizeof(device_pass)-1] = 0;
-    }
-    prefs.end();
-
-    /* Factory namespace: written once, never regenerated, never cleared by
-     * a reset. These two values are what the card in the box says, so the
-     * card remains accurate for the life of the device. */
-    prefs.begin("factory", false);
-    {
-        String fp = prefs.getString("pass", "");
-        size_t  n = prefs.getBytes("rkey", recovery_key, 16);
-        if (fp.length() < PASS_MIN_LEN || n != 16) {
-            fp = String(device_pass);
-            for (int i = 0; i < 16; i += 4) {
-                uint32_t r = esp_random();
-                recovery_key[i]=r&0xFF; recovery_key[i+1]=(r>>8)&0xFF;
-                recovery_key[i+2]=(r>>16)&0xFF; recovery_key[i+3]=(r>>24)&0xFF;
-            }
-            prefs.putString("pass", fp);
-            prefs.putBytes("rkey", recovery_key, 16);
-            char rk[33];
-            for (int i=0;i<16;i++) sprintf(rk+i*2, "%02x", recovery_key[i]);
-            rk[32]=0;
-            Serial.printf("\n[CARD] **************************************************\n");
-            Serial.printf("[CARD] Model        : U%02X%02X%02X%02X\n",
-                          master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-            Serial.printf("[CARD] Password     : %s\n", fp.c_str());
-            Serial.printf("[CARD] Recovery key : %s\n", rk);
-            Serial.printf("[CARD] Print these on the card. Shown once, never again.\n");
-            Serial.printf("[CARD] **************************************************\n\n");
-        }
-        strncpy(factory_pass, fp.c_str(), sizeof(factory_pass)-1);
-        factory_pass[sizeof(factory_pass)-1] = 0;
-        factory_set = true;
-    }
-    prefs.end();
-    /* There is never an unclaimed window: the credential is set before the
-     * device ever boots for a user, so /api/password always needs auth. */
-
-    prefs.begin("keys", true);
-    {
-        size_t n1 = prefs.getBytes("root", root_key, sizeof(root_key));
-        size_t n2 = prefs.getBytes("fw",   fw_key,   sizeof(fw_key));
-        root_key_set = (n1 == sizeof(root_key));
-        fw_key_set   = (n2 == sizeof(fw_key));
-    }
-    prefs.end();
-    if (!root_key_set)
-        Serial.println("[SEC] no root key -- extensions cannot pair until provisioned");
-    if (!fw_key_set)
-        Serial.println("[SEC] no firmware key -- images cannot be verified");
-
     master_ver_parse(MASTER_FW_VERSION, master_fw);
     Serial.printf("[MFW] running image v%u.%u.%u, %u bytes\n",
                   master_fw[0], master_fw[1], master_fw[2], master_image_size());
