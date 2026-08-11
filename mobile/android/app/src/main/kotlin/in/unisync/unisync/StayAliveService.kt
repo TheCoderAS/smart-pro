@@ -1,5 +1,6 @@
 package `in`.unisync.unisync
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,6 +11,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 
 /**
@@ -77,10 +79,10 @@ class StayAliveService : Service() {
             restart,
             PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         am.set(
-            android.app.AlarmManager.ELAPSED_REALTIME,
-            android.os.SystemClock.elapsedRealtime() + 1000,
+            AlarmManager.ELAPSED_REALTIME,
+            SystemClock.elapsedRealtime() + 1000,
             pending,
         )
     }

@@ -1,7 +1,11 @@
 package `in`.unisync.unisync
 
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -165,7 +169,7 @@ class MainActivity : FlutterActivity() {
     /** True when the system has already agreed not to doze us. */
     private fun isBatteryExempt(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
-        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         return pm.isIgnoringBatteryOptimizations(packageName)
     }
 
@@ -179,10 +183,8 @@ class MainActivity : FlutterActivity() {
         if (isBatteryExempt()) return true
         return try {
             startActivity(
-                Intent(
-                    android.provider.Settings
-                        .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                ).setData(android.net.Uri.parse("package:$packageName")),
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(Uri.parse("package:$packageName")),
             )
             true
         } catch (_: Exception) {
@@ -195,9 +197,9 @@ class MainActivity : FlutterActivity() {
     /** Sends the user to the battery-optimisation screen, best effort. */
     private fun openBatterySettings(): Boolean {
         val intents = listOf(
-            Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
-            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                .setData(android.net.Uri.parse("package:$packageName")),
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.parse("package:$packageName")),
         )
         for (i in intents) {
             try {
