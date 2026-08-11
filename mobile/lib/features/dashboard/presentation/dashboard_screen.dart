@@ -127,7 +127,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             if (sections.length <= 1)
               _SwitchGrid(
                 switches: switches,
-                masterUid: sections.isEmpty ? null : sections.first.uid,
+                // Always the master we're connected to when there is only
+                // one section, so this is null — see MasterSection.relayUid.
+                masterUid:
+                    sections.isEmpty ? null : sections.first.relayUid,
               )
             else
               _MasterCards(sections: sections),
@@ -806,7 +809,7 @@ class _MasterCard extends ConsumerWidget {
                       itemBuilder: (context, i) => SwitchTile(
                         sw: section.switches[i],
                         // Self is driven directly; a peer is relayed.
-                        masterUid: section.isSelf ? null : section.uid,
+                        masterUid: section.relayUid,
                         enabled: section.online,
                       ),
                     ),

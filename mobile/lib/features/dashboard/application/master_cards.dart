@@ -26,6 +26,15 @@ class MasterSection {
   final int lastSeen;
 
   bool get online => presence == Presence.online;
+
+  /// What to pass as the relay's owning master.
+  ///
+  /// Null for the master we're actually connected to: its relays are driven
+  /// directly. Sending its own uid instead routes the command through the
+  /// mesh relay endpoint, which looks the uid up in the *peer* table, fails
+  /// to find it, and 404s — so nothing switches at all. Deriving it here
+  /// means no call site can get it wrong.
+  String? get relayUid => isSelf ? null : uid;
 }
 
 /// Splits a snapshot into per-master sections, in the user's card order.
