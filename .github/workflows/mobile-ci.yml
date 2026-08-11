@@ -129,16 +129,22 @@ jobs:
       # Per-ABI APKs are ~1/3 the size of the universal one; most phones
       # want app-arm64-v8a-release.apk.
       - run: flutter build apk --release --split-per-abi
+      # A debug build alongside, for bench work: it keeps the logging the
+      # release build strips, which is what you want when diagnosing a
+      # device rather than using one. Signed with the debug key, so it will
+      # not install over the release APK -- uninstall first.
+      - run: flutter build apk --debug
       - name: publish to mobile-latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create mobile-latest --prerelease \
             --title "Unisync Android (rolling)" \
-            --notes "Debug-signed release APKs, rebuilt on every mobile change. Most phones want app-arm64-v8a-release.apk; app-release.apk is the universal fallback. Built from ${GITHUB_SHA}." \
+            --notes "Rebuilt on every mobile change. Most phones want app-arm64-v8a-release.apk; app-release.apk is the universal fallback. app-debug.apk keeps the logging the release build strips -- use it for bench diagnosis, and note it is debug-signed so it will not install over a release build (uninstall first). Built from ${GITHUB_SHA}." \
             || true
           gh release upload mobile-latest \
             build/app/outputs/flutter-apk/app-release.apk \
             build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
             build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
-            build/app/outputs/flutter-apk/app-x86_64-release.apk --clobber
+            build/app/outputs/flutter-apk/app-x86_64-release.apk \
+            build/app/outputs/flutter-apk/app-debug.apk --clobber
