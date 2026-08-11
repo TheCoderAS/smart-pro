@@ -14,6 +14,7 @@ import '../../../core/widgets/password_field.dart';
 import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
+import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
@@ -344,6 +345,8 @@ class SettingsScreen extends ConsumerWidget {
     );
     if (!(confirmed ?? false)) return;
     await ref.read(secureStoreProvider).purgeMaster(uid);
+    // Otherwise the next launch paints a house that is no longer yours.
+    await ref.read(snapshotCacheProvider.notifier).clear();
     await ref.read(masterRegistryProvider.notifier).remove(uid);
     await ref.read(sessionProvider.notifier).signOut();
     if (context.mounted) Navigator.of(context).pop();
