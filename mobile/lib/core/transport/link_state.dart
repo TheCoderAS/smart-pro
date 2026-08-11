@@ -80,8 +80,14 @@ class LinkMonitor extends Notifier<LinkState> {
   Future<void> _tick() async {
     final kind = ref.read(currentTransportProvider);
     if (kind == TransportKind.ble) {
-      final ble = ref.read(bleSessionProvider).status;
-      if (ble == BleSessionStatus.connected) {
+      // Both, deliberately. The session status is a state machine and can
+      // go stale — it did: a master powered off for five minutes still read
+      // as connected, because nothing moved the status off it. isConnected
+      // comes from the GATT link itself, so a drop the session hasn't
+      // processed yet still degrades here.
+      final session = ref.read(bleSessionProvider).status;
+      final live = ref.read(bleSessionProvider.notifier).client?.isConnected;
+      if (session == BleSessionStatus.connected && live == true) {
         markAlive();
         return;
       }
