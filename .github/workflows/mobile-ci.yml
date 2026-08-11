@@ -138,10 +138,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create mobile-latest --prerelease \
-            --title "Unisync Android (rolling)" \
-            --notes "Rebuilt on every mobile change. Most phones want app-arm64-v8a-release.apk; app-release.apk is the universal fallback. app-debug.apk keeps the logging the release build strips -- use it for bench diagnosis, and note it is debug-signed so it will not install over a release build (uninstall first). Built from ${GITHUB_SHA}." \
-            || true
+          notes="Rebuilt on every mobile change. Most phones want app-arm64-v8a-release.apk; app-release.apk is the universal fallback. app-debug.apk keeps the logging the release build strips -- use it for bench diagnosis, and note it is debug-signed so it will not install over a release build (uninstall first). Built from ${GITHUB_SHA}."
+          # `create` is a no-op once the release exists, so the notes used
+          # to freeze at whatever commit first published them while the
+          # assets kept updating -- the description named a build nobody
+          # was downloading. Edit when it is already there.
+          if gh release view mobile-latest >/dev/null 2>&1; then
+            gh release edit mobile-latest --prerelease \
+              --title "Unisync Android (rolling)" --notes "$notes"
+          else
+            gh release create mobile-latest --prerelease \
+              --title "Unisync Android (rolling)" --notes "$notes"
+          fi
           gh release upload mobile-latest \
             build/app/outputs/flutter-apk/app-release.apk \
             build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
