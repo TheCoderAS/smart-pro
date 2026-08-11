@@ -168,7 +168,7 @@ static bool ct_equal(const uint8_t *a, const uint8_t *b, uint8_t n) {
  * ================================================================ */
 #define FW_VER_MAJOR   1
 #define FW_VER_MINOR   2
-#define FW_VER_PATCH   5
+#define FW_VER_PATCH   6
 #define FW_TARGET_TYPE 0x01          /* image is built for this hw_type */
 
 /* No custom section: an orphan section is placed at the linker's
@@ -557,10 +557,23 @@ static void nvs_tick(void) {
     nvs_dirty = false;
 }
 
+/* Unregistering clears the pairing and any staged OTA metadata. It must
+ * NOT touch the keys.
+ *
+ * This used to blank everything from NVS_META_MAGIC to the end of the
+ * page, and the two device keys live in that range: NVS_FW_KEY at 32 and
+ * NVS_DEV_KEY at 48. The device key is what the board proves itself with
+ * on the bus, and it is written once at manufacture -- there is no way to
+ * restore it over RS-485. So a single orphan timeout permanently destroyed
+ * the board's ability to authenticate to any master, forever.
+ *
+ * The orphan timeout fires after 30 s without a poll, which is exactly
+ * what flashing the master looks like from down here. */
 static void wipe_registration(void) {
     /* Preserve manufacturing data (hw_type/hw_rev) across an unregister */
     for(uint8_t i=0;i<8;i++) nvs_shadow[i]=0;
-    for(uint8_t i=NVS_META_MAGIC;i<NVS_SIZE;i++) nvs_shadow[i]=0xFF;
+    /* OTA staging metadata only -- stops short of NVS_FW_KEY. */
+    for(uint8_t i=NVS_META_MAGIC;i<NVS_FW_KEY;i++) nvs_shadow[i]=0xFF;
     nvs_flush();
 }
 

@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.27.0
+ * Unisync - Master Firmware v11.28.0
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.27.0"
+#define MASTER_FW_VERSION  "11.28.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -6604,6 +6604,15 @@ class BleSrvCB : public NimBLEServerCallbacks {
             ble_conns[i].last_ms   = millis();
             ble_conns[i].last_counter = 0;
             ble_fill_nonce(ble_conns[i].snonce);
+            /* Publish it. The client reads this characteristic to learn the
+             * nonce, and the read is served from the stored value -- the
+             * onRead callback refreshes it for the *next* reader, not this
+             * one. Filling the slot without also storing the value left the
+             * app proving against whatever was there before while
+             * ble_proof_ok checked against this connection's nonce, so every
+             * command was rejected. ble_new_nonce() sets its characteristic
+             * eagerly for exactly this reason; this one didn't. */
+            if (ble_snonce_char) ble_snonce_char->setValue(ble_conns[i].snonce, 8);
             ble_conn_count++;
             break;
         }
