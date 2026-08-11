@@ -12,6 +12,7 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/link_state.dart';
+import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/transport_refusal.dart';
@@ -41,6 +42,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await ref.read(transportCoordinatorProvider).reconcile();
       if (!mounted) return;
+      // Bring the keep-ready service up once there is a session worth
+      // holding open (Android only; a no-op elsewhere).
+      await ref.read(stayAliveProvider).resume();
+      if (!mounted) return;
       await runFirstRunPrompts(context, ref);
     });
   }
@@ -50,6 +55,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final snapshot = ref.watch(activeStateProvider);
     final status = ref.watch(socketStatusProvider);
     final transport = ref.watch(currentTransportProvider);
+    // The notification is a status line, so it has to follow the link.
+    ref.listen(linkStateProvider, (_, _) {
+      ref.read(stayAliveProvider).refresh();
+    });
 
     // Reconcile optimistic overrides against the authoritative snapshot
     // (API §4): confirmed ones clear, contradicted ones hold until the

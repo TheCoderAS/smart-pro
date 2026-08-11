@@ -1,7 +1,11 @@
 package `in`.unisync.unisync
 
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -44,6 +48,27 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "currentSsid" -> result.success(currentSsid())
+                "startStayAlive" -> {
+                    StayAliveService.start(
+                        this,
+                        call.argument<String>("text") ?: "Keeping your switches ready",
+                    )
+                    result.success(true)
+                }
+                "stopStayAlive" -> {
+                    StayAliveService.stop(this)
+                    result.success(true)
+                }
+                "requestBatteryExemption" -> {
+                    result.success(requestBatteryExemption())
+                }
+                "isBatteryExempt" -> result.success(isBatteryExempt())
+                "openBatterySettings" -> {
+                    // Several vendors kill foreground services regardless of
+                    // what Android says. Only the user can exempt the app,
+                    // and only in their own settings.
+                    result.success(openBatterySettings())
+                }
                 "bindToWifi" -> result.success(bindToCurrentWifi())
                 "release" -> {
                     releaseJoin()
@@ -137,6 +162,53 @@ class MainActivity : FlutterActivity() {
             val caps = cm.getNetworkCapabilities(n) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
             return cm.bindProcessToNetwork(n)
+        }
+        return false
+    }
+
+    /** True when the system has already agreed not to doze us. */
+    private fun isBatteryExempt(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /**
+     * Asks the system directly for a battery exemption — one dialog rather
+     * than a trip through Settings. A foreground service alone does not stop
+     * Doze from throttling the process, and for a switch someone reaches for
+     * at night that throttling is the difference between instant and not.
+     */
+    private fun requestBatteryExemption(): Boolean {
+        if (isBatteryExempt()) return true
+        return try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(Uri.parse("package:$packageName")),
+            )
+            true
+        } catch (_: Exception) {
+            // Some builds refuse the direct request; the settings screen
+            // route still works.
+            openBatterySettings()
+        }
+    }
+
+    /** Sends the user to the battery-optimisation screen, best effort. */
+    private fun openBatterySettings(): Boolean {
+        val intents = listOf(
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.parse("package:$packageName")),
+        )
+        for (i in intents) {
+            try {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(i)
+                return true
+            } catch (_: Exception) {
+                // try the next one
+            }
         }
         return false
     }
