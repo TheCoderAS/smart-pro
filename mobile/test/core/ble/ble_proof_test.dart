@@ -96,4 +96,37 @@ void main() {
       expect(jsonEncode(cmd).contains(token), isFalse);
     }
   });
+
+  group('cross-check vector shared with the firmware', () {
+    // Pinned in master_v2.ino beside ble_proof_ok. If either side changes
+    // how the proof is keyed, one of these two numbers stops matching and
+    // this test says so — instead of every BLE command being rejected on a
+    // bench with no explanation, which is how it actually surfaced.
+    const vectorToken = 'bfbece9ae12517af0011223344556677';
+    const vectorNonce = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    test('keys on the whole 32-character token', () {
+      final proof = computeBleProof(
+        token: vectorToken,
+        sessionNonce: vectorNonce,
+        counter: 1,
+      );
+      expect(proof.p, 'f4b103710e27fad8');
+    });
+
+    test('keying on only the first 16 characters gives a different proof', () {
+      // What the firmware produced before: its HMAC hard-coded a 16-byte
+      // key window, and those 16 bytes are exactly the `n` sent in clear
+      // with every request — so the proof was keyed on a public value.
+      final wrong = Hmac(sha256, utf8.encode(vectorToken.substring(0, 16)))
+          .convert([...vectorNonce, 0, 0, 0, 1])
+          .bytes
+          .sublist(0, 8);
+      final wrongHex = [
+        for (final b in wrong) b.toRadixString(16).padLeft(2, '0'),
+      ].join();
+      expect(wrongHex, '538baec92863dcd5');
+      expect(wrongHex, isNot('f4b103710e27fad8'));
+    });
+  });
 }

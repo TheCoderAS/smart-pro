@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.28.0
+ * Unisync - Master Firmware v11.29.0
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.28.0"
+#define MASTER_FW_VERSION  "11.29.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -138,18 +138,30 @@ static void sha256_final(sha256_t *c, uint8_t *out) {
 }
 
 /* HMAC-SHA-256 with a 16-byte key. */
-static void hmac_sha256(const uint8_t *key, const uint8_t *msg, uint32_t mlen,
-                        uint8_t *out32) {
+/* HMAC-SHA256 with an explicit key length.
+ *
+ * Everything on the device that predates this used 16-byte keys, and the
+ * wrapper below keeps that exact behaviour for all of them. The BLE
+ * per-command proof is the one place the key is longer: it is keyed on the
+ * 32-character session token. */
+static void hmac_sha256_k(const uint8_t *key, uint32_t klen,
+                          const uint8_t *msg, uint32_t mlen, uint8_t *out32) {
     uint8_t k_ipad[64], k_opad[64], inner[32];
     sha256_t c;
-    for (int i=0;i<64;i++) {
-        uint8_t kb = (i<16) ? key[i] : 0;
+    for (uint32_t i=0;i<64;i++) {
+        uint8_t kb = (i<klen) ? key[i] : 0;
         k_ipad[i]=kb^0x36; k_opad[i]=kb^0x5c;
     }
     sha256_init(&c); sha256_update(&c,k_ipad,64);
     sha256_update(&c,msg,mlen); sha256_final(&c,inner);
     sha256_init(&c); sha256_update(&c,k_opad,64);
     sha256_update(&c,inner,32); sha256_final(&c,out32);
+}
+
+/* 16-byte keys: device keys, the mesh tag, pin wrapping, recovery. */
+static void hmac_sha256(const uint8_t *key, const uint8_t *msg, uint32_t mlen,
+                        uint8_t *out32) {
+    hmac_sha256_k(key, 16, msg, mlen, out32);
 }
 
 /* Constant-time compare: an early exit leaks how many bytes matched. */
@@ -6284,8 +6296,27 @@ static bool ble_proof_ok(JsonDocument &req) {
     memcpy(msg, ble_conns[ci].snonce, 8);
     msg[8]=(ctr>>24)&0xFF; msg[9]=(ctr>>16)&0xFF;
     msg[10]=(ctr>>8)&0xFF; msg[11]=ctr&0xFF;
+    /* Keyed on the WHOLE token, all 32 characters.
+     *
+     * This used to go through the 16-byte hmac_sha256, which keyed on
+     * token[0..15] only -- and those sixteen characters are exactly the
+     * "n" field the client puts in the clear in every request. So the
+     * proof was keyed on a value any listener already had: one sniffed
+     * command was enough to forge every other. It also meant no client
+     * keying on the full token could ever produce a matching proof, which
+     * is why every command was rejected.
+     *
+     * Cross-check vector, so a future change to either side can be caught
+     * by hand rather than on a bench:
+     *   token   "bfbece9ae12517af0011223344556677"  (ASCII, all 32 chars)
+     *   snonce  01 02 03 04 05 06 07 08
+     *   counter 1
+     *   p       f4b103710e27fad8
+     * Keying on the first 16 characters instead gives 538baec92863dcd5,
+     * which is what this produced before. */
     uint8_t want[32];
-    hmac_sha256((const uint8_t *)token, msg, sizeof(msg), want);
+    hmac_sha256_k((const uint8_t *)token, AUTH_TOKEN_LEN - 1,
+                  msg, sizeof(msg), want);
     if (!ct_equal(want, given, 8)) return false;
 
     /* Replay guard for this connection. */
