@@ -59,8 +59,37 @@ class StayAliveService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * The app was swiped out of recents.
+     *
+     * stopWithTask=false is supposed to keep us alive through this, and on
+     * stock Android it does. It is not honoured everywhere, so we also ask
+     * to be started again — belt and braces for the exact gesture this
+     * service exists to survive.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val restart = Intent(applicationContext, StayAliveService::class.java)
+            .putExtra(EXTRA_TEXT, lastText)
+        val pending = PendingIntent.getService(
+            applicationContext,
+            1,
+            restart,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+        am.set(
+            android.app.AlarmManager.ELAPSED_REALTIME,
+            android.os.SystemClock.elapsedRealtime() + 1000,
+            pending,
+        )
+    }
+
+    private var lastText: String = "Keeping your switches ready"
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Keeping your switches ready"
+        val text = intent?.getStringExtra(EXTRA_TEXT) ?: lastText
+        lastText = text
         createChannel()
         val notification = buildNotification(text)
 

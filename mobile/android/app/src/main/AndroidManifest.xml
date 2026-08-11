@@ -36,6 +36,12 @@
     <!-- The service's notification is the only thing the user sees of it. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"
         tools:targetApi="33"/>
+    <!-- "Always running" has to mean across a reboot too, or it quietly
+         means "until you restart your phone". -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- Asking to be exempted from battery optimisation. Without it the
+         system may doze the process regardless of the foreground service. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
     <application
         android:label="Unisync"
@@ -72,6 +78,16 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice"/>
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

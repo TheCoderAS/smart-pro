@@ -389,9 +389,10 @@ class _StayAliveTileState extends ConsumerState<_StayAliveTile> {
           value: on,
           title: const Text('Keep switches ready'),
           subtitle: const Text(
-            'Holds the connection open so a switch fires the instant you '
-            'tap it, even after the app has been closed. Shows a permanent '
-            'notification — that is the price Android charges for it.',
+            'Keeps running in the background so a switch fires the instant '
+            'you tap it — after closing the app, clearing it from recents, '
+            'or restarting your phone. Shows a permanent notification, '
+            'which is what Android charges for the privilege.',
           ),
           isThreeLine: true,
           onChanged: (v) async {
@@ -405,8 +406,9 @@ class _StayAliveTileState extends ConsumerState<_StayAliveTile> {
             title: const Text('Not staying connected?'),
             subtitle: const Text(
               'Some phones — Xiaomi, Oppo, Vivo, Huawei — stop apps like '
-              'this anyway. Allow Unisync to run in the background in your '
-              "phone's battery settings.",
+              'this whatever the app asks for. Allow Unisync to run in the '
+              "background in your phone's battery settings, and add it to "
+              'any "protected" or "auto-start" list it offers.',
             ),
             isThreeLine: true,
             onTap: () => ref.read(stayAliveProvider).openBatterySettings(),

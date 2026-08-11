@@ -39,10 +39,16 @@ class StayAlive {
 
   bool get _supported => Platform.isAndroid;
 
+  /// On unless the user has turned it off.
+  ///
+  /// The default matters: this is what "always running" means in practice,
+  /// and someone reaching for a light at night has not opted into anything
+  /// beforehand. BootReceiver defaults the same way — the two have to
+  /// agree or the state depends on which ran first.
   Future<bool> isEnabled() async {
     if (!_supported) return false;
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(prefKey) ?? false;
+    return prefs.getBool(prefKey) ?? true;
   }
 
   Future<void> setEnabled(bool on) async {
@@ -56,10 +62,41 @@ class StayAlive {
     }
   }
 
-  /// Brings the service up if the user has asked for it. Called once the
-  /// app has a session worth holding open.
+  /// Brings the service up unless the user has turned it off. Called once
+  /// the app has a session worth holding open.
+  ///
+  /// Also asks for the battery exemption the first time, because a
+  /// foreground service alone does not stop Doze throttling the process —
+  /// and a throttled process is exactly the delay this exists to remove.
   Future<void> resume() async {
-    if (await isEnabled()) await _start();
+    if (!await isEnabled()) return;
+    await _start();
+    await _requestExemptionOnce();
+  }
+
+  static const _askedKey = 'stayAlive.batteryAsked';
+
+  Future<void> _requestExemptionOnce() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_askedKey) ?? false) return;
+    if (await isBatteryExempt()) return;
+    await prefs.setBool(_askedKey, true);
+    try {
+      await _channel.invokeMethod<bool>('requestBatteryExemption');
+    } on PlatformException catch (e) {
+      log.w('battery exemption request refused: ${e.code}');
+    }
+  }
+
+  /// Whether the system has already agreed not to doze us.
+  Future<bool> isBatteryExempt() async {
+    if (!_supported) return true;
+    try {
+      final ok = await _channel.invokeMethod<bool>('isBatteryExempt');
+      return ok ?? false;
+    } on PlatformException {
+      return false;
+    }
   }
 
   /// The notification is the only part of this the user ever sees, so it
