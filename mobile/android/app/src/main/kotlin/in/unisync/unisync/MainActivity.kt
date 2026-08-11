@@ -44,6 +44,23 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "currentSsid" -> result.success(currentSsid())
+                "startStayAlive" -> {
+                    StayAliveService.start(
+                        this,
+                        call.argument<String>("text") ?: "Keeping your switches ready",
+                    )
+                    result.success(true)
+                }
+                "stopStayAlive" -> {
+                    StayAliveService.stop(this)
+                    result.success(true)
+                }
+                "openBatterySettings" -> {
+                    // Several vendors kill foreground services regardless of
+                    // what Android says. Only the user can exempt the app,
+                    // and only in their own settings.
+                    result.success(openBatterySettings())
+                }
                 "bindToWifi" -> result.success(bindToCurrentWifi())
                 "release" -> {
                     releaseJoin()
@@ -137,6 +154,25 @@ class MainActivity : FlutterActivity() {
             val caps = cm.getNetworkCapabilities(n) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
             return cm.bindProcessToNetwork(n)
+        }
+        return false
+    }
+
+    /** Sends the user to the battery-optimisation screen, best effort. */
+    private fun openBatterySettings(): Boolean {
+        val intents = listOf(
+            Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(android.net.Uri.parse("package:$packageName")),
+        )
+        for (i in intents) {
+            try {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(i)
+                return true
+            } catch (_: Exception) {
+                // try the next one
+            }
         }
         return false
     }
