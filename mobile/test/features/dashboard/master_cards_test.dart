@@ -58,6 +58,28 @@ void main() {
       );
     });
 
+    test('the connected master relays nothing — it drives its own relays', () {
+      // Passing its own uid routes the command through the mesh relay
+      // endpoint, which looks it up in the *peer* table, doesn't find it,
+      // and 404s. Every switch silently stops working while touch, state
+      // sync, rename and reorder all keep going — which is exactly how it
+      // presented on the bench.
+      final sections = sectionsFrom(
+        snap(peers: const [PeerState(uid: 'BBBB2222', name: 'Kitchen')]),
+        const [],
+      );
+      expect(sections[0].isSelf, isTrue);
+      expect(sections[0].relayUid, isNull);
+      // A peer does carry its uid, or the mesh couldn't be driven at all.
+      expect(sections[1].relayUid, 'BBBB2222');
+    });
+
+    test('a standalone master also relays nothing', () {
+      final sections = sectionsFrom(snap(), const []);
+      expect(sections, hasLength(1));
+      expect(sections.single.relayUid, isNull);
+    });
+
     test('an offline peer keeps its card', () {
       // Vanishing is the flapping the story rules out — the card stays,
       // showing the state, so nobody discovers it through a failed tap.
