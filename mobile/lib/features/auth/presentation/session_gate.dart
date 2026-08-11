@@ -8,6 +8,7 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/access_reset.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
+import '../../../core/ws/snapshot_cache.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
 import '../../onboarding/presentation/welcome_screen.dart';
@@ -36,9 +37,16 @@ class SessionGate extends ConsumerWidget {
       NeedsWelcome() => const WelcomeScreen(),
       final WrongNetwork s => _WrongNetworkScreen(state: s),
       MasterUnreachable() => const _UnreachableScreen(),
-      _ => const Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        ),
+      // Still probing. If we have a house to show and a session to show it
+      // with, show it now rather than a spinner — someone reaching for
+      // their phone in an emergency should not wait on a network probe.
+      // The controls stay disabled until the link confirms, so this is a
+      // head start, not a lie about the state.
+      _ => ref.watch(snapshotCacheProvider) != null
+          ? const DashboardScreen()
+          : const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            ),
     };
   }
 }
