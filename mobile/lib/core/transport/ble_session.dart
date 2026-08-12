@@ -103,8 +103,20 @@ class BleSessionController extends Notifier<BleSessionState> {
   /// Starts (or restarts) a BLE session for the paired [meshId]
   /// (null = any Unisync master, used before a mesh is known).
   Future<void> activate({int? meshId}) async {
+    // Already live. A second reconcile — app start, then the session
+    // resolving — must not tear a working link down and scan again; over
+    // Bluetooth that costs seconds the user spends looking at a spinner.
+    if (_active &&
+        _client != null &&
+        state.status == BleSessionStatus.connected) {
+      _meshId ??= meshId;
+      return;
+    }
     _active = true;
-    _meshId = meshId;
+    // Keep a mesh id learned from a previous connect when the caller
+    // hasn't got one — it is what filters the scan to the user's own
+    // system rather than every Unisync master in earshot.
+    _meshId = meshId ?? _meshId;
     await _connectNearest();
     _startRoamLoop();
   }
@@ -184,8 +196,12 @@ class BleSessionController extends Notifier<BleSessionState> {
       );
       return;
     }
-    final client =
-        BleControlClient(ref.read(reactiveBleProvider), deviceId, token);
+    final client = BleControlClient(
+      ref.read(reactiveBleProvider),
+      deviceId,
+      token,
+      onDisconnected: _onLinkLost,
+    );
     await client.connect();
     _client = client;
     _connectedDeviceId = deviceId;
@@ -273,6 +289,21 @@ class BleSessionController extends Notifier<BleSessionState> {
       }
     } on Object catch (e) {
       log.w('remember mesh failed: $e');
+    }
+  }
+
+  /// The master went away without being asked to. Reflect that instead of
+  /// sitting on a stale "connected", which left the dashboard live and
+  /// tappable minutes after the master had been powered off — taps queued,
+  /// timed out, and silently reverted.
+  void _onLinkLost() {
+    if (!_active) return;
+    log.w('ble link lost');
+    if (state.status == BleSessionStatus.connected) {
+      state = state.copyWith(
+        status: BleSessionStatus.failed,
+        error: 'Lost the connection to your switch.',
+      );
     }
   }
 

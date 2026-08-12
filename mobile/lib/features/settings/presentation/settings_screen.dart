@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -6,6 +8,7 @@ import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/connection_bar.dart';
@@ -14,6 +17,7 @@ import '../../../core/widgets/password_field.dart';
 import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
+import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
@@ -156,6 +160,9 @@ class SettingsScreen extends ConsumerWidget {
                 ? null
                 : () => _removeMaster(context, ref, info.uid),
           ),
+          const Divider(),
+          const _SectionHeader('Readiness'),
+          const _StayAliveTile(),
           const Divider(),
           const _SectionHeader('Sharing'),
           const ListTile(
@@ -344,9 +351,73 @@ class SettingsScreen extends ConsumerWidget {
     );
     if (!(confirmed ?? false)) return;
     await ref.read(secureStoreProvider).purgeMaster(uid);
+    // Otherwise the next launch paints a house that is no longer yours.
+    await ref.read(snapshotCacheProvider.notifier).clear();
     await ref.read(masterRegistryProvider.notifier).remove(uid);
     await ref.read(sessionProvider.notifier).signOut();
     if (context.mounted) Navigator.of(context).pop();
+  }
+}
+
+/// Android only. iOS suspends apps and terminates them when swiped away,
+/// so there is nothing to offer there and pretending otherwise would be
+/// worse than the tile's absence.
+class _StayAliveTile extends ConsumerStatefulWidget {
+  const _StayAliveTile();
+
+  @override
+  ConsumerState<_StayAliveTile> createState() => _StayAliveTileState();
+}
+
+class _StayAliveTileState extends ConsumerState<_StayAliveTile> {
+  bool? _on;
+
+  @override
+  void initState() {
+    super.initState();
+    ref.read(stayAliveProvider).isEnabled().then((v) {
+      if (mounted) setState(() => _on = v);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!Platform.isAndroid) return const SizedBox.shrink();
+    final on = _on;
+    if (on == null) return const SizedBox.shrink();
+    return Column(
+      children: [
+        SwitchListTile(
+          secondary: const Icon(Icons.bolt_outlined),
+          value: on,
+          title: const Text('Keep switches ready'),
+          subtitle: const Text(
+            'Keeps running in the background so a switch fires the instant '
+            'you tap it — after closing the app, clearing it from recents, '
+            'or restarting your phone. Shows a permanent notification, '
+            'which is what Android charges for the privilege.',
+          ),
+          isThreeLine: true,
+          onChanged: (v) async {
+            setState(() => _on = v);
+            await ref.read(stayAliveProvider).setEnabled(v);
+          },
+        ),
+        if (on)
+          ListTile(
+            leading: const Icon(Icons.battery_saver_outlined),
+            title: const Text('Not staying connected?'),
+            subtitle: const Text(
+              'Some phones — Xiaomi, Oppo, Vivo, Huawei — stop apps like '
+              'this whatever the app asks for. Allow Unisync to run in the '
+              "background in your phone's battery settings, and add it to "
+              'any "protected" or "auto-start" list it offers.',
+            ),
+            isThreeLine: true,
+            onTap: () => ref.read(stayAliveProvider).openBatterySettings(),
+          ),
+      ],
+    );
   }
 }
 

@@ -7,6 +7,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/core/api/dio_client.dart';
 import 'package:unisync/core/api/failure.dart';
 import 'package:unisync/core/storage/secure_store.dart';
+import 'package:unisync/core/transport/control_transport.dart';
+import 'package:unisync/core/transport/transport_manager.dart';
 import 'package:unisync/features/auth/application/session.dart';
 import 'package:unisync/features/auth/data/auth_repository.dart';
 import 'package:unisync/features/auth/domain/models.dart';
@@ -251,6 +253,38 @@ void main() {
 
     expect(await bootstrap(c), isA<Authenticated>());
     expect(c.read(tokenProvider), 'cafebabe');
+  });
+
+  // The preference is a preference, not a fallback. Probing the LAN first
+  // cost a timeout when the phone was off the master's network — and when
+  // it was *on* it, the probe succeeded and the entire bootstrap ran over
+  // Wi-Fi despite the user having asked for Bluetooth.
+  test('bluetooth preference skips the Wi-Fi probe entirely', () async {
+    seedPairedMaster(preference: 'bluetooth');
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => 'cafebabe');
+    // Reachable: the old order would have taken this and never looked at
+    // the preference at all.
+    when(() => repo.info()).thenAnswer((_) async => _info);
+    when(() => repo.validateToken()).thenAnswer((_) async => true);
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<Authenticated>());
+    expect(c.read(tokenProvider), 'cafebabe');
+    verifyNever(() => repo.info());
+    verifyNever(() => repo.validateToken());
+  });
+
+  test('bluetooth preference flips the live transport, not just the pref',
+      () async {
+    seedPairedMaster(preference: 'bluetooth');
+    when(() => store.readToken('C5F77720')).thenAnswer((_) async => 'cafebabe');
+    when(() => repo.info()).thenThrow(const Unreachable());
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<Authenticated>());
+    // Otherwise the Wi-Fi socket sees a token appear while the transport
+    // still reads as its default, and dials a LAN we are not on.
+    expect(c.read(currentTransportProvider), TransportKind.ble);
   });
 
   test('unreachable + bluetooth preference but no token → MasterUnreachable',

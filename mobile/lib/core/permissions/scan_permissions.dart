@@ -22,23 +22,45 @@ Future<bool> ensureBlePermissions() async {
   }
   if (!Platform.isAndroid) return true;
 
+  // Check before asking. Reading a status needs no Activity, but showing a
+  // prompt does — and this runs from the warm background engine, where
+  // there is none. Without the check, an app that was granted these
+  // permissions months ago would fail to bring Bluetooth up in the
+  // background purely because it tried to ask again.
+  try {
+    if (await Permission.bluetoothScan.isGranted ||
+        await Permission.location.isGranted) {
+      return true;
+    }
+  } on Object catch (e) {
+    log.w('BLE permission status unreadable: $e');
+  }
+
   // Android 12+ path: BLUETOOTH_SCAN is what actually matters (we declare
   // it neverForLocation, so no location is needed). Android 11 and below:
   // FINE_LOCATION. Request the whole set; the ones not applicable to this
   // OS version resolve to denied/restricted harmlessly.
-  final results = await [
-    Permission.bluetoothScan,
-    Permission.bluetoothConnect,
-    Permission.location,
-  ].request();
+  try {
+    final results = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.location,
+    ].request();
 
-  final scanOk = results[Permission.bluetoothScan]?.isGranted ?? false;
-  final locationOk = results[Permission.location]?.isGranted ?? false;
-  final granted = scanOk || locationOk;
-  if (!granted) {
-    log.w('BLE permissions denied: $results');
+    final scanOk = results[Permission.bluetoothScan]?.isGranted ?? false;
+    final locationOk = results[Permission.location]?.isGranted ?? false;
+    final granted = scanOk || locationOk;
+    if (!granted) {
+      log.w('BLE permissions denied: $results');
+    }
+    return granted;
+  } on Object catch (e) {
+    // No Activity to prompt from (background engine), or the plugin
+    // refused. A clean "not now" beats an exception escaping into the
+    // transport decision.
+    log.w('BLE permission request failed: $e');
+    return false;
   }
-  return granted;
 }
 
 /// Requests the runtime permissions an Android Wi-Fi scan needs.

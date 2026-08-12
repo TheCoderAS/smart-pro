@@ -12,12 +12,15 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/link_state.dart';
+import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
+import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
+import '../../auth/application/session.dart';
 import '../../onboarding/presentation/first_run_prompts.dart';
 import '../../settings/presentation/master_switcher.dart';
 import '../../switches/presentation/rename_sheet.dart';
@@ -40,6 +43,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await ref.read(transportCoordinatorProvider).reconcile();
       if (!mounted) return;
+      // Bring the keep-ready service up once there is a session worth
+      // holding open (Android only; a no-op elsewhere).
+      await ref.read(stayAliveProvider).resume();
+      if (!mounted) return;
       await runFirstRunPrompts(context, ref);
     });
   }
@@ -49,6 +56,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final snapshot = ref.watch(activeStateProvider);
     final status = ref.watch(socketStatusProvider);
     final transport = ref.watch(currentTransportProvider);
+
+    // The dashboard can be on screen before the session has resolved —
+    // the cached snapshot paints straight away — so the reconcile in
+    // initState may have run while the token was still being restored.
+    // Reconcile again the moment the session settles, or a
+    // Bluetooth-preferring user stays on Wi-Fi for the rest of the app's
+    // life: nothing else ever calls it.
+    ref.listen(sessionProvider, (prev, next) {
+      if (next.value is Authenticated && prev?.value is! Authenticated) {
+        ref.read(transportCoordinatorProvider).reconcile();
+      }
+    });
 
     // Reconcile optimistic overrides against the authoritative snapshot
     // (API §4): confirmed ones clear, contradicted ones hold until the
@@ -61,6 +80,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         // A snapshot is proof the link works, on either transport — it
         // beats waiting for the next heartbeat tick.
         ref.read(linkStateProvider.notifier).markAlive();
+        // Keep it, so the next cold start paints the house immediately
+        // instead of a spinner.
+        ref.read(snapshotCacheProvider.notifier).save(snap);
         ref.read(switchOverridesProvider.notifier).reconcile(snap.switches);
         ref.read(masterRegistryProvider.notifier).ensure(
               uid: snap.selfUid,
@@ -69,7 +91,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       }
     });
 
-    final snap = snapshot.value;
+    // Live if we have it, else the last one we saw. The cached one paints
+    // at once; LinkState keeps its controls disabled and its states
+    // labelled "last seen" until the link is confirmed, so nothing here
+    // can be acted on while it's stale.
+    final snap = snapshot.value ?? ref.watch(snapshotCacheProvider);
     // An offline extension's switches leave the dashboard entirely (story
     // Epic 2) — they are not greyed out, they are gone, and they come back
     // on their own. The master decides presence; the app never infers it

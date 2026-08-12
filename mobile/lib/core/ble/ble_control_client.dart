@@ -40,7 +40,13 @@ class BleTokenRejected implements Exception {
 /// state push is a full [StateSnapshot], interchangeable with the
 /// WebSocket's (BLE spec §State push).
 class BleControlClient {
-  BleControlClient(this._ble, this.deviceId, this._token);
+  BleControlClient(this._ble, this.deviceId, this._token, {this.onDisconnected});
+
+  /// Fired when the link drops on its own — the master lost power, went out
+  /// of range, or the phone's stack gave up. NOT fired for a teardown we
+  /// asked for. Without this the session went on believing it was connected
+  /// long after the master was gone.
+  final void Function()? onDisconnected;
 
   final FlutterReactiveBle _ble;
   final String deviceId;
@@ -68,6 +74,7 @@ class BleControlClient {
   Completer<Map<String, Object?>>? _pending;
   Future<void> _lock = Future.value();
   bool _connected = false;
+  bool _disposing = false;
 
   Stream<StateSnapshot> get stateStream => _stateController.stream;
   bool get isConnected => _connected;
@@ -94,6 +101,9 @@ class BleControlClient {
             } else if (u.connectionState ==
                 DeviceConnectionState.disconnected) {
               _connected = false;
+              // A drop we did not ask for. Tell the session so the UI can
+              // stop claiming the master is there.
+              if (!_disposing) onDisconnected?.call();
             }
           },
           onError: (Object e) {
@@ -230,6 +240,7 @@ class BleControlClient {
   }
 
   Future<void> dispose() async {
+    _disposing = true;
     _connected = false;
     await _respSub?.cancel();
     await _stateSub?.cancel();
