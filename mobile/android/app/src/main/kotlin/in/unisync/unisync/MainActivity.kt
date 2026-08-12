@@ -31,6 +31,21 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var joinCallback: ConnectivityManager.NetworkCallback? = null
 
+    /**
+     * Use the shared engine rather than building a throwaway one, so the
+     * Dart isolate — and the Bluetooth link living inside it — survives
+     * this Activity being destroyed.
+     */
+    override fun provideFlutterEngine(context: Context): FlutterEngine =
+        EngineHolder.ensure(context)
+
+    /**
+     * Never destroy it with the Activity. This is the line that makes a
+     * swipe from recents survivable; without it the cache holds an engine
+     * that has already been torn down.
+     */
+    override fun shouldDestroyEngineWithHost(): Boolean = false
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
@@ -49,14 +64,17 @@ class MainActivity : FlutterActivity() {
                 }
                 "currentSsid" -> result.success(currentSsid())
                 "startStayAlive" -> {
+                    // applicationContext, not the Activity: the engine
+                    // outlives this Activity now, so Dart can still call
+                    // here after it has been destroyed.
                     StayAliveService.start(
-                        this,
+                        applicationContext,
                         call.argument<String>("text") ?: "Keeping your switches ready",
                     )
                     result.success(true)
                 }
                 "stopStayAlive" -> {
-                    StayAliveService.stop(this)
+                    StayAliveService.stop(applicationContext)
                     result.success(true)
                 }
                 "requestBatteryExemption" -> {
@@ -234,8 +252,19 @@ class MainActivity : FlutterActivity() {
         return ssid.removePrefix("\"").removeSuffix("\"").ifEmpty { null }
     }
 
+    /**
+     * Deliberately does *not* release the Wi-Fi binding.
+     *
+     * It used to, back when this Activity dying meant the whole app died
+     * with it. Now the engine outlives the Activity, so tearing the
+     * binding down here would route the still-running app back to mobile
+     * data the moment it was swiped away — every request to the master
+     * failing in the background exactly as if the hardware were dead.
+     *
+     * The coordinator binds and releases explicitly when the transport
+     * changes, which is the only place that decision belongs.
+     */
     override fun onDestroy() {
-        releaseJoin()
         super.onDestroy()
     }
 }

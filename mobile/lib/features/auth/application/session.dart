@@ -5,6 +5,7 @@ import '../../../core/api/dio_client.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/logging/log.dart';
 import '../../../core/storage/master_registry.dart';
+import '../../../core/storage/saved_session.dart';
 import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_manager.dart';
@@ -117,22 +118,26 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       log.w('first-run check skipped: $e');
     }
 
+    // The user asked for Bluetooth, so ask Bluetooth first. Probing the
+    // LAN ahead of it meant waiting out an HTTP timeout on a network we
+    // were never going to use — and when the phone *was* on the master's
+    // Wi-Fi, the probe succeeded and the whole bootstrap ran over Wi-Fi
+    // despite the preference. Either way the preference lost.
+    try {
+      if (await _blePreferred()) {
+        final ble = await _bleSession();
+        if (ble != null) return ble;
+      }
+    } on Object catch (e) {
+      log.w('ble-first bootstrap skipped: $e');
+    }
+
     final DeviceInfo info;
     try {
       info = await _repo.info();
     } on Unreachable {
-      // Off the master's Wi-Fi. If the user prefers Bluetooth and we
-      // have a saved token, open the dashboard over BLE instead of
-      // dead-ending on the unreachable screen. Guarded so a plain
-      // unreachable bootstrap (and the tests) still fall through.
-      try {
-        if (await _blePreferred()) {
-          final ble = await _bleSession();
-          if (ble != null) return ble;
-        }
-      } on Object catch (e) {
-        log.w('ble auto-start skipped: $e');
-      }
+      // Off the master's Wi-Fi, and Bluetooth was either not preferred or
+      // had no saved token to use (handled above).
       return const MasterUnreachable();
     }
 
@@ -268,38 +273,22 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   /// re-login (BLE spec §Auth). Returns null when there is no saved
   /// token to use.
   Future<Authenticated?> _bleSession() async {
-    final cand = await _bleCandidate();
+    final cand = await ref.read(savedSessionProvider).read();
     if (cand == null) return null;
     ref.read(tokenProvider.notifier).set(cand.token);
     await ref
         .read(transportPreferenceProvider.notifier)
         .set(TransportPreference.bluetooth);
+    // The live transport too, not only the preference. Otherwise the
+    // Wi-Fi socket sees a token appear while the transport still reads as
+    // its default and opens a connection to a LAN we are not on.
+    ref.read(currentTransportProvider.notifier).set(TransportKind.ble);
     // fw is unknown until a BLE state push arrives; uid comes from the
     // saved registry.
     return Authenticated(
       DeviceInfo(uptime: 0, freeHeap: 0, uid: cand.uid, fw: '—', auth: true),
       mesh: false,
     );
-  }
-
-  /// A saved master we can drive over Bluetooth — one with a stored
-  /// token, preferring the last-used master. Null when nothing is
-  /// paired or no token is stored.
-  Future<({String uid, int? meshId, String token})?> _bleCandidate() async {
-    final masters = await ref.read(masterRegistryProvider.future);
-    if (masters.isEmpty) return null;
-    final lastUid = await ref.read(masterRegistryProvider.notifier).lastUsed();
-    final ordered = [
-      ...masters.where((m) => m.uid == lastUid),
-      ...masters.where((m) => m.uid != lastUid),
-    ];
-    for (final m in ordered) {
-      final token = await _store.readToken(m.uid);
-      if (token != null) {
-        return (uid: m.uid, meshId: m.meshId, token: token);
-      }
-    }
-    return null;
   }
 
   Future<bool> _blePreferred() async {

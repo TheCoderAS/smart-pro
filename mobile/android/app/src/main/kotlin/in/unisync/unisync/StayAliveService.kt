@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 
 /**
@@ -23,6 +24,11 @@ import androidx.core.app.NotificationCompat
  * actually fire the moment it is tapped, instead of after a scan and a
  * connect. For lighting you reach for in the dark, that difference is the
  * whole feature.
+ *
+ * It only works together with [EngineHolder]: the link lives in the Dart
+ * isolate, so a process with no engine in it holds nothing. Keeping the
+ * process alive is necessary and not sufficient, which is why this service
+ * warms the engine as well as guarding the process.
  *
  * Android will not let an app hold a radio connection in the background
  * without a foreground service and a notification the user can see. That is
@@ -40,6 +46,7 @@ import androidx.core.app.NotificationCompat
 class StayAliveService : Service() {
 
     companion object {
+        private const val TAG = "StayAlive"
         const val CHANNEL_ID = "unisync_link"
         const val NOTIFICATION_ID = 1
         const val EXTRA_TEXT = "text"
@@ -94,6 +101,18 @@ class StayAliveService : Service() {
         lastText = text
         createChannel()
         val notification = buildNotification(text)
+
+        // Keeping the process alive is only half of it. The Bluetooth link
+        // lives in the Dart isolate, so with no engine this service was
+        // guarding an empty process — the link came back only when someone
+        // opened the app. Warm one if there isn't one yet: after a reboot,
+        // or after the system reclaimed us and START_STICKY brought us
+        // back, this is what puts the link up without the user's help.
+        try {
+            EngineHolder.ensure(applicationContext)
+        } catch (e: Exception) {
+            Log.w(TAG, "engine warm-up failed", e)
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             // Android 14 requires the service type to be declared at start

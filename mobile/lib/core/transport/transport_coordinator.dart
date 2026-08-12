@@ -1,9 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../api/dio_client.dart';
 import '../logging/log.dart';
 import '../permissions/scan_permissions.dart';
 import '../storage/master_registry.dart';
+import '../storage/saved_session.dart';
 import '../wifi/wifi_service.dart';
 import '../ws/state_socket.dart';
 import 'ble_session.dart';
@@ -40,10 +40,22 @@ class TransportCoordinator {
 
   final Ref _ref;
 
-  /// Decide and apply the transport. Call on dashboard entry, on a
-  /// preference change, or when the user taps the switch in the status
-  /// pill.
-  Future<void> reconcile() async {
+  /// Serialises reconciles. Two can be in flight on a cold start — one
+  /// from app start, one when the session resolves — and they must not
+  /// race each other into opposite transports. Each runs in turn and
+  /// re-reads the world, so the last one wins on current facts.
+  Future<void> _queue = Future<void>.value();
+
+  /// Decide and apply the transport. Call at app start, on dashboard
+  /// entry, on a preference change, or when the user taps the switch in
+  /// the status pill.
+  Future<void> reconcile() {
+    final next = _queue.then((_) => _reconcile());
+    _queue = next.then((_) {}, onError: (_) {});
+    return next;
+  }
+
+  Future<void> _reconcile() async {
     // Await the persisted preference so a just-logged-in dashboard
     // doesn't race the async restore and read the default `auto`.
     final pref = await _ref.read(transportPreferenceProvider.notifier)
@@ -123,7 +135,12 @@ class TransportCoordinator {
   /// change: a Wi-Fi-issued session must exist (BLE has no login) and
   /// the OS permission must be granted.
   Future<TransportChoice> canUseBle() async {
-    if (_ref.read(tokenProvider) == null) {
+    // The vault, not just the in-memory token. On a cold start the
+    // dashboard can be up and reconciling before the session bootstrap has
+    // restored the token, and reading that as "never signed in" is what
+    // silently dropped a Bluetooth-preferring user onto Wi-Fi — for the
+    // whole app lifetime, because nothing reconciled a second time.
+    if (await _ref.read(savedSessionProvider).ensureToken() == null) {
       return TransportChoice.needsWifiLogin;
     }
     if (!await ensureBlePermissions()) {
@@ -149,7 +166,10 @@ class TransportCoordinator {
 
   Future<int?> _pairedMeshId() async {
     try {
-      final masters = _ref.read(masterRegistryProvider).value ?? const [];
+      // Awaited, not `.value`: at app start the registry has not loaded
+      // yet, and a null mesh id means scanning for any Unisync master
+      // instead of the user's own.
+      final masters = await _ref.read(masterRegistryProvider.future);
       for (final m in masters) {
         if (m.meshId != null && m.meshId != 0) return m.meshId;
       }
