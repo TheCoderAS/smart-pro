@@ -20,6 +20,7 @@ import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
+import '../../auth/application/session.dart';
 import '../../onboarding/presentation/first_run_prompts.dart';
 import '../../settings/presentation/master_switcher.dart';
 import '../../switches/presentation/rename_sheet.dart';
@@ -55,9 +56,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final snapshot = ref.watch(activeStateProvider);
     final status = ref.watch(socketStatusProvider);
     final transport = ref.watch(currentTransportProvider);
-    // The notification is a status line, so it has to follow the link.
-    ref.listen(linkStateProvider, (_, _) {
-      ref.read(stayAliveProvider).refresh();
+
+    // The dashboard can be on screen before the session has resolved —
+    // the cached snapshot paints straight away — so the reconcile in
+    // initState may have run while the token was still being restored.
+    // Reconcile again the moment the session settles, or a
+    // Bluetooth-preferring user stays on Wi-Fi for the rest of the app's
+    // life: nothing else ever calls it.
+    ref.listen(sessionProvider, (prev, next) {
+      if (next.value is Authenticated && prev?.value is! Authenticated) {
+        ref.read(transportCoordinatorProvider).reconcile();
+      }
     });
 
     // Reconcile optimistic overrides against the authoritative snapshot

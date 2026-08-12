@@ -24,7 +24,15 @@ import 'link_state.dart';
 /// Even on Android this is best-effort. Xiaomi, Oppo, Vivo and Huawei kill
 /// foreground services unless the user exempts the app in their own battery
 /// settings — [openBatterySettings] is the only lever there is.
-final stayAliveProvider = Provider<StayAlive>(StayAlive.new);
+final stayAliveProvider = Provider<StayAlive>((ref) {
+  final stayAlive = StayAlive(ref);
+  // Wired here rather than in the dashboard's build. With the engine kept
+  // warm there may be no widget rebuilding to hang this off — and a
+  // notification still reading "Connected" hours after the link died
+  // would be worse than no notification at all.
+  ref.listen(linkStateProvider, (_, _) => stayAlive.refresh());
+  return stayAlive;
+});
 
 class StayAlive {
   StayAlive(this._ref);
