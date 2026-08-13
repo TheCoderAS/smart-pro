@@ -90,6 +90,23 @@ class BleSessionController extends Notifier<BleSessionState> {
     return next;
   }
 
+  /// How often the roam loop wakes, how long it scans, and how long it
+  /// keeps off the radio after a command.
+  ///
+  /// This used to wake every 3 seconds and scan for 3 — a scan finished
+  /// and the next began, so the radio was scanning essentially all the
+  /// time while a GATT connection was live. That is what made control
+  /// horribly slow: on Android a concurrent scan and an active connection
+  /// fight for the same radio, and the connection loses.
+  ///
+  /// 2 seconds in 20 is a 10% duty cycle instead of 100%, and roaming is
+  /// suppressed entirely for [roamQuietFor] after a command, so nothing
+  /// competes with the tap someone is waiting on. A handoff a few seconds
+  /// later is invisible; a switch that takes seconds to fire is not.
+  static const roamEvery = Duration(seconds: 20);
+  static const roamWindow = Duration(seconds: 2);
+  static const roamQuietFor = Duration(seconds: 8);
+
   Timer? _retryTimer;
   int _retryAttempt = 0;
 
@@ -346,7 +363,7 @@ class BleSessionController extends Notifier<BleSessionState> {
 
   void _startRoamLoop() {
     _roamTimer?.cancel();
-    _roamTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+    _roamTimer = Timer.periodic(roamEvery, (_) async {
       // Only scan when roaming is actually possible: an active mesh
       // session with peers to roam to. A single-master system never
       // scans in the background — that was the "app feels slow" cause.
@@ -356,11 +373,18 @@ class BleSessionController extends Notifier<BleSessionState> {
           !_hasPeers) {
         return;
       }
+      // Stay off the radio while the app is being used. A scan alongside
+      // a live GATT link costs real latency on the very tap the user is
+      // waiting on, and roaming a few seconds later costs nothing.
+      final last = _client?.lastActivity;
+      if (last != null && DateTime.now().difference(last) < roamQuietFor) {
+        return;
+      }
       try {
         // Balanced (not lowLatency) so background roaming doesn't
         // saturate the radio the live connection is sharing.
         final beacons = await _scan(
-          window: const Duration(seconds: 3),
+          window: roamWindow,
           mode: ScanMode.balanced,
         );
         final now = DateTime.now().millisecondsSinceEpoch;

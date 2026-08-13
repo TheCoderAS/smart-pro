@@ -79,6 +79,15 @@ class BleControlClient {
   Stream<StateSnapshot> get stateStream => _stateController.stream;
   bool get isConnected => _connected;
 
+  DateTime? _lastActivity;
+
+  /// When a command last went out on this link.
+  ///
+  /// The roam loop reads it to stay off the radio while someone is
+  /// actually using the app: a scan running alongside a GATT connection
+  /// costs real latency on the tap that matters.
+  DateTime? get lastActivity => _lastActivity;
+
   QualifiedCharacteristic _char(String uuid) => QualifiedCharacteristic(
     serviceId: Uuid.parse(BleControlUuids.service),
     characteristicId: Uuid.parse(uuid),
@@ -217,6 +226,7 @@ class BleControlClient {
       message.toLowerCase().contains('proof');
 
   Future<Map<String, Object?>> _doRequest(Map<String, Object?> command) async {
+    _lastActivity = DateTime.now();
     final pending = Completer<Map<String, Object?>>();
     _pending = pending;
     final chunks = BleFraming.encodeJson(command, maxPayloadBytes: _maxPayload);
