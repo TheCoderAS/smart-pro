@@ -16,6 +16,21 @@ class BlePermissionDenied implements Exception {
   const BlePermissionDenied();
 }
 
+/// The master answered, but not with something we could read.
+///
+/// Deliberately not phrased as a failure. The master applies the change
+/// before it replies, so a mangled reply is a reporting problem, not a
+/// recovery problem — and telling the user it failed sends them off to
+/// redo something that already worked.
+class RecoveryReplyUnreadable implements Exception {
+  const RecoveryReplyUnreadable();
+
+  @override
+  String toString() =>
+      'The switch accepted the recovery but its reply was unreadable. '
+      'Try signing in with the new password.';
+}
+
 final reactiveBleProvider = Provider<FlutterReactiveBle>(
   (ref) => FlutterReactiveBle(),
 );
@@ -121,6 +136,23 @@ class RecoveryService {
           )
           .timeout(connectionTimeout);
 
+      // Negotiate an MTU before reading anything back.
+      //
+      // Without this the link sits at the default ATT MTU of 23, which
+      // carries 20 bytes — and the master's verdict is 32
+      // (`{"v":2,"ok":true,"scope":"mesh"}`). It arrived chopped to
+      // `{"v":2,"ok":true,"sc`, so a recovery the master had *accepted*
+      // surfaced in the app as `FormatException: Unterminated string`.
+      // The control client always did this; this path never did.
+      try {
+        final mtu = await _ble.requestMtu(deviceId: target.id, mtu: 185);
+        log.d('recovery mtu=$mtu');
+      } on Exception catch (e) {
+        // Not fatal on its own — short verdicts still fit in 20 bytes —
+        // so carry on and let the parse decide.
+        log.w('recovery mtu negotiation failed: $e');
+      }
+
       QualifiedCharacteristic char(String uuid) => QualifiedCharacteristic(
             serviceId: _service,
             characteristicId: Uuid.parse(uuid),
@@ -161,9 +193,19 @@ class RecoveryService {
         if (raw.isEmpty) rethrow;
       }
       final text = utf8.decode(raw, allowMalformed: true).trim();
-      final decoded = jsonDecode(text);
+      final Object? decoded;
+      try {
+        decoded = jsonDecode(text);
+      } on FormatException catch (e) {
+        // The write already went through and the master acts on it before
+        // it answers, so an unreadable *reply* says nothing about whether
+        // the recovery happened — it usually did. Saying "recovery failed"
+        // here sent people back to re-run something already done.
+        log.w('unreadable recovery verdict: $e (raw: $text)');
+        throw const RecoveryReplyUnreadable();
+      }
       if (decoded is! Map<String, dynamic>) {
-        throw const FormatException('unreadable reply from the switch');
+        throw const RecoveryReplyUnreadable();
       }
       return RecoveryVerdict.fromJson(decoded);
     } finally {

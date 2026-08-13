@@ -287,7 +287,25 @@ class BleSessionController extends Notifier<BleSessionState> {
     // Pull an initial full state so the dashboard fills immediately.
     try {
       final map = await client.request((p) => BleCommands.state(p));
-      _emit(StateSnapshot.fromJson(map));
+      final snap = StateSnapshot.fromJson(map);
+      // Check who actually answered before showing anything.
+      //
+      // Nothing did. Power one master down, bring a different one up, and
+      // the scan would connect to whatever was in range -- a master that
+      // had never been set up in this app -- and the dashboard would carry
+      // on showing the old master's name over the new one's switches. The
+      // Wi-Fi path has guarded this since the beginning; Bluetooth never
+      // did.
+      if (!await _isKnownMaster(snap.selfUid)) {
+        log.w('ble: unknown master ${snap.selfUid}, refusing');
+        await _closeClient();
+        state = const BleSessionState(
+          status: BleSessionStatus.failed,
+          error: 'Found a switch that is not set up in this app.',
+        );
+        return;
+      }
+      _emit(snap);
     } on Exception catch (e) {
       log.w('initial ble state fetch failed: $e');
     }
@@ -345,6 +363,31 @@ class BleSessionController extends Notifier<BleSessionState> {
     if (client == null || token == null) return;
     final map = await client.request((p) => BleCommands.state(p));
     _emit(StateSnapshot.fromJson(map));
+  }
+
+  /// Whether [uid] is a master this app is actually set up with.
+  ///
+  /// A peer of a mesh we are paired with counts: roaming between masters
+  /// in one home is the point. A stranger does not, however strong its
+  /// signal.
+  Future<bool> _isKnownMaster(String uid) async {
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      // Nothing paired yet — this is the first master and adopting it is
+      // the whole of onboarding.
+      if (masters.isEmpty) return true;
+      if (masters.any((m) => m.uid == uid)) return true;
+      final mesh = _meshId;
+      if (mesh != null && mesh != 0 && masters.any((m) => m.meshId == mesh)) {
+        return true;
+      }
+      return false;
+    } on Object catch (e) {
+      // Registry unreadable: refusing here would strand someone with a
+      // working link over a bookkeeping failure.
+      log.w('master identity check skipped: $e');
+      return true;
+    }
   }
 
   Future<void> _rememberMesh(MasterBeacon beacon) async {
