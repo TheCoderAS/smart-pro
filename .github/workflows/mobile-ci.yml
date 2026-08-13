@@ -21,6 +21,10 @@ concurrency:
 jobs:
   analyze-test:
     name: analyze + test
+    # PRs only. Everything reaches main through a PR, and it was verified
+    # there -- re-running the same checks on the merge commit proves nothing
+    # new and just delays the build people are waiting for.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -39,6 +43,11 @@ jobs:
 
   build-android:
     name: build android
+    # PRs only. This is the sole check that compiles the Kotlin, parses the
+    # manifest and runs Gradle -- analyze+test never touches Android -- so it
+    # has to run before a merge. On main it is pure duplication: the release
+    # job builds the same release APK a second time.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     needs: analyze-test
     defaults:
@@ -75,6 +84,11 @@ jobs:
 
   build-ios:
     name: build ios (no codesign)
+    # Paused. macOS runners bill at 10x, so this one job costs roughly as
+    # much quota as everything else here put together -- and it only ever
+    # proves the iOS side still compiles, which nothing currently ships.
+    # Flip to `true` to bring it back before any iOS release.
+    if: false
     runs-on: macos-latest
     needs: analyze-test
     defaults:
@@ -100,6 +114,10 @@ jobs:
     # Rolling "mobile-latest" prerelease so the APK is downloadable without
     # digging through workflow-run artifacts.
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Deliberately no `needs`: on main this is the only job that runs, so
+    # there is nothing to wait for. The verification happened on the PR.
+    # Note this does mean a direct push to main -- bypassing a PR -- ships
+    # an APK nothing checked.
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -134,6 +152,10 @@ jobs:
       # device rather than using one. Signed with the debug key, so it will
       # not install over the release APK -- uninstall first.
       - run: flutter build apk --debug
+      # The Play Store upload format. Built here because the android job no
+      # longer runs on main, and it was the only place this was produced --
+      # dropping that job without this would have left no .aab anywhere.
+      - run: flutter build appbundle --release
       - name: publish to mobile-latest release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -155,4 +177,5 @@ jobs:
             build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
             build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
             build/app/outputs/flutter-apk/app-x86_64-release.apk \
-            build/app/outputs/flutter-apk/app-debug.apk --clobber
+            build/app/outputs/flutter-apk/app-debug.apk \
+            build/app/outputs/bundle/release/app-release.aab --clobber

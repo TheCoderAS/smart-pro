@@ -70,6 +70,65 @@ class BleSessionController extends Notifier<BleSessionState> {
   // so a manual reconnect and the roam loop must not scan at once.
   Future<void> _scanGate = Future<void>.value();
 
+  // Serialises link changes. The roam loop and a reconnect could both
+  // call _openClient, leaving two GATT connections open to the same
+  // master. The master keys each connection's proof on its own nonce but
+  // tracks the request handle globally, so whichever wrote last decided
+  // which nonce the other's proof was checked against — and the loser was
+  // rejected as an invalid proof.
+  Future<void> _linkGate = Future<void>.value();
+
+  Future<void> _serialised(Future<void> Function() body) {
+    final next = _linkGate.then((_) => body());
+    _linkGate = next.then((_) {}, onError: (_) {});
+    return next;
+  }
+
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+
+  /// Backoff between reconnect attempts, capped so walking back into
+  /// range recovers on its own within about twenty seconds. Uncapped
+  /// growth would be cheaper on the radio and useless to someone standing
+  /// in their own hallway waiting for a light.
+  static const _retryBackoff = <int>[1, 2, 4, 8, 15, 20];
+
+  /// Delay before attempt [attempt] (0-based). Public so the schedule can
+  /// be checked without a radio.
+  static Duration retryDelay(int attempt) => Duration(
+        seconds: _retryBackoff[
+            attempt < _retryBackoff.length ? attempt : _retryBackoff.length - 1],
+      );
+
+  /// Try again, and keep trying.
+  ///
+  /// The session used to give up the moment the link dropped: status went
+  /// to `failed` and nothing ever retried, so going out of range or power
+  /// cycling the master left the app showing "reconnecting" until the user
+  /// found the retry button — and once the engine started surviving a
+  /// swipe, even reopening the app stopped helping.
+  void _scheduleRetry() {
+    if (!_active) return;
+    _retryTimer?.cancel();
+    final delay = retryDelay(_retryAttempt);
+    _retryAttempt++;
+    log.d('ble retry in ${delay.inSeconds}s (attempt $_retryAttempt)');
+    _retryTimer = Timer(delay, () async {
+      if (!_active) return;
+      // Balanced, not lowLatency: this can run for a long time when the
+      // user is away from the house, and it is a background retry rather
+      // than something anyone is waiting on.
+      await _serialised(() => _connectNearest(mode: ScanMode.balanced));
+      if (state.status != BleSessionStatus.connected) _scheduleRetry();
+    });
+  }
+
+  void _cancelRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryAttempt = 0;
+  }
+
   Future<List<MasterBeacon>> _scan({
     Duration window = const Duration(seconds: 4),
     ScanMode mode = ScanMode.lowLatency,
@@ -106,8 +165,12 @@ class BleSessionController extends Notifier<BleSessionState> {
     // Already live. A second reconcile — app start, then the session
     // resolving — must not tear a working link down and scan again; over
     // Bluetooth that costs seconds the user spends looking at a spinner.
+    //
+    // Gated on the GATT link, not only on the status: the status is a
+    // state machine that can lag reality, and trusting it alone would let
+    // a dead link block its own replacement.
     if (_active &&
-        _client != null &&
+        (_client?.isConnected ?? false) &&
         state.status == BleSessionStatus.connected) {
       _meshId ??= meshId;
       return;
@@ -117,7 +180,8 @@ class BleSessionController extends Notifier<BleSessionState> {
     // hasn't got one — it is what filters the scan to the user's own
     // system rather than every Unisync master in earshot.
     _meshId = meshId ?? _meshId;
-    await _connectNearest();
+    await _serialised(_connectNearest);
+    if (state.status != BleSessionStatus.connected) _scheduleRetry();
     _startRoamLoop();
   }
 
@@ -138,15 +202,21 @@ class BleSessionController extends Notifier<BleSessionState> {
     }
     _roamTimer?.cancel();
     _roam.clear();
-    await _connectNearest();
+    // An explicit ask, so start the backoff over: the user is standing
+    // there waiting, not sitting in a background retry cycle.
+    _cancelRetry();
+    await _serialised(_connectNearest);
+    if (state.status != BleSessionStatus.connected) _scheduleRetry();
     _startRoamLoop();
   }
 
-  Future<void> _connectNearest() async {
+  Future<void> _connectNearest({
+    ScanMode mode = ScanMode.lowLatency,
+  }) async {
     if (!_active) return;
     state = state.copyWith(status: BleSessionStatus.scanning);
     try {
-      final beacons = await _scan();
+      final beacons = await _scan(mode: mode);
       if (beacons.isEmpty) {
         state = const BleSessionState(
           status: BleSessionStatus.failed,
@@ -210,6 +280,9 @@ class BleSessionController extends Notifier<BleSessionState> {
       status: BleSessionStatus.connected,
       masterName: name,
     );
+    // Back up and running: forget the backoff so the next drop retries
+    // briskly rather than inheriting a long delay from an old outage.
+    _cancelRetry();
 
     // Pull an initial full state so the dashboard fills immediately.
     try {
@@ -251,7 +324,12 @@ class BleSessionController extends Notifier<BleSessionState> {
         if (hop != null) {
           final target = beacons.firstWhere((b) => b.deviceId == hop);
           log.d('ble roam → ${target.name}');
-          await _openClient(target.deviceId, target.name); // token reused
+          // Serialised with reconnects: two overlapping opens leave two
+          // connections to one master, and the master's proof check then
+          // has two nonces to choose between.
+          await _serialised(
+            () => _openClient(target.deviceId, target.name), // token reused
+          );
         }
       } on Object catch (e) {
         log.w('roam scan failed: $e');
@@ -305,6 +383,17 @@ class BleSessionController extends Notifier<BleSessionState> {
         error: 'Lost the connection to your switch.',
       );
     }
+    // Drop the corpse. The transport reads `client` straight off this
+    // session, so leaving a disconnected client in place means every tap
+    // writes to a characteristic that is not there and waits out the
+    // timeout instead of failing.
+    //
+    // Off this callback: we are inside the connection stream's own
+    // listener, and disposing cancels that subscription.
+    scheduleMicrotask(() async {
+      await _closeClient();
+      _scheduleRetry();
+    });
   }
 
   Future<void> _closeClient() async {
@@ -318,6 +407,7 @@ class BleSessionController extends Notifier<BleSessionState> {
   Future<void> _teardown() async {
     _roamTimer?.cancel();
     _roamTimer = null;
+    _cancelRetry();
     _roam.clear();
     await _closeClient();
   }

@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.29.0
+ * Unisync - Master Firmware v11.29.1
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.29.0"
+#define MASTER_FW_VERSION  "11.29.1"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -716,6 +716,14 @@ static ble_conn_t   ble_conns[BLE_MAX_CONN];
 static uint8_t      ble_conn_count = 0;
 static NimBLEServer *ble_server    = nullptr;
 static uint16_t     ble_req_handle = 0xFFFF;
+/* The connection the *buffered* request came from, latched when the
+ * frame completes. ble_req_handle tracks whoever wrote most recently,
+ * which is not the same thing: the request is handled off this task, so
+ * a write arriving from a second connection in between left the queued
+ * payload being proof-checked against the other connection's nonce --
+ * and rejected as an invalid proof. Payload and connection now move
+ * together. */
+static uint16_t     ble_req_conn   = 0xFFFF;
 static NimBLECharacteristic *ble_snonce_char = nullptr;
 static uint8_t      ble_snonce[8] = {0};
 static bool     ble_connected   = false;
@@ -6287,7 +6295,7 @@ static bool ble_proof_ok(JsonDocument &req) {
      * unknown handle is rejected outright: previously the replay-guard
      * loop simply fell through and returned true, skipping the counter
      * check whenever the connection table and handle disagreed. */
-    int ci = ble_conn_index(ble_req_handle);
+    int ci = ble_conn_index(ble_req_conn);
     if (ci < 0) {
         Serial.println("[BLE] request from an untracked connection, rejected");
         return false;
@@ -6583,6 +6591,7 @@ class BleReqCB : public NimBLECharacteristicCallbacks {
             ble_req_buf[len] = 0;
             ble_req_len = len;
             Serial.printf("[BLE] unframed request: %s\n", ble_req_buf);
+            ble_req_conn  = info.getConnHandle();
             ble_req_ready = true;
             return;
         }
@@ -6603,6 +6612,7 @@ class BleReqCB : public NimBLECharacteristicCallbacks {
         if (idx + 1 >= total) {
             ble_req_buf[ble_req_len] = 0;
             Serial.printf("[BLE] request complete: %s\n", ble_req_buf);
+            ble_req_conn  = info.getConnHandle();
             ble_req_ready = true;    /* handled off this task */
         }
     }
