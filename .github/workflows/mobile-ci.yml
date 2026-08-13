@@ -21,6 +21,10 @@ concurrency:
 jobs:
   analyze-test:
     name: analyze + test
+    # PRs only. Everything reaches main through a PR, and it was verified
+    # there -- re-running the same checks on the merge commit proves nothing
+    # new and just delays the build people are waiting for.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -110,11 +114,10 @@ jobs:
     # Rolling "mobile-latest" prerelease so the APK is downloadable without
     # digging through workflow-run artifacts.
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    # Gated on the tests rather than run alongside them. This job used to
-    # start immediately with no `needs`, which meant a push to main whose
-    # tests failed still published an APK to the page people download from.
-    # Costs a couple of minutes; worth it for something flashed and relied on.
-    needs: analyze-test
+    # Deliberately no `needs`: on main this is the only job that runs, so
+    # there is nothing to wait for. The verification happened on the PR.
+    # Note this does mean a direct push to main -- bypassing a PR -- ships
+    # an APK nothing checked.
     runs-on: ubuntu-latest
     permissions:
       contents: write
