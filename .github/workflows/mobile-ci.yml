@@ -75,6 +75,11 @@ jobs:
 
   build-ios:
     name: build ios (no codesign)
+    # Paused. macOS runners bill at 10x, so this one job costs roughly as
+    # much quota as everything else here put together -- and it only ever
+    # proves the iOS side still compiles, which nothing currently ships.
+    # Flip to `true` to bring it back before any iOS release.
+    if: false
     runs-on: macos-latest
     needs: analyze-test
     defaults:
