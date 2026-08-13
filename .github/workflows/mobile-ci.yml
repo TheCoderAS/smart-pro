@@ -39,6 +39,11 @@ jobs:
 
   build-android:
     name: build android
+    # PRs only. This is the sole check that compiles the Kotlin, parses the
+    # manifest and runs Gradle -- analyze+test never touches Android -- so it
+    # has to run before a merge. On main it is pure duplication: the release
+    # job builds the same release APK a second time.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     needs: analyze-test
     defaults:
@@ -105,6 +110,11 @@ jobs:
     # Rolling "mobile-latest" prerelease so the APK is downloadable without
     # digging through workflow-run artifacts.
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Gated on the tests rather than run alongside them. This job used to
+    # start immediately with no `needs`, which meant a push to main whose
+    # tests failed still published an APK to the page people download from.
+    # Costs a couple of minutes; worth it for something flashed and relied on.
+    needs: analyze-test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -139,6 +149,10 @@ jobs:
       # device rather than using one. Signed with the debug key, so it will
       # not install over the release APK -- uninstall first.
       - run: flutter build apk --debug
+      # The Play Store upload format. Built here because the android job no
+      # longer runs on main, and it was the only place this was produced --
+      # dropping that job without this would have left no .aab anywhere.
+      - run: flutter build appbundle --release
       - name: publish to mobile-latest release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -160,4 +174,5 @@ jobs:
             build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
             build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
             build/app/outputs/flutter-apk/app-x86_64-release.apk \
-            build/app/outputs/flutter-apk/app-debug.apk --clobber
+            build/app/outputs/flutter-apk/app-debug.apk \
+            build/app/outputs/bundle/release/app-release.aab --clobber
