@@ -62,7 +62,15 @@ class BleControlClient {
   int _counter = 0;
 
   static const _connectTimeout = Duration(seconds: 12);
-  static const _requestTimeout = Duration(seconds: 6);
+
+  /// A command is one write and one notify over a link that is already up,
+  /// so six seconds was never a plausible success — it was only ever how
+  /// long a *lost* reply would block everything queued behind it. Commands
+  /// are serialised, so that stall is paid by every tap that follows.
+  ///
+  /// Three still leaves generous room for a multi-chunk reply on a busy
+  /// link, while halving the damage when one goes missing.
+  static const _requestTimeout = Duration(seconds: 3);
 
   int _maxPayload = 18; // safe default until MTU negotiated
   StreamSubscription<ConnectionStateUpdate>? _conn;
@@ -194,7 +202,17 @@ class BleControlClient {
     Map<String, Object?> Function(BleProof proof) build,
   ) {
     final completer = Completer<Map<String, Object?>>();
+    // Stamped before the queue, not after. A command can sit here behind
+    // one that is waiting out its timeout, and that wait is invisible from
+    // inside _doRequest — which times from the first write and so reports
+    // a fast command that the user watched take seconds. If the master's
+    // log shows nothing arriving, this is where the time went.
+    final queuedAt = DateTime.now();
     _lock = _lock.then((_) async {
+      final waited = DateTime.now().difference(queuedAt);
+      if (waited > const Duration(milliseconds: 200)) {
+        log.w('ble command queued ${waited.inMilliseconds}ms behind another');
+      }
       try {
         completer.complete(await _requestWithRetry(build));
       } on Object catch (e, st) {
@@ -230,20 +248,34 @@ class BleControlClient {
     final pending = Completer<Map<String, Object?>>();
     _pending = pending;
     final chunks = BleFraming.encodeJson(command, maxPayloadBytes: _maxPayload);
+    // Timed in three parts so a slow command can be attributed rather than
+    // guessed at: how long the writes took, how long the master took to
+    // answer, and how many chunks the MTU forced us into. Debug builds keep
+    // these; release strips them.
+    final started = DateTime.now();
     for (final chunk in chunks) {
       await _ble.writeCharacteristicWithResponse(
         _char(BleControlUuids.controlRequest),
         value: chunk,
       );
     }
+    final written = DateTime.now();
     final Map<String, Object?> reply;
     try {
       reply = await pending.future.timeout(_requestTimeout);
     } on TimeoutException {
+      log.w('ble ${command['c']}: no reply in ${_requestTimeout.inSeconds}s '
+          '(${chunks.length} chunks, payload $_maxPayload)');
       throw const BleTimeout();
     } finally {
       _pending = null;
     }
+    final done = DateTime.now();
+    log.d('ble ${command['c']}: '
+        'write ${written.difference(started).inMilliseconds}ms, '
+        'reply ${done.difference(written).inMilliseconds}ms, '
+        'total ${done.difference(started).inMilliseconds}ms '
+        '(${chunks.length} chunk(s), payload $_maxPayload)');
     final err = reply['err'];
     if (err != null) throw BleCommandError(err.toString());
     return reply;

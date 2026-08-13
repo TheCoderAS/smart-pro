@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -28,6 +29,7 @@ class SnapshotCacheNotifier extends Notifier<StateSnapshot?> {
 
   @override
   StateSnapshot? build() {
+    ref.onDispose(() => _writeTimer?.cancel());
     Future.microtask(_restore);
     return null;
   }
@@ -47,10 +49,39 @@ class SnapshotCacheNotifier extends Notifier<StateSnapshot?> {
     }
   }
 
-  /// Records a live snapshot. Cheap enough to do on every arrival: the
-  /// document is a few KB and writes are already batched by the platform.
-  Future<void> save(StateSnapshot snap) async {
+  /// How long a write waits for the pushes behind it to stop arriving.
+  static const writeAfter = Duration(seconds: 3);
+
+  Timer? _writeTimer;
+  StateSnapshot? _unwritten;
+
+  /// Records a live snapshot.
+  ///
+  /// In memory immediately — that is what the UI reads. The disk write is
+  /// debounced, because "cheap enough to do on every arrival" (my words,
+  /// and wrong) meant a JSON encode plus a SharedPreferences write for
+  /// every push the master sent. The master pushes on a 150 ms floor, so a
+  /// burst of activity turned into a burst of writes on the same platform
+  /// channel machinery the BLE plugin is using — competing with the very
+  /// commands the user is waiting on.
+  ///
+  /// Losing the last few seconds of cache to a kill costs one stale paint
+  /// on next launch, which the "last seen" labelling already covers.
+  void save(StateSnapshot snap) {
     state = snap;
+    _unwritten = snap;
+    _writeTimer?.cancel();
+    _writeTimer = Timer(writeAfter, flush);
+  }
+
+  /// Writes anything still pending now. Called by the debounce timer, and
+  /// available to anyone that wants the cache durable at a known point.
+  Future<void> flush() async {
+    _writeTimer?.cancel();
+    _writeTimer = null;
+    final snap = _unwritten;
+    if (snap == null) return;
+    _unwritten = null;
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(key, jsonEncode(snap.toJson()));
