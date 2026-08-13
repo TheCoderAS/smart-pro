@@ -8,6 +8,7 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/saved_session.dart';
 import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
+import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../onboarding/application/first_run.dart';
 import '../../settings/application/master_switch.dart';
@@ -343,6 +344,24 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   /// Last-used only moves on a successful arrival — a failed switch must
   /// not change where the app opens next time.
   Future<void> switchTo(SavedMaster target) async {
+    // Over Bluetooth there is no network to join and no HTTP probe to
+    // make: the identity check happens on the GATT link instead. Running
+    // the Wi-Fi flow here always ended in "unreachable", so last-used
+    // never moved and the radio stayed pointed at the old master — you
+    // could not switch masters in Bluetooth mode at all.
+    if (ref.read(currentTransportProvider) == TransportKind.ble) {
+      state = const AsyncValue.loading();
+      state = await AsyncValue.guard(() async {
+        await ref.read(masterRegistryProvider.notifier).setLastUsed(target.uid);
+        final arrived = await _bleSession();
+        if (arrived == null) return const MasterUnreachable();
+        // Retarget the radio at the master we just selected.
+        await ref.read(transportCoordinatorProvider).reconcile();
+        return arrived;
+      });
+      return;
+    }
+
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(() async {
       final outcome = await ref.read(masterSwitchProvider).switchTo(target);

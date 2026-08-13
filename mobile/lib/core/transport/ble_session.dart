@@ -59,6 +59,12 @@ class BleSessionController extends Notifier<BleSessionState> {
   final _roam = RoamPolicy();
   Timer? _roamTimer;
   int? _meshId;
+
+  /// The master the app is pointed at, when it knows. Masters advertise
+  /// as `U{UID}`, and that name is the only thing in a beacon that tells
+  /// two standalone masters apart — the manufacturer data carries a mesh
+  /// id and flags, nothing identifying.
+  String? _targetUid;
   String? _connectedDeviceId;
   bool _active = false;
   // Whether the connected master reports peers. No peers ⇒ nothing to
@@ -161,7 +167,25 @@ class BleSessionController extends Notifier<BleSessionState> {
 
   /// Starts (or restarts) a BLE session for the paired [meshId]
   /// (null = any Unisync master, used before a mesh is known).
-  Future<void> activate({int? meshId}) async {
+  ///
+  /// [uid] is the master the app is actually pointed at. Passing it is
+  /// what lets a second master be reached at all: the mesh filter used to
+  /// be sticky, so once a meshed master had been seen the scan kept
+  /// filtering to that mesh and a standalone master — whose beacon
+  /// carries mesh id 0 — was dropped before it could ever be connected.
+  Future<void> activate({int? meshId, String? uid}) async {
+    // A different master than last time is a retarget, not a no-op: the
+    // filter and the live link both have to be rebuilt for it.
+    final retarget = uid != null && uid != _targetUid;
+    if (retarget) {
+      log.d('ble retarget → $uid (mesh ${meshId?.toRadixString(16)})');
+      _targetUid = uid;
+      _meshId = meshId; // replaces, never merges — this is the fix
+      _roam.clear();
+      await _closeClient();
+      _cancelRetry();
+    }
+
     // Already live. A second reconcile — app start, then the session
     // resolving — must not tear a working link down and scan again; over
     // Bluetooth that costs seconds the user spends looking at a spinner.
@@ -169,7 +193,8 @@ class BleSessionController extends Notifier<BleSessionState> {
     // Gated on the GATT link, not only on the status: the status is a
     // state machine that can lag reality, and trusting it alone would let
     // a dead link block its own replacement.
-    if (_active &&
+    if (!retarget &&
+        _active &&
         (_client?.isConnected ?? false) &&
         state.status == BleSessionStatus.connected) {
       _meshId ??= meshId;
@@ -224,8 +249,16 @@ class BleSessionController extends Notifier<BleSessionState> {
         );
         return;
       }
-      // Prefer an unoccupied master, then the strongest.
+      // The master we are actually pointed at wins outright, however weak
+      // it is; a stronger stranger is not a substitute for it. Below that,
+      // prefer an unoccupied master, then the strongest.
+      final want = _targetUid?.toUpperCase();
+      bool isTarget(MasterBeacon b) =>
+          want != null && b.name.toUpperCase() == 'U$want';
       beacons.sort((a, b) {
+        final targetCmp =
+            (isTarget(b) ? 1 : 0).compareTo(isTarget(a) ? 1 : 0);
+        if (targetCmp != 0) return targetCmp;
         final busyCmp = (a.advert.clientConnected ? 1 : 0)
             .compareTo(b.advert.clientConnected ? 1 : 0);
         if (busyCmp != 0) return busyCmp;
