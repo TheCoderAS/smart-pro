@@ -82,8 +82,11 @@ class TransportCoordinator {
       // Bluetooth doesn't want the phone pinned to a network with no
       // internet; give it its own routing back.
       await wifi.release();
-      final meshId = await _pairedMeshId();
-      await _ref.read(bleSessionProvider.notifier).activate(meshId: meshId);
+      final target = await _bleTarget();
+      await _ref.read(bleSessionProvider.notifier).activate(
+            meshId: target?.meshId,
+            uid: target?.uid,
+          );
     }
 
     try {
@@ -164,18 +167,32 @@ class TransportCoordinator {
     return TransportChoice.ok;
   }
 
-  Future<int?> _pairedMeshId() async {
+  /// The master the app is pointed at: uid, and its mesh when it has one.
+  ///
+  /// This used to return "the mesh id of the first registered master that
+  /// has one", which quietly made a second master unreachable. Add a
+  /// standalone master alongside a meshed one and the scan stayed filtered
+  /// to the mesh — a standalone beacon carries mesh id 0, so it was
+  /// discarded before anything tried to connect, and the master never saw
+  /// a connection attempt at all. The app just said "Reconnecting" for
+  /// ever, whichever of the two was selected.
+  Future<({String uid, int? meshId})?> _bleTarget() async {
     try {
-      // Awaited, not `.value`: at app start the registry has not loaded
-      // yet, and a null mesh id means scanning for any Unisync master
-      // instead of the user's own.
+      // Awaited, not `.value`: at app start the registry has not loaded.
       final masters = await _ref.read(masterRegistryProvider.future);
-      for (final m in masters) {
-        if (m.meshId != null && m.meshId != 0) return m.meshId;
-      }
-    } on Object catch (_) {
-      // registry not ready — scan for any Unisync master
+      if (masters.isEmpty) return null;
+      final lastUid =
+          await _ref.read(masterRegistryProvider.notifier).lastUsed();
+      final m = masters.firstWhere(
+        (x) => x.uid == lastUid,
+        orElse: () => masters.first,
+      );
+      // 0 and null both mean standalone, and standalone must not filter.
+      final mesh = (m.meshId != null && m.meshId != 0) ? m.meshId : null;
+      return (uid: m.uid, meshId: mesh);
+    } on Object catch (e) {
+      log.w('ble target lookup failed: $e');
+      return null;
     }
-    return null;
   }
 }
