@@ -325,6 +325,14 @@ class _RecoveryScreenState extends ConsumerState<RecoveryScreen> {
         // answers every attempt explicitly.
         _error = 'No answer from the switch. Move closer and try again.';
       });
+    } on RecoveryReplyUnreadable catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.keyEntry;
+        // Not "Recovery failed". The master applies the change before it
+        // answers, so an unreadable reply almost always means it worked.
+        _error = '$e';
+      });
     } on Exception catch (e) {
       if (!mounted) return;
       setState(() {

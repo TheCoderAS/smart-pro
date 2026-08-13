@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.29.1
+ * Unisync - Master Firmware v11.29.2
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.29.1"
+#define MASTER_FW_VERSION  "11.29.2"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -5997,7 +5997,25 @@ static void rkey_wrap(const uint8_t *rkey, const uint8_t *nonce8,
         memcpy(ctr, key, 32);
         ctr[32]=(off>>24)&0xFF; ctr[33]=(off>>16)&0xFF;
         ctr[34]=(off>>8)&0xFF;  ctr[35]=off&0xFF;
-        hmac_sha256(key, ctr, sizeof(ctr), ks);
+        /* Keyed on the WHOLE 32-byte derived key.
+         *
+         * This went through the 16-byte hmac_sha256, so the device built
+         * its keystream from key[0..15] while the app built its own from
+         * all 32. The streams differed, so the master XORed the password
+         * with the wrong bytes and stored garbage -- and because the
+         * request's proof covers the *wrapped* bytes and not the
+         * plaintext, it verified perfectly. Recovery reported success,
+         * logged success, and set a password nobody could type. Same
+         * 16-byte-window bug as the BLE control proof in 11.28.
+         *
+         * Cross-check vector, so either side can be checked by hand:
+         *   rkey      000102030405060708090a0b0c0d0e0f
+         *   nonce     0102030405060708
+         *   password  "password"
+         *   wrapped   8cdbb8df65e1fe0a
+         * Keying on the first 16 bytes instead gives 9a47809133f28326,
+         * which is what this produced before. */
+        hmac_sha256_k(key, 32, ctr, sizeof(ctr), ks);
         for (uint16_t k = 0; k < 32 && off + k < n; k++)
             buf[off + k] ^= ks[k];
     }
