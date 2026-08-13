@@ -62,7 +62,15 @@ class BleControlClient {
   int _counter = 0;
 
   static const _connectTimeout = Duration(seconds: 12);
-  static const _requestTimeout = Duration(seconds: 6);
+
+  /// A command is one write and one notify over a link that is already up,
+  /// so six seconds was never a plausible success — it was only ever how
+  /// long a *lost* reply would block everything queued behind it. Commands
+  /// are serialised, so that stall is paid by every tap that follows.
+  ///
+  /// Three still leaves generous room for a multi-chunk reply on a busy
+  /// link, while halving the damage when one goes missing.
+  static const _requestTimeout = Duration(seconds: 3);
 
   int _maxPayload = 18; // safe default until MTU negotiated
   StreamSubscription<ConnectionStateUpdate>? _conn;
@@ -194,7 +202,17 @@ class BleControlClient {
     Map<String, Object?> Function(BleProof proof) build,
   ) {
     final completer = Completer<Map<String, Object?>>();
+    // Stamped before the queue, not after. A command can sit here behind
+    // one that is waiting out its timeout, and that wait is invisible from
+    // inside _doRequest — which times from the first write and so reports
+    // a fast command that the user watched take seconds. If the master's
+    // log shows nothing arriving, this is where the time went.
+    final queuedAt = DateTime.now();
     _lock = _lock.then((_) async {
+      final waited = DateTime.now().difference(queuedAt);
+      if (waited > const Duration(milliseconds: 200)) {
+        log.w('ble command queued ${waited.inMilliseconds}ms behind another');
+      }
       try {
         completer.complete(await _requestWithRetry(build));
       } on Object catch (e, st) {
