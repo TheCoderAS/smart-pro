@@ -22,7 +22,8 @@ void main() {
     // The whole point: someone reaching for their phone in the dark sees
     // the house immediately instead of a spinner.
     final first = ProviderContainer();
-    await first.read(snapshotCacheProvider.notifier).save(snap);
+    first.read(snapshotCacheProvider.notifier).save(snap);
+    await first.read(snapshotCacheProvider.notifier).flush();
     first.dispose();
 
     final next = ProviderContainer();
@@ -41,8 +42,8 @@ void main() {
     addTearDown(c.dispose);
     final cache = c.read(snapshotCacheProvider.notifier);
 
-    await cache.save(snap);
-    await cache.save(
+    cache.save(snap);
+    cache.save(
       const StateSnapshot(masterName: 'Hallway', selfUid: 'AAAA1111'),
     );
 
@@ -53,7 +54,8 @@ void main() {
     // Otherwise the next launch paints someone else's home.
     final c = ProviderContainer();
     addTearDown(c.dispose);
-    await c.read(snapshotCacheProvider.notifier).save(snap);
+    c.read(snapshotCacheProvider.notifier).save(snap);
+    await c.read(snapshotCacheProvider.notifier).flush();
     await c.read(snapshotCacheProvider.notifier).clear();
 
     expect(c.read(snapshotCacheProvider), isNull);
@@ -77,7 +79,8 @@ void main() {
     // stores the same document the master sends.
     final c = ProviderContainer();
     addTearDown(c.dispose);
-    await c.read(snapshotCacheProvider.notifier).save(snap);
+    c.read(snapshotCacheProvider.notifier).save(snap);
+    await c.read(snapshotCacheProvider.notifier).flush();
 
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(SnapshotCacheNotifier.key)!;

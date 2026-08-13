@@ -230,20 +230,34 @@ class BleControlClient {
     final pending = Completer<Map<String, Object?>>();
     _pending = pending;
     final chunks = BleFraming.encodeJson(command, maxPayloadBytes: _maxPayload);
+    // Timed in three parts so a slow command can be attributed rather than
+    // guessed at: how long the writes took, how long the master took to
+    // answer, and how many chunks the MTU forced us into. Debug builds keep
+    // these; release strips them.
+    final started = DateTime.now();
     for (final chunk in chunks) {
       await _ble.writeCharacteristicWithResponse(
         _char(BleControlUuids.controlRequest),
         value: chunk,
       );
     }
+    final written = DateTime.now();
     final Map<String, Object?> reply;
     try {
       reply = await pending.future.timeout(_requestTimeout);
     } on TimeoutException {
+      log.w('ble ${command['c']}: no reply in ${_requestTimeout.inSeconds}s '
+          '(${chunks.length} chunks, payload $_maxPayload)');
       throw const BleTimeout();
     } finally {
       _pending = null;
     }
+    final done = DateTime.now();
+    log.d('ble ${command['c']}: '
+        'write ${written.difference(started).inMilliseconds}ms, '
+        'reply ${done.difference(written).inMilliseconds}ms, '
+        'total ${done.difference(started).inMilliseconds}ms '
+        '(${chunks.length} chunk(s), payload $_maxPayload)');
     final err = reply['err'];
     if (err != null) throw BleCommandError(err.toString());
     return reply;
