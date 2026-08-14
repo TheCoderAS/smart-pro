@@ -2,8 +2,10 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../app/l10n/app_localizations.dart';
+import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/secure_store.dart';
@@ -163,6 +165,18 @@ class SettingsScreen extends ConsumerWidget {
           const Divider(),
           const _SectionHeader('Readiness'),
           const _StayAliveTile(),
+          ListTile(
+            leading: const Icon(Icons.receipt_long_outlined),
+            title: const Text('Logs'),
+            subtitle: const Text(
+              'What the app has been doing, with a copy button. Useful when '
+              'something misbehaves and the detail is worth sending on. '
+              'Kept in memory only — it never leaves the phone and clears '
+              'when the app stops.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push(Routes.logs),
+          ),
           const Divider(),
           const _SectionHeader('Sharing'),
           const ListTile(

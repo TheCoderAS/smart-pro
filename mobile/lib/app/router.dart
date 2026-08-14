@@ -8,6 +8,7 @@ import '../features/firmware/presentation/firmware_screen.dart';
 import '../features/mesh/presentation/mesh_screen.dart';
 import '../features/onboarding/presentation/add_master_screen.dart';
 import '../features/recovery/presentation/recovery_screen.dart';
+import '../features/settings/presentation/logs_screen.dart';
 import '../features/settings/presentation/settings_screen.dart';
 import '../features/switches/presentation/reorder_screen.dart';
 
@@ -23,6 +24,7 @@ abstract final class Routes {
   static const mesh = '/mesh';
   static const firmware = '/firmware';
   static const settings = '/settings';
+  static const logs = '/settings/logs';
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -64,6 +66,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.settings,
         builder: (context, state) => const SettingsScreen(),
+      ),
+      GoRoute(
+        path: Routes.logs,
+        builder: (context, state) => const LogsScreen(),
       ),
     ],
   );
