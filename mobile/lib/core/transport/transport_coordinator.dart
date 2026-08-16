@@ -27,8 +27,9 @@ enum TransportChoice {
 final transportCoordinatorProvider =
     Provider<TransportCoordinator>(TransportCoordinator.new);
 
-/// Reconciles the user's transport preference with actual reachability,
-/// then drives `currentTransportProvider` and the BLE session.
+/// Reconciles the transport preference with actual reachability, then
+/// drives `currentTransportProvider` and the BLE session. One device per
+/// app — standalone or mesh — so there is exactly one preference.
 ///
 /// - **auto:** Wi-Fi when the master answers on the LAN, else BLE.
 /// - **wifi:** force Wi-Fi (BLE session torn down).
@@ -40,49 +41,10 @@ class TransportCoordinator {
 
   final Ref _ref;
 
-  /// Serialises reconciles. Two can be in flight on a cold start — one
-  /// from app start, one when the session resolves — and they must not
-  /// race each other into opposite transports. Each runs in turn and
-  /// re-reads the world, so the last one wins on current facts.
+  /// Serialises background reconciles. Two can be in flight on a cold
+  /// start — one from app start, one when the session resolves — and they
+  /// must not race each other into opposite transports.
   Future<void> _queue = Future<void>.value();
-
-  /// Decide and apply the transport. Call at app start, on dashboard
-  /// entry, on a preference change, or when the user taps the switch in
-  /// the status pill.
-  Future<void> reconcile() {
-    final next = _queue.then((_) => _reconcile());
-    _queue = next.then((_) {}, onError: (_) {});
-    return next;
-  }
-
-  /// The preference in force: the active master's own choice when it has
-  /// one, else the global setting.
-  ///
-  /// Each master keeps its own mode — Bluetooth for the box in the shed,
-  /// Wi-Fi for the hall — so "the" preference only means anything relative
-  /// to which master the app is pointed at. The per-master field existed
-  /// in the registry from the start; nothing ever read it, so every master
-  /// was driven by whatever mode the last one had been set to.
-  Future<TransportPreference> effectivePreference() async {
-    // Await the persisted global first so a just-logged-in dashboard
-    // doesn't race the async restore and read the default `auto`.
-    final global = await _ref.read(transportPreferenceProvider.notifier)
-        .ensureLoaded();
-    try {
-      final masters = await _ref.read(masterRegistryProvider.future);
-      if (masters.isEmpty) return global;
-      final lastUid =
-          await _ref.read(masterRegistryProvider.notifier).lastUsed();
-      final m = masters.firstWhere(
-        (x) => x.uid == lastUid,
-        orElse: () => masters.first,
-      );
-      return m.preferredTransport ?? global;
-    } on Object catch (e) {
-      log.w('per-master preference lookup failed: $e');
-      return global;
-    }
-  }
 
   /// Bumped by every explicit user choice. A background pass captures the
   /// epoch when it starts and goes quiet the moment it is stale, so a
@@ -90,13 +52,23 @@ class TransportCoordinator {
   /// selected after it began. The user's action beats everything.
   int _epoch = 0;
 
+  /// Decide and apply the transport. Call at app start, on dashboard
+  /// entry, or when the session settles.
+  Future<void> reconcile() {
+    final next = _queue.then((_) => _reconcile());
+    _queue = next.then((_) {}, onError: (_) {});
+    return next;
+  }
+
+  /// The transport preference, awaited so a just-logged-in dashboard
+  /// doesn't race the async restore and read the default.
+  Future<TransportPreference> effectivePreference() =>
+      _ref.read(transportPreferenceProvider.notifier).ensureLoaded();
+
   Future<void> _reconcile() async {
     final epoch = _epoch;
     final pref = await effectivePreference();
     if (epoch != _epoch) return;
-    // Keep the Settings radio honest about which master's choice it is
-    // showing, without persisting anything.
-    _ref.read(transportPreferenceProvider.notifier).reflect(pref);
     await _apply(pref, epoch);
   }
 
@@ -196,90 +168,39 @@ class TransportCoordinator {
     return TransportChoice.ok;
   }
 
-  /// Explicit user choice from the status pill or Settings.
+  /// Explicit user choice from Settings.
   ///
   /// For Bluetooth, both gates run **before** the preference is
   /// persisted or the transport flipped — a refusal returns the reason
   /// and leaves the user exactly where they were (Epic 5).
+  ///
+  /// Applied DIRECTLY, not through the queue: the user's tap must never
+  /// wait behind a background pass, and bumping the epoch first makes
+  /// every queued or in-flight pass stale, so nothing that started before
+  /// the tap can override it afterwards.
   Future<TransportChoice> choose(TransportPreference pref) async {
     if (pref == TransportPreference.bluetooth) {
       final gate = await canUseBle();
       if (gate != TransportChoice.ok) return gate;
     }
-    // The choice belongs to the master it was made for. Writing it
-    // globally meant setting Bluetooth for the shed silently flipped the
-    // hall to Bluetooth too. The global setting remains the default for
-    // masters with no choice of their own, and the only place to store
-    // one before anything is registered.
-    final uid = await _activeUid();
-    if (uid != null) {
-      await _ref
-          .read(masterRegistryProvider.notifier)
-          .setPreferredMode(uid, pref.name);
-      _ref.read(transportPreferenceProvider.notifier).reflect(pref);
-    } else {
-      await _ref.read(transportPreferenceProvider.notifier).set(pref);
-    }
-    // Applied DIRECTLY, not through the queue. The user's tap used to
-    // wait behind whatever background pass was already in line — and a
-    // wedged pass held it hostage: the choice was recorded, the radio
-    // showed it, and the transport never actually switched. Bumping the
-    // epoch first makes every queued or in-flight pass stale, so nothing
-    // that started before this tap can override it afterwards.
+    await _ref.read(transportPreferenceProvider.notifier).set(pref);
     _epoch++;
     await _apply(pref, _epoch);
     return TransportChoice.ok;
   }
 
-  /// Re-settle the transport for the current master immediately, jumping
-  /// the background queue — for user actions like switching masters,
-  /// where waiting behind a stale pass is never acceptable.
-  Future<void> applyNow() async {
-    _epoch++;
-    final epoch = _epoch;
-    final pref = await effectivePreference();
-    if (epoch != _epoch) return;
-    _ref.read(transportPreferenceProvider.notifier).reflect(pref);
-    await _apply(pref, epoch);
-  }
-
-  /// The uid of the master the app is pointed at, or null when nothing
-  /// is registered yet.
-  Future<String?> _activeUid() async {
-    try {
-      final masters = await _ref.read(masterRegistryProvider.future);
-      if (masters.isEmpty) return null;
-      final lastUid =
-          await _ref.read(masterRegistryProvider.notifier).lastUsed();
-      return masters
-          .firstWhere((m) => m.uid == lastUid, orElse: () => masters.first)
-          .uid;
-    } on Object catch (_) {
-      return null;
-    }
-  }
-
-  /// The master the app is pointed at: uid, and its mesh when it has one.
+  /// The paired device: its uid, and its mesh when it is one. Null when
+  /// nothing is registered yet.
   ///
-  /// This used to return "the mesh id of the first registered master that
-  /// has one", which quietly made a second master unreachable. Add a
-  /// standalone master alongside a meshed one and the scan stayed filtered
-  /// to the mesh — a standalone beacon carries mesh id 0, so it was
-  /// discarded before anything tried to connect, and the master never saw
-  /// a connection attempt at all. The app just said "Reconnecting" for
-  /// ever, whichever of the two was selected.
+  /// A mesh id of 0 or null means standalone, and standalone must not
+  /// filter the scan — the uid ranking and the post-connect identity
+  /// check are what keep a neighbour's master out.
   Future<({String uid, int? meshId})?> _bleTarget() async {
     try {
       // Awaited, not `.value`: at app start the registry has not loaded.
       final masters = await _ref.read(masterRegistryProvider.future);
       if (masters.isEmpty) return null;
-      final lastUid =
-          await _ref.read(masterRegistryProvider.notifier).lastUsed();
-      final m = masters.firstWhere(
-        (x) => x.uid == lastUid,
-        orElse: () => masters.first,
-      );
-      // 0 and null both mean standalone, and standalone must not filter.
+      final m = masters.first;
       final mesh = (m.meshId != null && m.meshId != 0) ? m.meshId : null;
       return (uid: m.uid, meshId: mesh);
     } on Object catch (e) {

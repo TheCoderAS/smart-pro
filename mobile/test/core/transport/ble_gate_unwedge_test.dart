@@ -6,6 +6,7 @@ import 'package:flutter_reactive_ble/flutter_reactive_ble.dart'
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/core/ble/advert.dart';
 import 'package:unisync/core/ble/ble_scanner.dart';
 import 'package:unisync/core/transport/ble_session.dart';
@@ -17,19 +18,16 @@ class MockScanner extends Mock implements BleScanner {}
 /// which Android's BLE stack is known to produce right after a
 /// supervision-timeout disconnect — wedged the gate forever. The master,
 /// back in range and advertising, never saw one connection attempt.
-///
-/// These tests drive the gates with a scanner that never returns and
-/// assert the cap releases them.
 void main() {
   setUpAll(() {
     registerFallbackValue(Duration.zero);
     registerFallbackValue(ScanMode.balanced);
   });
 
-  test('a scan that never completes releases the gate for the next one',
-      () {
+  test('a scan that never completes is abandoned and retried', () {
     fakeAsync((async) {
       TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
       final scanner = MockScanner();
       var calls = 0;
       when(() => scanner.collect(
@@ -44,24 +42,25 @@ void main() {
       final c = ProviderContainer(overrides: [
         bleScannerProvider.overrideWithValue(scanner),
       ]);
-      addTearDown(c.dispose);
-      final session = c.read(bleSessionProvider.notifier);
+      var activated = false;
+      c
+          .read(bleSessionProvider.notifier)
+          .activate()
+          .then((_) => activated = true);
 
-      bool? first;
-      bool? second;
-      session.canSee(uid: 'AAAA1111').then((v) => first = v);
-      session.canSee(uid: 'BBBB2222').then((v) => second = v);
-
-      // Within the cap: the wedged first probe blocks the second.
+      // Inside the cap: the hung scan still holds things up.
       async.elapse(const Duration(seconds: 5));
-      expect(second, isNull);
+      expect(activated, isFalse);
 
-      // Past the cap: the first is abandoned (false, not an error), the
-      // gate advances, and the second completes on its own merits.
+      // Past the cap (window 4s + 10s grace): abandoned, activate
+      // completes, and the retry loop's next scan actually ran — the
+      // gate was released, not wedged forever.
       async.elapse(const Duration(seconds: 30));
-      expect(first, isFalse);
-      expect(second, isFalse);
-      expect(calls, 2, reason: 'the second scan actually ran');
+      expect(activated, isTrue);
+      expect(calls, greaterThanOrEqualTo(2),
+          reason: 'a later scan ran behind the abandoned one');
+      c.dispose();
+      async.flushTimers(flushPeriodicTimers: false);
     });
   });
 

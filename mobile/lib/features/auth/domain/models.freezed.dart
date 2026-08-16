@@ -19,10 +19,9 @@ mixin _$DeviceInfo {
 /// report, not the phone's OS. Instruction copy ("connect to X") comes
 /// from here, so it self-heals after a rename and needs no location
 /// permission to read.
- String get ssid;/// True when this master is in a mesh. Meshed masters are one home and
-/// one switcher entry, never several.
+ String get ssid;/// True when this master is in a mesh. Meshed masters are one home.
  bool get mesh;/// Stable mesh identity. The mesh name is user-changeable, so the
-/// switcher keys on this instead.
+/// the app keys on this instead.
 @JsonKey(name: 'mesh_id') int get meshId;
 /// Create a copy of DeviceInfo
 /// with the given fields replaced by the non-null parameter values.
@@ -237,11 +236,10 @@ class _DeviceInfo implements DeviceInfo {
 /// from here, so it self-heals after a rename and needs no location
 /// permission to read.
 @override@JsonKey() final  String ssid;
-/// True when this master is in a mesh. Meshed masters are one home and
-/// one switcher entry, never several.
+/// True when this master is in a mesh. Meshed masters are one home.
 @override@JsonKey() final  bool mesh;
 /// Stable mesh identity. The mesh name is user-changeable, so the
-/// switcher keys on this instead.
+/// the app keys on this instead.
 @override@JsonKey(name: 'mesh_id') final  int meshId;
 
 /// Create a copy of DeviceInfo

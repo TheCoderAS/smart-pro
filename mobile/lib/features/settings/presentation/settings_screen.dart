@@ -72,16 +72,6 @@ class SettingsScreen extends ConsumerWidget {
           ),
           const Divider(),
           const _SectionHeader('Connection'),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-            child: Text(
-              'Each switch remembers its own choice — this one applies to '
-              'the switch you are on now.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-            ),
-          ),
           RadioGroup<TransportPreference>(
             groupValue: transportPref,
             onChanged: (pref) async {

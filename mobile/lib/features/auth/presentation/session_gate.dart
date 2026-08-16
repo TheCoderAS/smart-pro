@@ -12,7 +12,6 @@ import '../../../core/ws/snapshot_cache.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
 import '../../onboarding/presentation/welcome_screen.dart';
-import '../../settings/presentation/master_switcher.dart';
 import '../application/session.dart';
 import 'login_screen.dart';
 
@@ -96,12 +95,10 @@ class _WrongNetworkScreen extends ConsumerWidget {
                 const SizedBox(height: 24),
                 FilledButton.icon(
                   onPressed: () =>
-                      ref.read(sessionProvider.notifier).switchTo(wanted),
+                      ref.read(sessionProvider.notifier).rejoinHome(),
                   icon: const Icon(Icons.wifi),
                   label: Text('Connect to $network'),
                 ),
-                const SizedBox(height: 8),
-                const MasterSwitcherButton(),
               ],
             ),
           ),
@@ -170,10 +167,6 @@ class _AccessResetScreen extends ConsumerWidget {
                   icon: const Icon(Icons.wifi_rounded),
                   label: Text(l10n.joinWifi),
                 ),
-                const SizedBox(height: 8),
-                // Locked out of this master is not locked out of the
-                // others.
-                const MasterSwitcherButton(),
               ],
             ),
           ),
@@ -226,12 +219,6 @@ class _UnreachableScreen extends ConsumerWidget {
                   icon: const Icon(Icons.refresh),
                   label: Text(l10n.tryAgain),
                 ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: () => context.push(Routes.addMaster),
-                  icon: const Icon(Icons.add),
-                  label: Text(l10n.addASwitch),
-                ),
                 if (hasPairedMaster) ...[
                   const SizedBox(height: 8),
                   // Control the master over Bluetooth without joining its
@@ -264,7 +251,6 @@ class _UnreachableScreen extends ConsumerWidget {
                   icon: const Icon(Icons.bluetooth_searching),
                   label: Text(l10n.forgotPasswordRecover),
                 ),
-                const MasterSwitcherButton(),
               ],
             ),
           ),

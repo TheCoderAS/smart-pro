@@ -487,34 +487,6 @@ class BleSessionController extends Notifier<BleSessionState> {
     _emit(StateSnapshot.fromJson(map));
   }
 
-  /// A short look for a specific master, without disturbing whatever link
-  /// is currently up.
-  ///
-  /// This is what lets a switch between masters fail *before* anything is
-  /// torn down: probe first, commit only on sight. Serialised through the
-  /// same gate as every other scan.
-  Future<bool> canSee({required String uid, int? meshId}) {
-    final mesh = (meshId != null && meshId != 0) ? meshId : null;
-    final result = _scanGate
-        .then((_) => ref.read(bleScannerProvider).collect(
-              meshId: mesh,
-              window: const Duration(seconds: 3),
-              mode: ScanMode.balanced,
-            ))
-        .timeout(const Duration(seconds: 3) + scanOpGrace);
-    _scanGate = result.then((_) {}, onError: (_) {});
-    final want = 'U${uid.toUpperCase()}';
-    return result.then((beacons) {
-      // Any member of the target's mesh counts: they are one home, and
-      // the token works on all of them.
-      return beacons.any((b) =>
-          b.name.toUpperCase() == want || (mesh != null && b.meshId == mesh));
-    }).catchError((Object e) {
-      log.w('probe for $uid failed: $e');
-      return false;
-    });
-  }
-
   /// Whether [uid] is a master this app is actually set up with.
   ///
   /// A peer of a mesh we are paired with counts: roaming between masters
@@ -553,9 +525,6 @@ class BleSessionController extends Notifier<BleSessionState> {
               name: m.name,
               ssid: m.ssid,
               meshId: beacon.meshId,
-              // Learning the mesh id must not wipe the user's transport
-              // choice for this master.
-              preferredMode: m.preferredMode,
             ),
           );
           break;

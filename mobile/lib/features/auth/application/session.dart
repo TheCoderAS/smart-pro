@@ -9,12 +9,10 @@ import '../../../core/logging/log.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/saved_session.dart';
 import '../../../core/storage/secure_store.dart';
-import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
-import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/wifi/wifi_service.dart';
 import '../../onboarding/application/first_run.dart';
-import '../../settings/application/master_switch.dart';
 import '../data/auth_repository.dart';
 import '../domain/models.dart';
 
@@ -96,10 +94,6 @@ final class Authenticated extends SessionState {
   final bool mesh;
 }
 
-/// What became of an attempt to switch masters. Anything but [arrived]
-/// means the current session was left exactly as it was.
-enum SwitchAttempt { arrived, unreachable, wrongNetwork, needsWifiLogin }
-
 final sessionProvider =
     AsyncNotifierProvider<SessionNotifier, SessionState>(SessionNotifier.new);
 
@@ -167,15 +161,10 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       return NeedsCommissioning(info);
     }
 
-    // The app opens on the last-used master, subject to the same checks as
-    // any switch. Something else answering means the phone is on another
-    // master's network — say which one to join rather than quietly opening
-    // a dashboard the user didn't ask for.
-    //
-    // Ahead of the token check on purpose: we have no session for a master
-    // we aren't talking to, and showing a login form for that would be the
-    // exact mix-up the story calls a bug. Only when more than one master
-    // is set up; with one, whoever answers is the one.
+    // One home per app: whoever answered must be it. Ahead of the token
+    // check on purpose -- we have no session for a stranger, and showing
+    // a login form for one would be the exact mix-up the story calls a
+    // bug.
     final wrong = await _wrongMasterAnswered(info.uid);
     if (wrong != null) return wrong;
 
@@ -212,31 +201,22 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     return NeedsLogin(info);
   }
 
-  /// [WrongNetwork] when a master answered that isn't the one the app was
-  /// last on, or null to carry on with whoever did answer.
+  /// [WrongNetwork] when whoever answered 192.168.4.1 is not the home
+  /// this app is paired with, or null to carry on.
+  ///
+  /// One home per app. An unknown master answering means the phone joined
+  /// a different Unisync network -- a neighbour's, or a fresh board.
+  /// "Join your own network" is actionable; a login form for a stranger's
+  /// switch is the mix-up the story calls a bug. Mesh members are the
+  /// same home and are all registered, so uid membership is the test.
   Future<WrongNetwork?> _wrongMasterAnswered(String answeredUid) async {
     try {
       final masters = await ref.read(masterRegistryProvider.future);
-      if (masters.length < 2) return null;
-      final lastUid =
-          await ref.read(masterRegistryProvider.notifier).lastUsed();
-      if (lastUid == null || lastUid == answeredUid) return null;
-      for (final m in masters) {
-        if (m.uid != lastUid) continue;
-        // Meshed masters are one home: any member answering is the right
-        // answer, and the vault keys them on a shared mesh id.
-        final answered = masters.where((x) => x.uid == answeredUid);
-        if (answered.isNotEmpty &&
-            m.meshId != null &&
-            m.meshId != 0 &&
-            answered.first.meshId == m.meshId) {
-          return null;
-        }
-        final name = answered.isEmpty ? null : answered.first.name;
-        return WrongNetwork(wanted: m, found: name);
-      }
+      if (masters.isEmpty) return null; // nothing paired yet: adopt
+      if (masters.any((m) => m.uid == answeredUid)) return null;
+      return WrongNetwork(wanted: masters.first);
     } on Object catch (e) {
-      log.w('last-used check skipped: $e');
+      log.w('home check skipped: $e');
     }
     return null;
   }
@@ -302,19 +282,11 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     final cand = await ref.read(savedSessionProvider).read();
     if (cand == null) return null;
     ref.read(tokenProvider.notifier).set(cand.token);
-    // This master is being driven over Bluetooth — record that on the
-    // master itself, not globally: the global write used to flip every
-    // other master's cold start to Bluetooth as a side effect.
+    // One device per app, one preference: driving it over Bluetooth is
+    // the preference from here on.
     await ref
-        .read(masterRegistryProvider.notifier)
-        .setPreferredMode(cand.uid, TransportPreference.bluetooth.name);
-    // Awaited so the notifier's async restore settles now rather than
-    // firing later against a torn-down scope; reflect() itself stores
-    // nothing.
-    await ref.read(transportPreferenceProvider.notifier).ensureLoaded();
-    ref
         .read(transportPreferenceProvider.notifier)
-        .reflect(TransportPreference.bluetooth);
+        .set(TransportPreference.bluetooth);
     // The live transport too, not only the preference. Otherwise the
     // Wi-Fi socket sees a token appear while the transport still reads as
     // its default and opens a connection to a LAN we are not on.
@@ -328,24 +300,6 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   }
 
   Future<bool> _blePreferred() async {
-    // The master the app will open on decides — its own preference first,
-    // the global one as fallback. Reading only the global here meant a
-    // Bluetooth choice made for one master dictated the cold start for
-    // every other.
-    try {
-      final masters = await ref.read(masterRegistryProvider.future);
-      if (masters.isNotEmpty) {
-        final lastUid =
-            await ref.read(masterRegistryProvider.notifier).lastUsed();
-        final m = masters.firstWhere(
-          (x) => x.uid == lastUid,
-          orElse: () => masters.first,
-        );
-        return (await _prefFor(m)) == TransportPreference.bluetooth;
-      }
-    } on Object catch (e) {
-      log.w('per-master pref lookup skipped: $e');
-    }
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(TransportPreferenceNotifier.key) ==
         TransportPreference.bluetooth.name;
@@ -383,7 +337,7 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     // hang a login form on — signing out of one used to conjure a sign-in
     // screen for a master that might not even be powered. Re-bootstrap
     // and land wherever the probe says we are: a real login form if its
-    // network answers, the unreachable screen (with the switcher) if not.
+    // network answers, the unreachable screen if not.
     if (_isPlaceholder(current.info)) {
       state = const AsyncValue.loading();
       state = await AsyncValue.guard(_bootstrap);
@@ -399,103 +353,24 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     state = await AsyncValue.guard(_bootstrap);
   }
 
-  /// Switches the app to another saved master, using **that master's**
-  /// transport preference and token.
-  ///
-  /// Probe first, commit second. The old flow tore the session down into
-  /// a loading state before it knew whether the target was reachable, so
-  /// a failed switch stranded the user on a disconnected screen when the
-  /// master they came from was still working. Now nothing about the
-  /// current session changes until the target has actually been seen —
-  /// last-used, the token, the transport and the UI all move together, or
-  /// not at all.
-  Future<SwitchAttempt> switchTo(SavedMaster target) async {
-    final previous = state;
-    final pref = await _prefFor(target);
-
-    // Bluetooth-preferred target: there is no network to join and no HTTP
-    // probe to make. Look for its beacon; the live link stays up while we
-    // look. Only a sighting commits the switch.
-    if (pref == TransportPreference.bluetooth) {
-      final token = await _tokenFor(target);
-      if (token == null) {
-        // Never signed into this one over Wi-Fi, so BLE cannot carry it.
-        return SwitchAttempt.needsWifiLogin;
+  /// Rejoin the paired home's network and re-probe -- the wrong-network
+  /// screen's one action. One home per app: there is nothing to choose,
+  /// there is only going back.
+  Future<void> rejoinHome() async {
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      final home = masters.isEmpty ? null : masters.first;
+      final ssid = home?.ssid;
+      if (home != null && ssid != null && ssid.isNotEmpty) {
+        final password = await _store.readPassword(home.uid);
+        if (password != null) {
+          await ref.read(wifiServiceProvider).join(ssid, password);
+        }
       }
-      final visible = await ref
-          .read(bleSessionProvider.notifier)
-          .canSee(uid: target.uid, meshId: target.meshId);
-      if (!visible) return SwitchAttempt.unreachable;
-
-      await ref.read(masterRegistryProvider.notifier).setLastUsed(target.uid);
-      ref.read(tokenProvider.notifier).set(token);
-      state = AsyncValue.data(Authenticated(
-        DeviceInfo(
-            uptime: 0, freeHeap: 0, uid: target.uid, fw: placeholderFw, auth: true),
-        mesh: false,
-      ));
-      // Retarget the radio immediately — a master switch is a user
-      // action and must not wait behind a queued background pass.
-      await ref.read(transportCoordinatorProvider).applyNow();
-      return SwitchAttempt.arrived;
+    } on Object catch (e) {
+      log.w('rejoin skipped: $e');
     }
-
-    // Wi-Fi (or auto): the probe is a network join, which genuinely can
-    // move the phone off the current master's AP — that much is inherent.
-    // What is not inherent is throwing the session state away first.
-    final outcome = await ref.read(masterSwitchProvider).switchTo(target);
-    switch (outcome) {
-      case SwitchArrived():
-        state = const AsyncValue.loading();
-        state = await AsyncValue.guard(() async {
-          final arrived = await _bootstrap();
-          if (arrived is Authenticated) {
-            await ref
-                .read(masterRegistryProvider.notifier)
-                .setLastUsed(target.uid);
-          }
-          return arrived;
-        });
-        return SwitchAttempt.arrived;
-      case SwitchWrongNetwork():
-        state = previous;
-        return SwitchAttempt.wrongNetwork;
-      case SwitchUnreachable():
-        state = previous;
-        // The failed join may have moved the phone's network; re-settle
-        // the link for the master we stayed on, ahead of the queue.
-        unawaited(ref.read(transportCoordinatorProvider).applyNow());
-        return SwitchAttempt.unreachable;
-    }
-  }
-
-  /// The transport preference for [m]: its own choice, else the global
-  /// fallback.
-  Future<TransportPreference> _prefFor(SavedMaster m) async {
-    final own = m.preferredTransport;
-    if (own != null) return own;
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(TransportPreferenceNotifier.key);
-    return TransportPreference.values.firstWhere(
-      (p) => p.name == saved,
-      orElse: () => TransportPreference.auto,
-    );
-  }
-
-  /// A token that works on [target]: its own, or any mesh-mate's — the
-  /// token is stateless and valid across a mesh (BLE spec §Auth).
-  Future<String?> _tokenFor(SavedMaster target) async {
-    final own = await _store.readToken(target.uid);
-    if (own != null) return own;
-    final mesh = target.meshId;
-    if (mesh == null || mesh == 0) return null;
-    final masters = await ref.read(masterRegistryProvider.future);
-    for (final m in masters) {
-      if (m.meshId != mesh || m.uid == target.uid) continue;
-      final t = await _store.readToken(m.uid);
-      if (t != null) return t;
-    }
-    return null;
+    await refresh();
   }
 
   /// The reconnect dance after any password change (API §6): the
