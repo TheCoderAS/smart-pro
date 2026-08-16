@@ -84,8 +84,34 @@ class BleSessionController extends Notifier<BleSessionState> {
   // rejected as an invalid proof.
   Future<void> _linkGate = Future<void>.value();
 
+  /// Hard cap on any one serialised link operation, and on a scan beyond
+  /// its own window.
+  ///
+  /// The gates had no timeout, and one hung plugin call wedged them for
+  /// good. Android's BLE stack is known to hang a scan-cancel, a connect
+  /// or a dispose right after a supervision-timeout disconnect — exactly
+  /// the out-of-range case — and when it did, every retry queued behind
+  /// the wedged operation forever. The app sat on "Reconnecting" for half
+  /// an hour while the master, back in range and advertising, logged not
+  /// one connection attempt.
+  static const linkOpCap = Duration(seconds: 30);
+  static const scanOpGrace = Duration(seconds: 10);
+
+  /// Bumped when a gated operation is abandoned. An abandoned attempt may
+  /// still complete much later; the epoch check stops it installing its
+  /// client or its verdict over whatever superseded it.
+  int _linkEpoch = 0;
+
   Future<void> _serialised(Future<void> Function() body) {
-    final next = _linkGate.then((_) => body());
+    final next = _linkGate.then((_) async {
+      try {
+        await body().timeout(linkOpCap);
+      } on TimeoutException {
+        _linkEpoch++;
+        log.w('ble link operation exceeded ${linkOpCap.inSeconds}s — '
+            'abandoning it and releasing the gate');
+      }
+    });
     _linkGate = next.then((_) {}, onError: (_) {});
     return next;
   }
@@ -138,10 +164,17 @@ class BleSessionController extends Notifier<BleSessionState> {
     log.d('ble retry in ${delay.inSeconds}s (attempt $_retryAttempt)');
     _retryTimer = Timer(delay, () async {
       if (!_active) return;
-      // Balanced, not lowLatency: this can run for a long time when the
-      // user is away from the house, and it is a background retry rather
-      // than something anyone is waiting on.
-      await _serialised(() => _connectNearest(mode: ScanMode.balanced));
+      try {
+        // Balanced, not lowLatency: this can run for a long time when the
+        // user is away from the house, and it is a background retry rather
+        // than something anyone is waiting on.
+        await _serialised(() => _connectNearest(mode: ScanMode.balanced));
+      } on Object catch (e) {
+        // A thrown attempt must not kill the loop — an uncaught error in
+        // a Timer callback would have ended retrying for good, silently.
+        log.w('ble retry attempt failed: $e');
+      }
+      if (!_active) return;
       if (state.status != BleSessionStatus.connected) _scheduleRetry();
     });
   }
@@ -156,9 +189,13 @@ class BleSessionController extends Notifier<BleSessionState> {
     Duration window = const Duration(seconds: 4),
     ScanMode mode = ScanMode.lowLatency,
   }) {
-    final result = _scanGate.then((_) => ref
-        .read(bleScannerProvider)
-        .collect(meshId: _meshId, window: window, mode: mode));
+    // The timeout is on the gated result, so a collect that never returns
+    // still releases the gate for the scans queued behind it.
+    final result = _scanGate
+        .then((_) => ref
+            .read(bleScannerProvider)
+            .collect(meshId: _meshId, window: window, mode: mode))
+        .timeout(window + scanOpGrace);
     _scanGate = result.then((_) {}, onError: (_) {});
     return result;
   }
@@ -222,7 +259,11 @@ class BleSessionController extends Notifier<BleSessionState> {
     // hasn't got one — it is what filters the scan to the user's own
     // system rather than every Unisync master in earshot.
     _meshId = meshId ?? _meshId;
-    await _serialised(_connectNearest);
+    try {
+      await _serialised(_connectNearest);
+    } on Object catch (e) {
+      log.w('ble activate attempt failed: $e');
+    }
     if (state.status != BleSessionStatus.connected) _scheduleRetry();
     _startRoamLoop();
   }
@@ -247,7 +288,11 @@ class BleSessionController extends Notifier<BleSessionState> {
     // An explicit ask, so start the backoff over: the user is standing
     // there waiting, not sitting in a background retry cycle.
     _cancelRetry();
-    await _serialised(_connectNearest);
+    try {
+      await _serialised(_connectNearest);
+    } on Object catch (e) {
+      log.w('ble reconnect attempt failed: $e');
+    }
     if (state.status != BleSessionStatus.connected) _scheduleRetry();
     _startRoamLoop();
   }
@@ -256,9 +301,13 @@ class BleSessionController extends Notifier<BleSessionState> {
     ScanMode mode = ScanMode.lowLatency,
   }) async {
     if (!_active) return;
+    // If this attempt is abandoned by the gate, its late state writes
+    // must not stomp whatever a fresh attempt has since established.
+    final epoch = _linkEpoch;
     state = state.copyWith(status: BleSessionStatus.scanning);
     try {
       final beacons = await _scan(mode: mode);
+      if (epoch != _linkEpoch) return;
       if (beacons.isEmpty) {
         state = const BleSessionState(
           status: BleSessionStatus.failed,
@@ -297,6 +346,7 @@ class BleSessionController extends Notifier<BleSessionState> {
       }
     } on Object catch (e) {
       log.w('ble connect failed: $e');
+      if (epoch != _linkEpoch) return;
       state = BleSessionState(
         status: BleSessionStatus.failed,
         error: 'Could not connect over Bluetooth.',
@@ -305,6 +355,7 @@ class BleSessionController extends Notifier<BleSessionState> {
   }
 
   Future<void> _openClient(String deviceId, String name) async {
+    final epoch = _linkEpoch;
     await _closeClient();
     // BLE carries no login (v5.1 Epic 5) — a Wi-Fi-issued token is
     // required before any command can be proved.
@@ -322,7 +373,21 @@ class BleSessionController extends Notifier<BleSessionState> {
       token,
       onDisconnected: _onLinkLost,
     );
-    await client.connect();
+    try {
+      await client.connect();
+    } on Object {
+      // A failed connect leaves the plugin still trying in the
+      // background; dropping the handle without disposing leaked a zombie
+      // connection the master could see but the app never used.
+      await _disposeQuietly(client);
+      rethrow;
+    }
+    if (epoch != _linkEpoch || !_active) {
+      // Abandoned while connecting — a superseded attempt must not
+      // install its client over the one that replaced it.
+      await _disposeQuietly(client);
+      return;
+    }
     _client = client;
     _connectedDeviceId = deviceId;
     _stateSub = client.stateStream.listen(_emit);
@@ -430,11 +495,13 @@ class BleSessionController extends Notifier<BleSessionState> {
   /// same gate as every other scan.
   Future<bool> canSee({required String uid, int? meshId}) {
     final mesh = (meshId != null && meshId != 0) ? meshId : null;
-    final result = _scanGate.then((_) => ref.read(bleScannerProvider).collect(
-          meshId: mesh,
-          window: const Duration(seconds: 3),
-          mode: ScanMode.balanced,
-        ));
+    final result = _scanGate
+        .then((_) => ref.read(bleScannerProvider).collect(
+              meshId: mesh,
+              window: const Duration(seconds: 3),
+              mode: ScanMode.balanced,
+            ))
+        .timeout(const Duration(seconds: 3) + scanOpGrace);
     _scanGate = result.then((_) {}, onError: (_) {});
     final want = 'U${uid.toUpperCase()}';
     return result.then((beacons) {
@@ -526,11 +593,28 @@ class BleSessionController extends Notifier<BleSessionState> {
   }
 
   Future<void> _closeClient() async {
-    await _stateSub?.cancel();
+    try {
+      await (_stateSub?.cancel() ?? Future<void>.value())
+          .timeout(const Duration(seconds: 2));
+    } on Object catch (e) {
+      log.w('state subscription cancel hung: $e');
+    }
     _stateSub = null;
-    await _client?.dispose();
+    final c = _client;
     _client = null;
     _connectedDeviceId = null;
+    if (c != null) await _disposeQuietly(c);
+  }
+
+  /// Dispose with a cap: the plugin's teardown can hang right after an
+  /// unclean disconnect, and a hung dispose inside the link gate is how
+  /// reconnecting wedged for half an hour.
+  Future<void> _disposeQuietly(BleControlClient c) async {
+    try {
+      await c.dispose().timeout(const Duration(seconds: 3));
+    } on Object catch (e) {
+      log.w('ble client dispose hung/failed: $e');
+    }
   }
 
   Future<void> _teardown() async {
