@@ -31,6 +31,40 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var joinCallback: ConnectivityManager.NetworkCallback? = null
 
+    /** The network the whole process is currently bound to, if any. */
+    private var boundNetwork: Network? = null
+    private var lossWatcher: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * Clears the process binding the moment the bound network dies.
+     *
+     * Nothing did this before, and it was the worst failure in the app:
+     * bindProcessToNetwork pins every socket in the process to one
+     * network, and when the master's AP vanished -- power cycle, out of
+     * range -- the binding stayed. Every request from then on failed with
+     * "Machine is not on the network" (errno 64), heartbeats and relay
+     * commands timing out forever, even after the phone was back on a
+     * perfectly good network. Recovery required killing the app.
+     */
+    private fun watchBoundNetwork(cm: ConnectivityManager) {
+        if (lossWatcher != null) return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onLost(network: Network) {
+                if (network == boundNetwork) {
+                    cm.bindProcessToNetwork(null)
+                    boundNetwork = null
+                }
+            }
+        }
+        cm.registerNetworkCallback(
+            NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build(),
+            cb,
+        )
+        lossWatcher = cb
+    }
+
     /**
      * Use the shared engine rather than building a throwaway one, so the
      * Dart isolate — and the Bluetooth link living inside it — survives
@@ -117,6 +151,8 @@ class MainActivity : FlutterActivity() {
                     // Route this app's traffic to the AP even though it
                     // has no internet (the forceWifiUsage replacement).
                     cm.bindProcessToNetwork(network)
+                    boundNetwork = network
+                    watchBoundNetwork(cm)
                     if (!answered) {
                         answered = true
                         runOnUiThread { result.success(true) }
@@ -179,8 +215,18 @@ class MainActivity : FlutterActivity() {
         for (n in networks) {
             val caps = cm.getNetworkCapabilities(n) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
-            return cm.bindProcessToNetwork(n)
+            val ok = cm.bindProcessToNetwork(n)
+            if (ok) {
+                boundNetwork = n
+                watchBoundNetwork(cm)
+            }
+            return ok
         }
+        // No Wi-Fi at all. Clear any stale binding rather than keeping the
+        // process pinned to a network that is gone -- a held corpse routes
+        // every socket to errno 64 until something lets go.
+        cm.bindProcessToNetwork(null)
+        boundNetwork = null
         return false
     }
 
@@ -242,6 +288,7 @@ class MainActivity : FlutterActivity() {
         }
         joinCallback = null
         cm.bindProcessToNetwork(null)
+        boundNetwork = null
     }
 
     private fun currentSsid(): String? {
