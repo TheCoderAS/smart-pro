@@ -96,14 +96,28 @@ class LinkMonitor extends Notifier<LinkState> {
       return;
     }
 
-    // Wi-Fi: a genuine round trip, short-fused. /api/info is the lightest
-    // authenticated read the master offers.
+    // Recently-proven links are not re-probed. Relay commands and state
+    // pushes both call markAlive, so while the user is actively driving
+    // switches the heartbeat adds nothing — except load on a one-request-
+    // at-a-time server that is already busy with the commands. The probe
+    // is for quiet links only.
+    final last = _lastGood;
+    if (last != null &&
+        DateTime.now().difference(last) < heartbeatEvery + grace) {
+      return;
+    }
+
+    // Wi-Fi: a genuine round trip. /api/info is the lightest
+    // authenticated read the master offers. The receive window is
+    // generous on purpose: aborting at two seconds threw away work the
+    // master was mid-way through — it still wrote the response, into a
+    // socket nobody was reading — and then counted the waste as a miss.
     try {
       final dio = ref.read(dioProvider);
       await dio.get<dynamic>(
         Api.info,
         options: Options(
-          receiveTimeout: const Duration(seconds: 2),
+          receiveTimeout: const Duration(seconds: 4),
           sendTimeout: const Duration(seconds: 2),
         ),
       );
