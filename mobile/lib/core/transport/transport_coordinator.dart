@@ -84,57 +84,72 @@ class TransportCoordinator {
     }
   }
 
+  /// Bumped by every explicit user choice. A background pass captures the
+  /// epoch when it starts and goes quiet the moment it is stale, so a
+  /// slow or wedged pass finishing late can never override what the user
+  /// selected after it began. The user's action beats everything.
+  int _epoch = 0;
+
   Future<void> _reconcile() async {
+    final epoch = _epoch;
     final pref = await effectivePreference();
+    if (epoch != _epoch) return;
     // Keep the Settings radio honest about which master's choice it is
     // showing, without persisting anything.
     _ref.read(transportPreferenceProvider.notifier).reflect(pref);
+    await _apply(pref, epoch);
+  }
+
+  Future<void> _apply(TransportPreference pref, int epoch) async {
     final wifi = _ref.read(wifiServiceProvider);
-
-    Future<void> useWifi() async {
-      _ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
-      await _ref.read(bleSessionProvider.notifier).deactivate();
-      // Pin this app's traffic to the master's network even when the user
-      // joined it from the phone's own settings — otherwise Android routes
-      // us back to mobile data and every request looks like dead hardware.
-      await wifi.bindToWifi();
-    }
-
-    Future<void> useBle() async {
-      // Never flip into BLE without a session and permission — the mode
-      // must not change unless it can actually work (Epic 5).
-      if (await canUseBle() != TransportChoice.ok) {
-        await useWifi();
-        return;
-      }
-      _ref.read(currentTransportProvider.notifier).set(TransportKind.ble);
-      // Bluetooth doesn't want the phone pinned to a network with no
-      // internet; give it its own routing back.
-      await wifi.release();
-      final target = await _bleTarget();
-      await _ref.read(bleSessionProvider.notifier).activate(
-            meshId: target?.meshId,
-            uid: target?.uid,
-          );
-    }
-
     try {
       switch (pref) {
         case TransportPreference.wifi:
-          await useWifi();
+          await _applyWifi(epoch);
         case TransportPreference.bluetooth:
-          await useBle();
+          await _applyBle(epoch);
         case TransportPreference.auto:
           final reachable = await wifi.masterReachable();
+          if (epoch != _epoch) return;
           if (reachable) {
-            await useWifi();
+            await _applyWifi(epoch);
           } else {
-            await useBle();
+            await _applyBle(epoch);
           }
       }
     } on Object catch (e) {
-      log.w('transport reconcile failed: $e');
+      log.w('transport apply failed: $e');
     }
+  }
+
+  Future<void> _applyWifi(int epoch) async {
+    if (epoch != _epoch) return;
+    _ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
+    await _ref.read(bleSessionProvider.notifier).deactivate();
+    // Pin this app's traffic to the master's network even when the user
+    // joined it from the phone's own settings — otherwise Android routes
+    // us back to mobile data and every request looks like dead hardware.
+    await _ref.read(wifiServiceProvider).bindToWifi();
+  }
+
+  Future<void> _applyBle(int epoch) async {
+    // Never flip into BLE without a session and permission — the mode
+    // must not change unless it can actually work (Epic 5).
+    if (await canUseBle() != TransportChoice.ok) {
+      await _applyWifi(epoch);
+      return;
+    }
+    if (epoch != _epoch) return;
+    _ref.read(currentTransportProvider.notifier).set(TransportKind.ble);
+    // Bluetooth doesn't want the phone pinned to a network with no
+    // internet; give it its own routing back.
+    await _ref.read(wifiServiceProvider).release();
+    final target = await _bleTarget();
+    if (epoch != _epoch) return;
+    await _ref.read(bleSessionProvider.notifier).activate(
+          meshId: target?.meshId,
+          uid: target?.uid,
+        );
   }
 
   /// Manual reconnect (the dashboard refresh). Over BLE, re-scan and
@@ -205,8 +220,27 @@ class TransportCoordinator {
     } else {
       await _ref.read(transportPreferenceProvider.notifier).set(pref);
     }
-    await reconcile();
+    // Applied DIRECTLY, not through the queue. The user's tap used to
+    // wait behind whatever background pass was already in line — and a
+    // wedged pass held it hostage: the choice was recorded, the radio
+    // showed it, and the transport never actually switched. Bumping the
+    // epoch first makes every queued or in-flight pass stale, so nothing
+    // that started before this tap can override it afterwards.
+    _epoch++;
+    await _apply(pref, _epoch);
     return TransportChoice.ok;
+  }
+
+  /// Re-settle the transport for the current master immediately, jumping
+  /// the background queue — for user actions like switching masters,
+  /// where waiting behind a stale pass is never acceptable.
+  Future<void> applyNow() async {
+    _epoch++;
+    final epoch = _epoch;
+    final pref = await effectivePreference();
+    if (epoch != _epoch) return;
+    _ref.read(transportPreferenceProvider.notifier).reflect(pref);
+    await _apply(pref, epoch);
   }
 
   /// The uid of the master the app is pointed at, or null when nothing
