@@ -12,6 +12,7 @@ import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/wifi/wifi_service.dart';
+import '../../../core/ws/snapshot_cache.dart';
 import '../../onboarding/application/first_run.dart';
 import '../data/auth_repository.dart';
 import '../domain/models.dart';
@@ -69,6 +70,14 @@ final class WrongNetwork extends SessionState {
 /// switch", which is what a first launch used to show.
 final class NeedsWelcome extends SessionState {
   const NeedsWelcome();
+}
+
+/// Nothing is paired and no master answers on the LAN: a fresh install
+/// (or a reinstall) with setup still to do. Renders the setup screen —
+/// never "can't reach your switch", which is an outage screen for a home
+/// that exists and offers nothing a first-time user can act on.
+final class NeedsSetup extends SessionState {
+  const NeedsSetup();
 }
 
 final class NeedsCommissioning extends SessionState {
@@ -133,6 +142,24 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       log.w('first-run check skipped: $e');
     }
 
+    // Nothing paired yet means this launch is a setup story, and it is
+    // decided with a 2-second TCP probe instead of the full HTTP timeout
+    // chain. The welcome button used to sit on a bare spinner for the
+    // whole timeout, only to land on a dead-end "can't reach your switch"
+    // with no way to set anything up.
+    List<SavedMaster> masters = const [];
+    try {
+      masters = await ref.read(masterRegistryProvider.future);
+    } on Object catch (e) {
+      log.w('registry read failed: $e');
+    }
+    if (masters.isEmpty &&
+        !await ref
+            .read(wifiServiceProvider)
+            .masterReachable(timeout: const Duration(milliseconds: 2500))) {
+      return const NeedsSetup();
+    }
+
     // The user asked for Bluetooth, so ask Bluetooth first. Probing the
     // LAN ahead of it meant waiting out an HTTP timeout on a network we
     // were never going to use — and when the phone *was* on the master's
@@ -152,7 +179,9 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       info = await _repo.info();
     } on Unreachable {
       // Off the master's Wi-Fi, and Bluetooth was either not preferred or
-      // had no saved token to use (handled above).
+      // had no saved token to use (handled above). With nothing paired
+      // there is nothing to reconnect to — that is setup, not an outage.
+      if (masters.isEmpty) return const NeedsSetup();
       return const MasterUnreachable();
     }
 
@@ -351,6 +380,26 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(_bootstrap);
+  }
+
+  /// "Set up a different switch": forgets the paired home entirely —
+  /// secrets, snapshot cache, registry — and re-probes, landing on the
+  /// setup screen. The switch itself is untouched. Without this, a home
+  /// whose master died for good could never be replaced: Settings lives
+  /// behind the dashboard, and the dashboard needs the master.
+  Future<void> forgetHome() async {
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      for (final m in masters) {
+        await _store.purgeMaster(m.uid);
+      }
+    } on Object catch (e) {
+      log.w('forgetHome purge skipped: $e');
+    }
+    ref.read(tokenProvider.notifier).set(null);
+    await ref.read(snapshotCacheProvider.notifier).clear();
+    await ref.read(masterRegistryProvider.notifier).clear();
+    await refresh();
   }
 
   /// Rejoin the paired home's network and re-probe -- the wrong-network

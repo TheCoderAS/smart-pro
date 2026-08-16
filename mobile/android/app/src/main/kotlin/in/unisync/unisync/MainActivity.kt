@@ -1,5 +1,7 @@
 package `in`.unisync.unisync
 
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
@@ -122,6 +124,10 @@ class MainActivity : FlutterActivity() {
                     result.success(openBatterySettings())
                 }
                 "bindToWifi" -> result.success(bindToCurrentWifi())
+                "isBluetoothOn" -> result.success(isBluetoothOn())
+                "requestEnableBluetooth" -> result.success(requestEnableBluetooth())
+                "isWifiOn" -> result.success(isWifiOn())
+                "requestEnableWifi" -> result.success(requestEnableWifi())
                 "release" -> {
                     releaseJoin()
                     result.success(true)
@@ -228,6 +234,52 @@ class MainActivity : FlutterActivity() {
         cm.bindProcessToNetwork(null)
         boundNetwork = null
         return false
+    }
+
+    private fun isBluetoothOn(): Boolean {
+        val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        return bm?.adapter?.isEnabled == true
+    }
+
+    /**
+     * The system "turn on Bluetooth?" dialog. Needs BLUETOOTH_CONNECT on
+     * API 31+ — the Dart side requests the permission batch first, and a
+     * refusal here just means no dialog, never a crash.
+     */
+    private fun requestEnableBluetooth(): Boolean {
+        return try {
+            startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun isWifiOn(): Boolean {
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        return wm.isWifiEnabled
+    }
+
+    /**
+     * API 29+ apps cannot flip Wi-Fi themselves; the Settings panel is the
+     * sanctioned prompt (slides up over the app, one tap to enable).
+     * Below 29 the app may still enable it directly.
+     */
+    private fun requestEnableWifi(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startActivity(Intent(Settings.Panel.ACTION_WIFI))
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    wm.isWifiEnabled = true
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** True when the system has already agreed not to doze us. */

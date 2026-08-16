@@ -6,9 +6,11 @@ import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/core/api/dio_client.dart';
 import 'package:unisync/core/api/failure.dart';
+import 'package:unisync/core/storage/master_registry.dart';
 import 'package:unisync/core/storage/secure_store.dart';
 import 'package:unisync/core/transport/control_transport.dart';
 import 'package:unisync/core/transport/transport_manager.dart';
+import 'package:unisync/core/wifi/wifi_service.dart';
 import 'package:unisync/features/auth/application/session.dart';
 import 'package:unisync/features/auth/data/auth_repository.dart';
 import 'package:unisync/features/auth/domain/models.dart';
@@ -16,6 +18,8 @@ import 'package:unisync/features/auth/domain/models.dart';
 class MockAuthRepository extends Mock implements AuthRepository {}
 
 class MockSecureStore extends Mock implements SecureStore {}
+
+class MockWifiService extends Mock implements WifiService {}
 
 const _info = DeviceInfo(
   uptime: 3812,
@@ -26,8 +30,11 @@ const _info = DeviceInfo(
 );
 
 void main() {
+  setUpAll(() => registerFallbackValue(Duration.zero));
+
   late MockAuthRepository repo;
   late MockSecureStore store;
+  late MockWifiService wifi;
 
   setUp(() {
     TestWidgetsFlutterBinding.ensureInitialized();
@@ -39,10 +46,15 @@ void main() {
     SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
     repo = MockAuthRepository();
     store = MockSecureStore();
+    wifi = MockWifiService();
     when(() => store.writeToken(any(), any())).thenAnswer((_) async {});
     when(() => store.deleteToken(any())).thenAnswer((_) async {});
     when(() => store.readToken(any())).thenAnswer((_) async => null);
     when(() => repo.logout()).thenAnswer((_) async {});
+    // The nothing-paired fast probe says "someone is there" by default,
+    // so bootstrap proceeds to the mocked HTTP flow under test.
+    when(() => wifi.masterReachable(timeout: any(named: 'timeout')))
+        .thenAnswer((_) async => true);
   });
 
   ProviderContainer makeContainer() {
@@ -50,6 +62,7 @@ void main() {
       overrides: [
         authRepositoryProvider.overrideWithValue(repo),
         secureStoreProvider.overrideWithValue(store),
+        wifiServiceProvider.overrideWithValue(wifi),
       ],
     );
     addTearDown(container.dispose);
@@ -60,11 +73,29 @@ void main() {
     return c.read(sessionProvider.future);
   }
 
-  test('unreachable master → MasterUnreachable', () async {
+  test('unreachable master with a paired home → MasterUnreachable', () async {
+    // A home exists, so this is an outage, not setup.
+    SharedPreferences.setMockInitialValues({
+      'firstrun.welcome': true,
+      'masters': '[{"uid":"C5F77720","name":"Hall"}]',
+    });
     when(() => repo.info()).thenThrow(const Unreachable());
     final c = makeContainer();
 
     expect(await bootstrap(c), isA<MasterUnreachable>());
+  });
+
+  test('nothing paired + nobody answering → NeedsSetup, decided by the '
+      'cheap probe (no HTTP timeout)', () async {
+    // The fresh-install dead end: "can't reach your switch" with no way
+    // to set one up, reached after sitting out the full HTTP timeout.
+    when(() => wifi.masterReachable(timeout: any(named: 'timeout')))
+        .thenAnswer((_) async => false);
+    when(() => repo.info()).thenThrow(const Unreachable());
+    final c = makeContainer();
+
+    expect(await bootstrap(c), isA<NeedsSetup>());
+    verifyNever(() => repo.info());
   });
 
   test('factory-fresh master (auth=false) → NeedsCommissioning', () async {
@@ -308,12 +339,36 @@ void main() {
     verifyNever(() => repo.info());
   });
 
-  test('welcome already seen → normal bootstrap', () async {
+  test('welcome seen, nothing paired, nobody answering → NeedsSetup',
+      () async {
+    // The reported reinstall flow: tap "set up my switch", land on a
+    // screen that can actually set one up — never the dead-end
+    // unreachable screen.
     SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
     when(() => repo.info()).thenThrow(const Unreachable());
     final c = makeContainer();
 
+    expect(await bootstrap(c), isA<NeedsSetup>());
+  });
+
+  test('forgetHome purges the paired home and lands on setup', () async {
+    SharedPreferences.setMockInitialValues({
+      'firstrun.welcome': true,
+      'masters': '[{"uid":"C5F77720","name":"Hall"}]',
+    });
+    when(() => store.purgeMaster(any())).thenAnswer((_) async {});
+    when(() => wifi.masterReachable(timeout: any(named: 'timeout')))
+        .thenAnswer((_) async => false);
+    when(() => repo.info()).thenThrow(const Unreachable());
+    final c = makeContainer();
     expect(await bootstrap(c), isA<MasterUnreachable>());
+
+    await c.read(sessionProvider.notifier).forgetHome();
+
+    expect(c.read(sessionProvider).value, isA<NeedsSetup>());
+    expect(await c.read(masterRegistryProvider.future), isEmpty);
+    expect(c.read(tokenProvider), isNull);
+    verify(() => store.purgeMaster('C5F77720')).called(1);
   });
 
   test('a stranger answering is a wrong network, not a login form',

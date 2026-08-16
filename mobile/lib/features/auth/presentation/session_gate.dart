@@ -10,6 +10,7 @@ import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/ws/snapshot_cache.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
+import '../../onboarding/presentation/add_master_screen.dart';
 import '../../onboarding/presentation/commissioning_screen.dart';
 import '../../onboarding/presentation/welcome_screen.dart';
 import '../application/session.dart';
@@ -34,6 +35,10 @@ class SessionGate extends ConsumerWidget {
       final NeedsLogin s => LoginScreen(state: s),
       final NeedsCommissioning s => CommissioningScreen(state: s),
       NeedsWelcome() => const WelcomeScreen(),
+      // Nothing paired and no master answering: setup, not an outage.
+      // The unreachable screen here was a dead end on a fresh install —
+      // no way to add anything, nothing to try again against.
+      NeedsSetup() => const AddMasterScreen(),
       final WrongNetwork s => _WrongNetworkScreen(state: s),
       MasterUnreachable() => const _UnreachableScreen(),
       // Still probing. If we have a house to show and a session to show it
@@ -251,11 +256,51 @@ class _UnreachableScreen extends ConsumerWidget {
                   icon: const Icon(Icons.bluetooth_searching),
                   label: Text(l10n.forgotPasswordRecover),
                 ),
+                // The escape hatch when the paired switch is gone for
+                // good (died, sold, moved out). Settings lives behind the
+                // dashboard and the dashboard needs the master — without
+                // this, a dead master bricks the app forever.
+                TextButton.icon(
+                  onPressed: () => _confirmSetupDifferent(context, ref),
+                  icon: const Icon(Icons.swap_horiz),
+                  label: const Text('Set up a different switch'),
+                ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _confirmSetupDifferent(
+    BuildContext context,
+    WidgetRef ref,
+  ) async {
+    final masters = ref.read(masterRegistryProvider).value ?? const [];
+    final name = masters.isEmpty ? 'this switch' : '"${masters.first.name}"';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Set up a different switch?'),
+        content: Text(
+          'This removes $name from the app, including its saved sign-in. '
+          'The switch itself is not changed, and you can add it back any '
+          'time with its network name and password.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Remove and set up new'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ref.read(sessionProvider.notifier).forgetHome();
   }
 }
