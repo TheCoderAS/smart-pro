@@ -55,11 +55,40 @@ class TransportCoordinator {
     return next;
   }
 
-  Future<void> _reconcile() async {
-    // Await the persisted preference so a just-logged-in dashboard
+  /// The preference in force: the active master's own choice when it has
+  /// one, else the global setting.
+  ///
+  /// Each master keeps its own mode — Bluetooth for the box in the shed,
+  /// Wi-Fi for the hall — so "the" preference only means anything relative
+  /// to which master the app is pointed at. The per-master field existed
+  /// in the registry from the start; nothing ever read it, so every master
+  /// was driven by whatever mode the last one had been set to.
+  Future<TransportPreference> effectivePreference() async {
+    // Await the persisted global first so a just-logged-in dashboard
     // doesn't race the async restore and read the default `auto`.
-    final pref = await _ref.read(transportPreferenceProvider.notifier)
+    final global = await _ref.read(transportPreferenceProvider.notifier)
         .ensureLoaded();
+    try {
+      final masters = await _ref.read(masterRegistryProvider.future);
+      if (masters.isEmpty) return global;
+      final lastUid =
+          await _ref.read(masterRegistryProvider.notifier).lastUsed();
+      final m = masters.firstWhere(
+        (x) => x.uid == lastUid,
+        orElse: () => masters.first,
+      );
+      return m.preferredTransport ?? global;
+    } on Object catch (e) {
+      log.w('per-master preference lookup failed: $e');
+      return global;
+    }
+  }
+
+  Future<void> _reconcile() async {
+    final pref = await effectivePreference();
+    // Keep the Settings radio honest about which master's choice it is
+    // showing, without persisting anything.
+    _ref.read(transportPreferenceProvider.notifier).reflect(pref);
     final wifi = _ref.read(wifiServiceProvider);
 
     Future<void> useWifi() async {
@@ -162,9 +191,38 @@ class TransportCoordinator {
       final gate = await canUseBle();
       if (gate != TransportChoice.ok) return gate;
     }
-    await _ref.read(transportPreferenceProvider.notifier).set(pref);
+    // The choice belongs to the master it was made for. Writing it
+    // globally meant setting Bluetooth for the shed silently flipped the
+    // hall to Bluetooth too. The global setting remains the default for
+    // masters with no choice of their own, and the only place to store
+    // one before anything is registered.
+    final uid = await _activeUid();
+    if (uid != null) {
+      await _ref
+          .read(masterRegistryProvider.notifier)
+          .setPreferredMode(uid, pref.name);
+      _ref.read(transportPreferenceProvider.notifier).reflect(pref);
+    } else {
+      await _ref.read(transportPreferenceProvider.notifier).set(pref);
+    }
     await reconcile();
     return TransportChoice.ok;
+  }
+
+  /// The uid of the master the app is pointed at, or null when nothing
+  /// is registered yet.
+  Future<String?> _activeUid() async {
+    try {
+      final masters = await _ref.read(masterRegistryProvider.future);
+      if (masters.isEmpty) return null;
+      final lastUid =
+          await _ref.read(masterRegistryProvider.notifier).lastUsed();
+      return masters
+          .firstWhere((m) => m.uid == lastUid, orElse: () => masters.first)
+          .uid;
+    } on Object catch (_) {
+      return null;
+    }
   }
 
   /// The master the app is pointed at: uid, and its mesh when it has one.

@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../transport/control_transport.dart';
+
 /// A master the user has added to the app. Non-secret bookkeeping —
 /// tokens and remembered passwords live in SecureStore, keyed by uid.
 class SavedMaster {
@@ -37,6 +39,16 @@ class SavedMaster {
   /// global preference is the fallback; a master reached over Bluetooth in
   /// the shed and Wi-Fi in the hall is a real thing people want.
   final String? preferredMode;
+
+  /// [preferredMode] parsed, or null when unset or unrecognised — a value
+  /// written by a newer build degrades to the fallback rather than
+  /// crashing an older one.
+  TransportPreference? get preferredTransport {
+    for (final p in TransportPreference.values) {
+      if (p.name == preferredMode) return p;
+    }
+    return null;
+  }
 
   Map<String, dynamic> toJson() => {
         'uid': uid,
@@ -81,6 +93,23 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
       jsonEncode([for (final m in masters) m.toJson()]),
     );
     state = AsyncValue.data(masters);
+  }
+
+  /// Stores [uid]'s own transport choice. No-op for a master that isn't
+  /// registered — a preference for a stranger would be junk data.
+  Future<void> setPreferredMode(String uid, String mode) async {
+    final current = [...state.value ?? await _load()];
+    final i = current.indexWhere((m) => m.uid == uid);
+    if (i < 0) return;
+    final m = current[i];
+    current[i] = SavedMaster(
+      uid: m.uid,
+      name: m.name,
+      ssid: m.ssid,
+      meshId: m.meshId,
+      preferredMode: mode,
+    );
+    await _persist(current);
   }
 
   /// Records a master seen on a live connection (any transport),

@@ -51,6 +51,16 @@ class TransportPreferenceNotifier extends Notifier<TransportPreference> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(key, pref.name);
   }
+
+  /// Shows [pref] as the current choice without persisting anything.
+  ///
+  /// Preferences are per master now, so what the Settings radio should
+  /// display changes when the active master does — but reflecting master
+  /// B's choice must not overwrite the stored global fallback, which is
+  /// all this notifier persists.
+  void reflect(TransportPreference pref) {
+    if (pref != state) state = pref;
+  }
 }
 
 /// The transport currently carrying control + state. Defaults to Wi-Fi

@@ -5,8 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
+import '../../settings/presentation/master_switcher.dart';
 import '../application/session.dart';
-import 'session_gate.dart';
 
 /// Password prompt. One password joins the Wi-Fi and logs in (API §1);
 /// by the time the user is here they're on the AP, so the login is a
