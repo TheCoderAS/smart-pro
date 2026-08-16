@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -7,6 +9,7 @@ import '../../../core/logging/log.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/saved_session.dart';
 import '../../../core/storage/secure_store.dart';
+import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
@@ -92,6 +95,10 @@ final class Authenticated extends SessionState {
   /// UI wording per API §2.
   final bool mesh;
 }
+
+/// What became of an attempt to switch masters. Anything but [arrived]
+/// means the current session was left exactly as it was.
+enum SwitchAttempt { arrived, unreachable, wrongNetwork, needsWifiLogin }
 
 final sessionProvider =
     AsyncNotifierProvider<SessionNotifier, SessionState>(SessionNotifier.new);
@@ -277,9 +284,19 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     final cand = await ref.read(savedSessionProvider).read();
     if (cand == null) return null;
     ref.read(tokenProvider.notifier).set(cand.token);
+    // This master is being driven over Bluetooth — record that on the
+    // master itself, not globally: the global write used to flip every
+    // other master's cold start to Bluetooth as a side effect.
     await ref
+        .read(masterRegistryProvider.notifier)
+        .setPreferredMode(cand.uid, TransportPreference.bluetooth.name);
+    // Awaited so the notifier's async restore settles now rather than
+    // firing later against a torn-down scope; reflect() itself stores
+    // nothing.
+    await ref.read(transportPreferenceProvider.notifier).ensureLoaded();
+    ref
         .read(transportPreferenceProvider.notifier)
-        .set(TransportPreference.bluetooth);
+        .reflect(TransportPreference.bluetooth);
     // The live transport too, not only the preference. Otherwise the
     // Wi-Fi socket sees a token appear while the transport still reads as
     // its default and opens a connection to a LAN we are not on.
@@ -293,6 +310,24 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   }
 
   Future<bool> _blePreferred() async {
+    // The master the app will open on decides — its own preference first,
+    // the global one as fallback. Reading only the global here meant a
+    // Bluetooth choice made for one master dictated the cold start for
+    // every other.
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      if (masters.isNotEmpty) {
+        final lastUid =
+            await ref.read(masterRegistryProvider.notifier).lastUsed();
+        final m = masters.firstWhere(
+          (x) => x.uid == lastUid,
+          orElse: () => masters.first,
+        );
+        return (await _prefFor(m)) == TransportPreference.bluetooth;
+      }
+    } on Object catch (e) {
+      log.w('per-master pref lookup skipped: $e');
+    }
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(TransportPreferenceNotifier.key) ==
         TransportPreference.bluetooth.name;
@@ -336,41 +371,54 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     state = await AsyncValue.guard(_bootstrap);
   }
 
-  /// Switches the app to another saved master.
+  /// Switches the app to another saved master, using **that master's**
+  /// transport preference and token.
   ///
-  /// Identity is settled by a uid probe before anything is shown, so the
-  /// user never lands on a dashboard that belongs to a different master,
-  /// and never sees a login prompt for what is really a network problem.
-  /// Last-used only moves on a successful arrival — a failed switch must
-  /// not change where the app opens next time.
-  Future<void> switchTo(SavedMaster target) async {
-    // Over Bluetooth there is no network to join and no HTTP probe to
-    // make: the identity check happens on the GATT link instead. Running
-    // the Wi-Fi flow here always ended in "unreachable", so last-used
-    // never moved and the radio stayed pointed at the old master — you
-    // could not switch masters in Bluetooth mode at all.
-    if (ref.read(currentTransportProvider) == TransportKind.ble) {
-      state = const AsyncValue.loading();
-      state = await AsyncValue.guard(() async {
-        await ref.read(masterRegistryProvider.notifier).setLastUsed(target.uid);
-        final arrived = await _bleSession();
-        if (arrived == null) return const MasterUnreachable();
-        // Retarget the radio at the master we just selected.
-        await ref.read(transportCoordinatorProvider).reconcile();
-        return arrived;
-      });
-      return;
+  /// Probe first, commit second. The old flow tore the session down into
+  /// a loading state before it knew whether the target was reachable, so
+  /// a failed switch stranded the user on a disconnected screen when the
+  /// master they came from was still working. Now nothing about the
+  /// current session changes until the target has actually been seen —
+  /// last-used, the token, the transport and the UI all move together, or
+  /// not at all.
+  Future<SwitchAttempt> switchTo(SavedMaster target) async {
+    final previous = state;
+    final pref = await _prefFor(target);
+
+    // Bluetooth-preferred target: there is no network to join and no HTTP
+    // probe to make. Look for its beacon; the live link stays up while we
+    // look. Only a sighting commits the switch.
+    if (pref == TransportPreference.bluetooth) {
+      final token = await _tokenFor(target);
+      if (token == null) {
+        // Never signed into this one over Wi-Fi, so BLE cannot carry it.
+        return SwitchAttempt.needsWifiLogin;
+      }
+      final visible = await ref
+          .read(bleSessionProvider.notifier)
+          .canSee(uid: target.uid, meshId: target.meshId);
+      if (!visible) return SwitchAttempt.unreachable;
+
+      await ref.read(masterRegistryProvider.notifier).setLastUsed(target.uid);
+      ref.read(tokenProvider.notifier).set(token);
+      state = AsyncValue.data(Authenticated(
+        DeviceInfo(
+            uptime: 0, freeHeap: 0, uid: target.uid, fw: '—', auth: true),
+        mesh: false,
+      ));
+      // Retarget the radio; the GATT identity check verifies who answers.
+      await ref.read(transportCoordinatorProvider).reconcile();
+      return SwitchAttempt.arrived;
     }
 
-    state = const AsyncValue.loading();
-    state = await AsyncValue.guard(() async {
-      final outcome = await ref.read(masterSwitchProvider).switchTo(target);
-      switch (outcome) {
-        case SwitchWrongNetwork(:final target, :final foundName):
-          return WrongNetwork(wanted: target, found: foundName);
-        case SwitchUnreachable():
-          return const MasterUnreachable();
-        case SwitchArrived():
+    // Wi-Fi (or auto): the probe is a network join, which genuinely can
+    // move the phone off the current master's AP — that much is inherent.
+    // What is not inherent is throwing the session state away first.
+    final outcome = await ref.read(masterSwitchProvider).switchTo(target);
+    switch (outcome) {
+      case SwitchArrived():
+        state = const AsyncValue.loading();
+        state = await AsyncValue.guard(() async {
           final arrived = await _bootstrap();
           if (arrived is Authenticated) {
             await ref
@@ -378,8 +426,47 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
                 .setLastUsed(target.uid);
           }
           return arrived;
-      }
-    });
+        });
+        return SwitchAttempt.arrived;
+      case SwitchWrongNetwork():
+        state = previous;
+        return SwitchAttempt.wrongNetwork;
+      case SwitchUnreachable():
+        state = previous;
+        // The failed join may have moved the phone's network; ask the
+        // coordinator to re-settle the link for the master we stayed on.
+        unawaited(ref.read(transportCoordinatorProvider).reconcile());
+        return SwitchAttempt.unreachable;
+    }
+  }
+
+  /// The transport preference for [m]: its own choice, else the global
+  /// fallback.
+  Future<TransportPreference> _prefFor(SavedMaster m) async {
+    final own = m.preferredTransport;
+    if (own != null) return own;
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(TransportPreferenceNotifier.key);
+    return TransportPreference.values.firstWhere(
+      (p) => p.name == saved,
+      orElse: () => TransportPreference.auto,
+    );
+  }
+
+  /// A token that works on [target]: its own, or any mesh-mate's — the
+  /// token is stateless and valid across a mesh (BLE spec §Auth).
+  Future<String?> _tokenFor(SavedMaster target) async {
+    final own = await _store.readToken(target.uid);
+    if (own != null) return own;
+    final mesh = target.meshId;
+    if (mesh == null || mesh == 0) return null;
+    final masters = await ref.read(masterRegistryProvider.future);
+    for (final m in masters) {
+      if (m.meshId != mesh || m.uid == target.uid) continue;
+      final t = await _store.readToken(m.uid);
+      if (t != null) return t;
+    }
+    return null;
   }
 
   /// The reconnect dance after any password change (API §6): the

@@ -95,8 +95,40 @@ Future<void> _switchTo(
       duration: const Duration(seconds: 8),
     ),
   );
-  // The session machine owns the probe, the outcome and last-used: a
-  // failed switch must not change where the app opens next time.
-  await ref.read(sessionProvider.notifier).switchTo(master);
+  // The session machine owns the probe, the outcome and last-used. A
+  // failed attempt leaves the current session running — so the message
+  // has to say that, or the user will assume they just lost both.
+  final result = await ref.read(sessionProvider.notifier).switchTo(master);
   messenger.hideCurrentSnackBar();
+  final text = switch (result) {
+    SwitchAttempt.arrived => null,
+    SwitchAttempt.unreachable =>
+      "Couldn't reach ${master.name} — staying where you are.",
+    SwitchAttempt.wrongNetwork =>
+      "You're on a different switch's network — staying where you are.",
+    SwitchAttempt.needsWifiLogin =>
+      'Sign in to ${master.name} over Wi-Fi once before using Bluetooth.',
+  };
+  if (text != null) {
+    messenger.showSnackBar(SnackBar(content: Text(text)));
+  }
+}
+
+/// The switcher, reachable from any dead end. Being locked out of one
+/// master must never trap the user away from the others — so this appears
+/// on the login screen and every disconnected screen, not just the
+/// dashboard, whenever more than one master is set up.
+class MasterSwitcherButton extends ConsumerWidget {
+  const MasterSwitcherButton({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final masters = ref.watch(masterRegistryProvider).value ?? const [];
+    if (masters.length < 2) return const SizedBox.shrink();
+    return TextButton.icon(
+      onPressed: () => showMasterSwitcher(context, ref),
+      icon: const Icon(Icons.swap_horizontal_circle_outlined),
+      label: const Text('Switch to another switch'),
+    );
+  }
 }

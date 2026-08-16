@@ -634,6 +634,10 @@ class _BleTrouble extends ConsumerWidget {
               icon: const Icon(Icons.refresh_rounded),
               label: Text(l10n.tryAgain),
             ),
+            const SizedBox(height: 8),
+            // One master being out of reach must not trap the user away
+            // from the rest of them.
+            const MasterSwitcherButton(),
           ],
         ),
       ),

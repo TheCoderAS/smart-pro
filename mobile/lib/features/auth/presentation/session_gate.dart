@@ -111,25 +111,6 @@ class _WrongNetworkScreen extends ConsumerWidget {
   }
 }
 
-/// The switcher, reachable from any dead end. Being locked out of one
-/// master must never trap the user away from the others — so this appears
-/// on the login screen and every disconnected screen, not just the
-/// dashboard, whenever more than one master is set up.
-class MasterSwitcherButton extends ConsumerWidget {
-  const MasterSwitcherButton({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final masters = ref.watch(masterRegistryProvider).value ?? const [];
-    if (masters.length < 2) return const SizedBox.shrink();
-    return TextButton.icon(
-      onPressed: () => showMasterSwitcher(context, ref),
-      icon: const Icon(Icons.swap_horizontal_circle_outlined),
-      label: const Text('Switch to another switch'),
-    );
-  }
-}
-
 /// Shown when a master rejected our session over Bluetooth: the password
 /// changed, so every token everywhere died. Bluetooth mode is unusable
 /// until a Wi-Fi sign-in completes, so this is an instruction — not a
@@ -189,6 +170,10 @@ class _AccessResetScreen extends ConsumerWidget {
                   icon: const Icon(Icons.wifi_rounded),
                   label: Text(l10n.joinWifi),
                 ),
+                const SizedBox(height: 8),
+                // Locked out of this master is not locked out of the
+                // others.
+                const MasterSwitcherButton(),
               ],
             ),
           ),
