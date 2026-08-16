@@ -8,6 +8,8 @@ import '../../features/firmware/domain/firmware_models.dart';
 import '../../features/switches/data/switch_repository.dart';
 import '../api/failure.dart';
 import 'control_transport.dart';
+import 'link_state.dart';
+import 'wifi_command_gate.dart';
 
 /// Wi-Fi control path — a thin adapter over the existing HTTP
 /// repositories. No behaviour change: this is what the app has always
@@ -31,11 +33,27 @@ class WifiControlTransport implements ControlTransport {
     required bool on,
     int? ch,
     String? masterUid,
-  }) =>
-      _switch.setRelay(id: id, on: on, ch: ch, masterUid: masterUid);
+  }) async {
+    // Through the gate: one command in flight, repeat taps on one switch
+    // coalesced to the final state. The master's server is tiny; offered
+    // load has to be bounded on this side.
+    await _ref.read(wifiCommandGateProvider).relay(
+          id: id,
+          on: on,
+          ch: ch,
+          masterUid: masterUid,
+          send: ({required id, required on, ch, masterUid}) => _switch
+              .setRelay(id: id, on: on, ch: ch, masterUid: masterUid),
+        );
+    // A command that went through is proof the link works — better proof
+    // than any probe, and it lets the heartbeat stay quiet while the user
+    // is actively driving switches.
+    _ref.read(linkStateProvider.notifier).markAlive();
+  }
 
   @override
-  Future<void> killAll() => _switch.killAll();
+  Future<void> killAll() =>
+      _ref.read(wifiCommandGateProvider).killAll(_switch.killAll);
 
   @override
   Future<List<ExtensionInfo>> extensions() => _ext.list();
