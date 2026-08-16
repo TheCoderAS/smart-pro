@@ -107,6 +107,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   // Being locked out of one master must never trap the
                   // user away from the others (story Epic 6).
                   const MasterSwitcherButton(),
+                  // Always present, whatever the registry says: every
+                  // dead end needs at least one unconditional exit.
+                  TextButton.icon(
+                    onPressed: () => context.push(Routes.addMaster),
+                    icon: const Icon(Icons.add),
+                    label: Text(l10n.addASwitch),
+                  ),
                 ],
               ),
             ),
