@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/app/l10n/app_localizations.dart';
 import 'package:unisync/app/router.dart';
 import 'package:unisync/core/api/failure.dart';
+import 'package:unisync/core/wifi/wifi_service.dart';
 import 'package:unisync/features/auth/data/auth_repository.dart';
 import 'package:unisync/features/auth/presentation/session_gate.dart';
 
@@ -16,7 +18,10 @@ class _UnreachableRepo implements AuthRepository {
   dynamic noSuchMethod(Invocation invocation) => throw const Unreachable();
 }
 
+class _MockWifiService extends Mock implements WifiService {}
+
 void main() {
+  setUpAll(() => registerFallbackValue(Duration.zero));
   Widget wrap(ProviderContainer container, GoRouter router) {
     return UncontrolledProviderScope(
       container: container,
@@ -31,10 +36,13 @@ void main() {
   testWidgets(
       'unreachable screen offers BLE recovery and routes to it '
       '(lost-password escape hatch)', (tester) async {
-    // No paired master, so the Bluetooth-control button stays hidden and
-    // only the recovery affordance is present.
-    // Past the welcome screen: this test is about the unreachable state.
-    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
+    // A paired home whose master is not answering — the outage screen.
+    // (With nothing paired, unreachable renders the setup screen instead;
+    // that path has its own test below.)
+    SharedPreferences.setMockInitialValues({
+      'firstrun.welcome': true,
+      'masters': '[{"uid":"C5F77720","name":"Hall"}]',
+    });
     final container = ProviderContainer(
       overrides: [
         authRepositoryProvider.overrideWithValue(_UnreachableRepo()),
@@ -70,5 +78,40 @@ void main() {
     await tester.tap(recover);
     await tester.pumpAndSettle();
     expect(find.text('recovery-screen'), findsOneWidget);
+  });
+
+  testWidgets(
+      'nothing paired and nobody answering renders the setup screen, '
+      'not the dead-end unreachable screen', (tester) async {
+    // The reinstall report: "set up my switch" landed on "can't reach
+    // your switch" with no way to set anything up.
+    SharedPreferences.setMockInitialValues({'firstrun.welcome': true});
+    final wifi = _MockWifiService();
+    when(() => wifi.masterReachable(timeout: any(named: 'timeout')))
+        .thenAnswer((_) async => false);
+    final container = ProviderContainer(
+      overrides: [
+        authRepositoryProvider.overrideWithValue(_UnreachableRepo()),
+        wifiServiceProvider.overrideWithValue(wifi),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final router = GoRouter(
+      initialLocation: Routes.home,
+      routes: [
+        GoRoute(
+          path: Routes.home,
+          builder: (context, state) => const SessionGate(),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(wrap(container, router));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Set up your switch'), findsOneWidget);
+    expect(find.textContaining('check again'), findsOneWidget);
+    expect(find.textContaining('reach your switch'), findsNothing);
   });
 }

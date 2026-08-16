@@ -6,6 +6,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unisync/core/api/failure.dart';
 import 'package:unisync/core/storage/secure_store.dart';
+import 'package:unisync/core/wifi/wifi_service.dart';
 import 'package:unisync/features/auth/application/session.dart';
 import 'package:unisync/features/auth/data/auth_repository.dart';
 import 'package:unisync/features/auth/domain/models.dart';
@@ -14,10 +15,23 @@ class MockAuthRepository extends Mock implements AuthRepository {}
 
 class MockSecureStore extends Mock implements SecureStore {}
 
+class MockWifiService extends Mock implements WifiService {}
+
 void main() {
+  setUpAll(() => registerFallbackValue(Duration.zero));
+
   setUp(() {
     TestWidgetsFlutterBinding.ensureInitialized();
   });
+
+  // The nothing-paired fast probe: pretend someone answers, so bootstrap
+  // proceeds to the mocked HTTP flow instead of short-circuiting to setup.
+  WifiService reachableWifi() {
+    final wifi = MockWifiService();
+    when(() => wifi.masterReachable(timeout: any(named: 'timeout')))
+        .thenAnswer((_) async => true);
+    return wifi;
+  }
 
   // The ghost screen: a session carried over Bluetooth has a stand-in
   // identity (fw '—') that no HTTP probe ever confirmed. Signing out of
@@ -83,6 +97,7 @@ void main() {
     final c = ProviderContainer(overrides: [
       authRepositoryProvider.overrideWithValue(repo),
       secureStoreProvider.overrideWithValue(store),
+      wifiServiceProvider.overrideWithValue(reachableWifi()),
     ]);
     addTearDown(c.dispose);
 

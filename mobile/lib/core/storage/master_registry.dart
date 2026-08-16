@@ -158,6 +158,10 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     await _persist(current);
   }
 
+  /// Forgets everything — "set up a different switch". Secrets are the
+  /// caller's to purge (SecureStore), this is only the bookkeeping.
+  Future<void> clear() => _persist(const []);
+
   Future<void> remove(String uid) async {
     final current = [...state.value ?? await _load()]
       ..removeWhere((m) => m.uid == uid);

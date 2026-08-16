@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app/l10n/app_localizations.dart';
 import 'app/router.dart';
 import 'app/theme.dart';
+import 'core/permissions/startup_gate.dart';
 import 'core/transport/transport_coordinator.dart';
 import 'features/settings/application/theme_mode.dart';
 
@@ -45,6 +46,10 @@ class UnisyncApp extends ConsumerWidget {
       themeMode: themeMode,
       routerConfig: router,
       debugShowCheckedModeBanner: false,
+      // Every screen sits behind the readiness pass: permissions asked
+      // upfront on load, radios prompted on when they are off.
+      builder: (context, child) =>
+          StartupGate(child: child ?? const SizedBox.shrink()),
     );
   }
 }

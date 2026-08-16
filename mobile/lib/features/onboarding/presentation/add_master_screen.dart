@@ -2,16 +2,23 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../../../app/router.dart';
 import '../../../core/logging/log.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
 
-/// Adds an existing master: join its Wi-Fi, then land in the normal
-/// session flow (login or dashboard). Three entry paths:
+/// The setup screen: join the switch's Wi-Fi, then land in the normal
+/// session flow (login or commissioning). Rendered as the gate root when
+/// nothing is paired and no master answers (NeedsSetup) — a fresh
+/// install's second screen — and reachable as a route as well. Entry
+/// paths:
+///  - the user already joined the network from the phone's settings
+///    (the welcome screen's instructions) → "check again"
 ///  - QR on the device card (assumed scheme
 ///    `unisync://<uid>?s=<ssid>&p=<pw>`; PLAN.md open question #3)
 ///  - Android: pick the SSID from a scan
@@ -80,13 +87,37 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
     if (_scanningQr) return _qrScanner();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Add a switch')),
+      appBar: AppBar(title: const Text('Set up your switch')),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              Text(
+                "Join your switch's Wi-Fi network — the name and password "
+                'are on the card in the box.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+              const SizedBox(height: 16),
+              // The welcome screen tells the user to join from the
+              // phone's own Wi-Fi settings and come back — so coming
+              // back must have a button.
+              FilledButton.icon(
+                icon: const Icon(Icons.refresh),
+                label: const Text("I've joined the network — check again"),
+                onPressed: _busy
+                    ? null
+                    : () => ref.read(sessionProvider.notifier).refresh(),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Or set it up from here:',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 8),
               OutlinedButton.icon(
                 icon: const Icon(Icons.qr_code_scanner),
                 label: const Text('Scan the card’s QR code'),
@@ -135,6 +166,17 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Text('Connect'),
+              ),
+              const SizedBox(height: 8),
+              // A reinstall wipes the app but not a forgotten password.
+              // Recovery runs over Bluetooth without one, so it has to be
+              // reachable from here too — this can be the only screen a
+              // locked-out fresh install ever sees.
+              TextButton.icon(
+                icon: const Icon(Icons.bluetooth_searching),
+                label: const Text('Forgot the password? Recover it'),
+                onPressed:
+                    _busy ? null : () => context.push(Routes.recovery),
               ),
             ],
           ),
@@ -221,7 +263,11 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
       return;
     }
     await ref.read(sessionProvider.notifier).refresh();
-    if (mounted) Navigator.of(context).pop();
+    // As the gate root (NeedsSetup) there is nothing to pop — the gate
+    // re-renders to login/commissioning on its own.
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
   }
 }
 
