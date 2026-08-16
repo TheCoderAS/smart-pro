@@ -1,5 +1,5 @@
 /*
- * Unisync - Master Firmware v11.29.2
+ * Unisync - Master Firmware v11.29.3
  * ESP32-C6 Beetle v1.1
  *
  * Architecture:
@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.29.2"
+#define MASTER_FW_VERSION  "11.29.3"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -7174,6 +7174,13 @@ void setup() {
         Serial.printf("[WIFI] AP (mesh): %s\n", mesh_name);
     }
     Serial.printf("[WIFI] IP: %s\n", AP_IP.toString().c_str());
+    /* Bench aid: the credential currently in force, printed where only a
+     * plugged-in USB cable can see it. Anyone with this port can already
+     * dump the whole NVS with esptool -- password included -- so this
+     * reveals nothing physical access does not; it does lower the bar
+     * from "has tooling" to "has a cable". Strip for a retail build. */
+    Serial.printf("[AUTH] %s password in force: %s\n",
+                  mesh_active ? "mesh" : "device", active_pass());
 
     /* (UID already read at the top of setup -- see uid_from_efuse.) */
     /* Get master UID from factory-burned efuse MAC.
