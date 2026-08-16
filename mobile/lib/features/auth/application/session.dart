@@ -107,6 +107,19 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   AuthRepository get _repo => ref.read(authRepositoryProvider);
   SecureStore get _store => ref.read(secureStoreProvider);
 
+  /// The firmware field of the stand-in identity a Bluetooth-carried
+  /// session uses until a real state push arrives.
+  static const placeholderFw = '—';
+
+  /// True for an identity that never came from an HTTP probe.
+  ///
+  /// Such an identity must never reach an HTTP-only state: building
+  /// [NeedsLogin] from it produced a sign-in form labelled with a master
+  /// the phone had no network contact with — possibly powered off — while
+  /// the form itself would talk to whoever answers 192.168.4.1. A ghost
+  /// screen with no way out.
+  static bool _isPlaceholder(DeviceInfo info) => info.fw == placeholderFw;
+
   @override
   Future<SessionState> build() => _bootstrap();
 
@@ -233,13 +246,18 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   /// [NeedsLogin] with the failure attached.
   Future<void> login(String password) async {
     final current = state.value;
-    final info = switch (current) {
+    var info = switch (current) {
       NeedsLogin(:final info) => info,
       Authenticated(:final info) => info,
       NeedsCommissioning(:final info) => info,
       _ => null,
     };
-    if (info == null) {
+    // A Bluetooth placeholder is not a device context — login is HTTP,
+    // and this identity has never been confirmed over HTTP. Re-bootstrap
+    // and let the probe decide who we are actually talking to.
+    if (info != null && _isPlaceholder(info)) info = null;
+    final ctx = info;
+    if (ctx == null) {
       // No device context — re-bootstrap instead.
       state = const AsyncValue.loading();
       state = await AsyncValue.guard(_bootstrap);
@@ -250,11 +268,11 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     state = await AsyncValue.guard(() async {
       try {
         final result = await _repo.login(password);
-        await _store.writeToken(info.uid, result.token);
+        await _store.writeToken(ctx.uid, result.token);
         ref.read(tokenProvider.notifier).set(result.token);
-        return Authenticated(info, mesh: result.mesh);
+        return Authenticated(ctx, mesh: result.mesh);
       } on ApiFailure catch (e) {
-        return NeedsLogin(info, failure: e);
+        return NeedsLogin(ctx, failure: e);
       }
     });
   }
@@ -304,7 +322,7 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     // fw is unknown until a BLE state push arrives; uid comes from the
     // saved registry.
     return Authenticated(
-      DeviceInfo(uptime: 0, freeHeap: 0, uid: cand.uid, fw: '—', auth: true),
+      DeviceInfo(uptime: 0, freeHeap: 0, uid: cand.uid, fw: placeholderFw, auth: true),
       mesh: false,
     );
   }
@@ -361,6 +379,16 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     await _repo.logout();
     await _store.deleteToken(current.info.uid);
     ref.read(tokenProvider.notifier).set(null);
+    // A session carried over Bluetooth has no HTTP-confirmed identity to
+    // hang a login form on — signing out of one used to conjure a sign-in
+    // screen for a master that might not even be powered. Re-bootstrap
+    // and land wherever the probe says we are: a real login form if its
+    // network answers, the unreachable screen (with the switcher) if not.
+    if (_isPlaceholder(current.info)) {
+      state = const AsyncValue.loading();
+      state = await AsyncValue.guard(_bootstrap);
+      return;
+    }
     state = AsyncValue.data(NeedsLogin(current.info));
   }
 
@@ -403,7 +431,7 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       ref.read(tokenProvider.notifier).set(token);
       state = AsyncValue.data(Authenticated(
         DeviceInfo(
-            uptime: 0, freeHeap: 0, uid: target.uid, fw: '—', auth: true),
+            uptime: 0, freeHeap: 0, uid: target.uid, fw: placeholderFw, auth: true),
         mesh: false,
       ));
       // Retarget the radio; the GATT identity check verifies who answers.
