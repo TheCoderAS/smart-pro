@@ -61,15 +61,17 @@ void main() {
     expect(saved?.meshId, 42);
   });
 
-  test('prefers the last-used master', () async {
+  test('falls back to a mesh-mate with a token', () async {
+    // One home per app: entries beyond the first are only ever the
+    // home's own mesh members, and any member's token drives the mesh.
     SharedPreferences.setMockInitialValues({
       'masters': _masters([
-        {'uid': 'AAA', 'name': 'Hall'},
-        {'uid': 'BBB', 'name': 'Porch'},
+        {'uid': 'AAA', 'name': 'Hall', 'meshId': 42},
+        {'uid': 'BBB', 'name': 'Porch', 'meshId': 42},
       ]),
-      'masters.lastUsed': 'BBB',
     });
-    when(() => store.readToken(any())).thenAnswer((_) async => 'tok');
+    when(() => store.readToken('AAA')).thenAnswer((_) async => null);
+    when(() => store.readToken('BBB')).thenAnswer((_) async => 'tok');
     final c = makeContainer();
 
     expect((await c.read(savedSessionProvider).read())?.uid, 'BBB');

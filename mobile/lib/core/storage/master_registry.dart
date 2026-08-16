@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../transport/control_transport.dart';
+import '../logging/log.dart';
 
 /// A master the user has added to the app. Non-secret bookkeeping —
 /// tokens and remembered passwords live in SecureStore, keyed by uid.
@@ -13,7 +13,6 @@ class SavedMaster {
     required this.name,
     this.ssid,
     this.meshId,
-    this.preferredMode,
   });
 
   factory SavedMaster.fromJson(Map<String, dynamic> json) => SavedMaster(
@@ -21,7 +20,6 @@ class SavedMaster {
         name: json['name'] as String? ?? '',
         ssid: json['ssid'] as String?,
         meshId: json['meshId'] as int?,
-        preferredMode: json['preferredMode'] as String?,
       );
 
   final String uid;
@@ -35,27 +33,11 @@ class SavedMaster {
   /// standalone.
   final int? meshId;
 
-  /// This master's preferred transport, when the user has set one. The
-  /// global preference is the fallback; a master reached over Bluetooth in
-  /// the shed and Wi-Fi in the hall is a real thing people want.
-  final String? preferredMode;
-
-  /// [preferredMode] parsed, or null when unset or unrecognised — a value
-  /// written by a newer build degrades to the fallback rather than
-  /// crashing an older one.
-  TransportPreference? get preferredTransport {
-    for (final p in TransportPreference.values) {
-      if (p.name == preferredMode) return p;
-    }
-    return null;
-  }
-
   Map<String, dynamic> toJson() => {
         'uid': uid,
         'name': name,
         if (ssid != null) 'ssid': ssid,
         if (meshId != null) 'meshId': meshId,
-        if (preferredMode != null) 'preferredMode': preferredMode,
       };
 }
 
@@ -80,10 +62,30 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     if (raw == null) return const [];
     final list = jsonDecode(raw);
     if (list is! List) return const [];
-    return [
+    final all = [
       for (final e in list)
         if (e is Map<String, dynamic>) SavedMaster.fromJson(e),
     ];
+    return _oneHome(all);
+  }
+
+  /// One device per app: the first entry and, when it is meshed, its
+  /// mesh-mates. Anything else is pruned — including entries left over
+  /// from when the app allowed several devices.
+  static List<SavedMaster> _oneHome(List<SavedMaster> all) {
+    if (all.length <= 1) return all;
+    final home = all.first;
+    final mesh = home.meshId;
+    final kept = [
+      for (final m in all)
+        if (m.uid == home.uid || (mesh != null && mesh != 0 && m.meshId == mesh))
+          m,
+    ];
+    if (kept.length != all.length) {
+      log.w('registry pruned to one home '
+          '(${all.length} entries -> ${kept.length})');
+    }
+    return kept;
   }
 
   Future<void> _persist(List<SavedMaster> masters) async {
@@ -93,23 +95,6 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
       jsonEncode([for (final m in masters) m.toJson()]),
     );
     state = AsyncValue.data(masters);
-  }
-
-  /// Stores [uid]'s own transport choice. No-op for a master that isn't
-  /// registered — a preference for a stranger would be junk data.
-  Future<void> setPreferredMode(String uid, String mode) async {
-    final current = [...state.value ?? await _load()];
-    final i = current.indexWhere((m) => m.uid == uid);
-    if (i < 0) return;
-    final m = current[i];
-    current[i] = SavedMaster(
-      uid: m.uid,
-      name: m.name,
-      ssid: m.ssid,
-      meshId: m.meshId,
-      preferredMode: mode,
-    );
-    await _persist(current);
   }
 
   /// Records a master seen on a live connection (any transport),
@@ -125,6 +110,17 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     if (uid.isEmpty) return;
     final current = [...state.value ?? await _load()];
     final i = current.indexWhere((m) => m.uid == uid);
+    // One device per app. A uid that is neither the home nor one of its
+    // mesh-mates is a stranger and is not recorded — quietly adopting it
+    // is how a second device used to creep in.
+    if (i < 0 && current.isNotEmpty) {
+      final mesh = current.first.meshId;
+      final sameMesh = mesh != null && mesh != 0;
+      if (!sameMesh) {
+        log.w('ignoring unknown master $uid: one device per app');
+        return;
+      }
+    }
     if (i >= 0) {
       final m = current[i];
       final nextName = (name?.isNotEmpty ?? false) ? name! : m.name;
@@ -137,7 +133,6 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
         name: nextName,
         ssid: nextSsid,
         meshId: m.meshId,
-        preferredMode: m.preferredMode,
       );
     } else {
       current.add(

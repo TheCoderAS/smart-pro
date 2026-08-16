@@ -316,23 +316,22 @@ void main() {
     expect(await bootstrap(c), isA<MasterUnreachable>());
   });
 
-  test('opens on the last-used master, not whoever answers', () async {
-    // Two masters set up, last on B, phone is on A's network. Opening A's
-    // dashboard under B's name is the failure the story rules out.
+  test('a stranger answering is a wrong network, not a login form',
+      () async {
+    // One home per app: the phone joined some other Unisync's network --
+    // a neighbour's, or a fresh board. Showing a sign-in form for it is
+    // the mix-up the story rules out.
     SharedPreferences.setMockInitialValues({
       'firstrun.welcome': true,
-      'masters': '[{"uid":"AAAA1111","name":"Hall","ssid":"Unisync-AAAA"},'
-          '{"uid":"BBBB2222","name":"Garage","ssid":"Unisync-BBBB"}]',
-      'masters.lastUsed': 'BBBB2222',
+      'masters': '[{"uid":"AAAA1111","name":"Hall","ssid":"Unisync-AAAA"}]',
     });
     when(() => repo.info())
-        .thenAnswer((_) async => _info.copyWith(uid: 'AAAA1111'));
+        .thenAnswer((_) async => _info.copyWith(uid: 'FFFF9999'));
     final c = makeContainer();
 
     final state = await bootstrap(c);
     expect(state, isA<WrongNetwork>());
-    expect((state as WrongNetwork).wanted.uid, 'BBBB2222');
-    expect(state.found, 'Hall');
+    expect((state as WrongNetwork).wanted.uid, 'AAAA1111');
   });
 
   test('one master set up means whoever answers is the one', () async {

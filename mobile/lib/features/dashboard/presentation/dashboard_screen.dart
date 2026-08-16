@@ -22,7 +22,6 @@ import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../auth/application/session.dart';
 import '../../onboarding/presentation/first_run_prompts.dart';
-import '../../settings/presentation/master_switcher.dart';
 import '../../switches/presentation/rename_sheet.dart';
 import '../application/master_cards.dart';
 import '../application/switch_overrides.dart';
@@ -200,11 +199,6 @@ class _DashboardHeader extends ConsumerWidget {
       titleSpacing: 0,
       // The connection pill lives inline in the toolbar row (with the
       // grid, reconnect and menu icons) — one row, always visible.
-      leading: IconButton(
-        tooltip: l10n.yourSwitches,
-        icon: const Icon(Icons.grid_view_rounded),
-        onPressed: () => showMasterSwitcher(context, ref),
-      ),
       title: _StatusPill(status: status, transport: transport),
       actions: [
         _OverflowMenu(),
@@ -634,10 +628,6 @@ class _BleTrouble extends ConsumerWidget {
               icon: const Icon(Icons.refresh_rounded),
               label: Text(l10n.tryAgain),
             ),
-            const SizedBox(height: 8),
-            // One master being out of reach must not trap the user away
-            // from the rest of them.
-            const MasterSwitcherButton(),
           ],
         ),
       ),

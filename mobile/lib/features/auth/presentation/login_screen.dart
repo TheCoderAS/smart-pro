@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
-import '../../settings/presentation/master_switcher.dart';
 import '../application/session.dart';
 
 /// Password prompt. One password joins the Wi-Fi and logs in (API §1);
@@ -103,16 +102,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     // Reachable while logged out, per API §8.
                     onPressed: () => context.push(Routes.recovery),
                     child: Text(l10n.forgotPassword),
-                  ),
-                  // Being locked out of one master must never trap the
-                  // user away from the others (story Epic 6).
-                  const MasterSwitcherButton(),
-                  // Always present, whatever the registry says: every
-                  // dead end needs at least one unconditional exit.
-                  TextButton.icon(
-                    onPressed: () => context.push(Routes.addMaster),
-                    icon: const Icon(Icons.add),
-                    label: Text(l10n.addASwitch),
                   ),
                 ],
               ),

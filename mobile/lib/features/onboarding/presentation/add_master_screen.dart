@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../core/logging/log.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../auth/application/session.dart';
@@ -39,6 +40,43 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // One device per app. Adding while one is set up is not allowed --
+    // the current one has to be removed first, deliberately, in Settings.
+    final masters = ref.watch(masterRegistryProvider).value ?? const [];
+    if (masters.isNotEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Add a switch')),
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.looks_one_outlined,
+                      size: 56,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  const SizedBox(height: 16),
+                  Text('One switch per app',
+                      style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 8),
+                  Text(
+                    'This app is set up with "${masters.first.name}". To use '
+                    'a different switch, remove this one in Settings first.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     if (_scanningQr) return _qrScanner();
 
     return Scaffold(

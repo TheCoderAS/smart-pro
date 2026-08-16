@@ -24,12 +24,11 @@ abstract class DeviceInfo with _$DeviceInfo {
     /// permission to read.
     @Default('') String ssid,
 
-    /// True when this master is in a mesh. Meshed masters are one home and
-    /// one switcher entry, never several.
+    /// True when this master is in a mesh. Meshed masters are one home.
     @Default(false) bool mesh,
 
     /// Stable mesh identity. The mesh name is user-changeable, so the
-    /// switcher keys on this instead.
+    /// the app keys on this instead.
     @JsonKey(name: 'mesh_id') @Default(0) int meshId,
   }) = _DeviceInfo;
 
