@@ -96,6 +96,36 @@ void main() {
     });
   });
 
+  group('the user\'s choice overrides everything', () {
+    // Choosing a mode in Settings used to record the choice and then queue
+    // the actual switch behind whatever background pass was already in
+    // line — a wedged pass held it hostage: the radio said Wi-Fi while the
+    // transport stayed Bluetooth indefinitely.
+    test('choose(wifi) switches the live transport immediately', () async {
+      SharedPreferences.setMockInitialValues({
+        'firstrun.welcome': true,
+        'masters': masters([
+          {'uid': 'AAA', 'name': 'Hall', 'preferredMode': 'bluetooth'},
+        ]),
+        'masters.lastUsed': 'AAA',
+      });
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      await c.read(masterRegistryProvider.future);
+
+      final result = await c
+          .read(transportCoordinatorProvider)
+          .choose(TransportPreference.wifi);
+
+      expect(result, TransportChoice.ok);
+      // The live transport, not just the recorded preference.
+      expect(c.read(currentTransportProvider), TransportKind.wifi);
+      // And the choice is persisted on the master it was made for.
+      final again = await c.read(masterRegistryProvider.future);
+      expect(again.single.preferredTransport, TransportPreference.wifi);
+    });
+  });
+
   group('switching masters', () {
     // A failed switch must leave the session it interrupted untouched.
     // The old flow went to loading first and parked on a disconnected

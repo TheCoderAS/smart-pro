@@ -434,8 +434,9 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
             uptime: 0, freeHeap: 0, uid: target.uid, fw: placeholderFw, auth: true),
         mesh: false,
       ));
-      // Retarget the radio; the GATT identity check verifies who answers.
-      await ref.read(transportCoordinatorProvider).reconcile();
+      // Retarget the radio immediately — a master switch is a user
+      // action and must not wait behind a queued background pass.
+      await ref.read(transportCoordinatorProvider).applyNow();
       return SwitchAttempt.arrived;
     }
 
@@ -461,9 +462,9 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
         return SwitchAttempt.wrongNetwork;
       case SwitchUnreachable():
         state = previous;
-        // The failed join may have moved the phone's network; ask the
-        // coordinator to re-settle the link for the master we stayed on.
-        unawaited(ref.read(transportCoordinatorProvider).reconcile());
+        // The failed join may have moved the phone's network; re-settle
+        // the link for the master we stayed on, ahead of the queue.
+        unawaited(ref.read(transportCoordinatorProvider).applyNow());
         return SwitchAttempt.unreachable;
     }
   }

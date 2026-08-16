@@ -71,7 +71,14 @@ class BleScanner {
       if (prev == null || b.rssi > prev.rssi) best[b.deviceId] = b;
     }, onError: (Object e) => log.w('scan error: $e'));
     await Future<void>.delayed(window);
-    await sub.cancel();
+    try {
+      // Capped: the platform side can hang a scan-cancel right after an
+      // unclean disconnect, and this await used to sit inside the scan
+      // gate — one hang blocked every scan and reconnect after it.
+      await sub.cancel().timeout(const Duration(seconds: 2));
+    } on Object catch (e) {
+      log.w('scan cancel did not complete: $e');
+    }
     return best.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi));
   }
 }
