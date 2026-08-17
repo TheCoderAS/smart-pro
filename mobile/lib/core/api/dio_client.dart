@@ -96,7 +96,12 @@ class _AuthAndFailureInterceptor extends Interceptor {
       return;
     }
     // Transport-level problem — timeouts, refused connections, no route.
-    log.w('${err.requestOptions.path} -> unreachable (${err.type})');
+    // Callers that probe on a schedule (the heartbeat) set `quietLog` and
+    // report their own misses compactly, or a dead link fills the log
+    // buffer with the same stanza every few seconds.
+    if (err.requestOptions.extra['quietLog'] != true) {
+      log.w('${err.requestOptions.path} -> unreachable (${err.type})');
+    }
     handler.next(err.copyWith(error: Unreachable(err.error)));
   }
 }
