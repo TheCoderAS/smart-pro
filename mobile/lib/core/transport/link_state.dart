@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/dio_client.dart';
 import '../api/endpoints.dart';
 import '../logging/log.dart';
+import '../wifi/wifi_service.dart';
 import 'ble_session.dart';
 import 'control_transport.dart';
 import 'transport_manager.dart';
@@ -54,6 +55,15 @@ class LinkMonitor extends Notifier<LinkState> {
 
   Timer? _ticker;
   DateTime? _lastGood;
+
+  /// Single-flight guard. The ticker fires every 3 s but a probe against
+  /// a dead route takes the full 5 s connect timeout, so without this
+  /// probes overlap — twice the requests, twice the log spam, nothing
+  /// learned twice.
+  bool _probing = false;
+
+  /// Consecutive misses, for compact logging and the rebind heuristic.
+  int _misses = 0;
 
   @override
   LinkState build() {
@@ -112,6 +122,8 @@ class LinkMonitor extends Notifier<LinkState> {
     // generous on purpose: aborting at two seconds threw away work the
     // master was mid-way through — it still wrote the response, into a
     // socket nobody was reading — and then counted the waste as a miss.
+    if (_probing) return;
+    _probing = true;
     try {
       final dio = ref.read(dioProvider);
       await dio.get<dynamic>(
@@ -119,12 +131,45 @@ class LinkMonitor extends Notifier<LinkState> {
         options: Options(
           receiveTimeout: const Duration(seconds: 4),
           sendTimeout: const Duration(seconds: 2),
+          // The Dio interceptor warns on every transport failure; the
+          // heartbeat reports its own misses in one compact line.
+          extra: const {'quietLog': true},
         ),
       );
+      if (_misses > 0) log.i('heartbeat back after $_misses missed');
+      _misses = 0;
       markAlive();
     } on Object catch (e) {
-      log.d('heartbeat missed: $e');
+      _misses++;
+      final why = e is DioException ? e.type.name : e.runtimeType.toString();
+      // First miss of a streak is the news; the rest are a counter, not
+      // three stanzas of the same exception every three seconds.
+      if (_misses == 1) {
+        log.w('heartbeat missed ($why)');
+      } else {
+        log.d('heartbeat miss #$_misses ($why)');
+      }
       _degrade();
+      await _rebindWifi();
+    } finally {
+      _probing = false;
+    }
+  }
+
+  /// A connect timeout on a phone that is sitting on the master's Wi-Fi
+  /// almost always means Android is routing this process out through
+  /// mobile data: the AP has no internet, and the one-shot bind at
+  /// reconcile time ran before the Wi-Fi association finished (or the
+  /// binding was cleared on a blip). Nothing retried it, so every request
+  /// timed out forever on a phone standing next to the master. Re-pin on
+  /// every miss; the moment the Wi-Fi is actually there, the next
+  /// heartbeat comes back and the link heals itself.
+  Future<void> _rebindWifi() async {
+    try {
+      final ok = await ref.read(wifiServiceProvider).bindToWifi();
+      if (ok && _misses == 1) log.i('re-pinned app traffic to Wi-Fi');
+    } on Object catch (e) {
+      log.d('wifi rebind failed: $e');
     }
   }
 
