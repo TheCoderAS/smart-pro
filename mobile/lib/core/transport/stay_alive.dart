@@ -87,8 +87,22 @@ class StayAlive {
   Future<void> _requestExemptionOnce() async {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool(_askedKey) ?? false) return;
-    if (await isBatteryExempt()) return;
     await prefs.setBool(_askedKey, true);
+    await ensureBatteryExemption();
+  }
+
+  /// Asks the system for the Doze exemption whenever it is not already
+  /// granted — no once-ever guard. Bench evidence for why: with the app
+  /// backgrounded, an un-exempted process had its network suspended and
+  /// every request to the master timed out for a minute at a stretch,
+  /// healing the instant the app was foregrounded. The dialog only ever
+  /// appears while the exemption is missing, so once granted this is a
+  /// silent no-op forever.
+  Future<void> ensureBatteryExemption() async {
+    if (!_supported) return;
+    if (!await isEnabled()) return;
+    if (await isBatteryExempt()) return;
+    log.i('not battery-exempt — asking (background suspends our network)');
     try {
       await _channel.invokeMethod<bool>('requestBatteryExemption');
     } on PlatformException catch (e) {
