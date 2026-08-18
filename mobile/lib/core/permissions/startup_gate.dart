@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../logging/log.dart';
 import '../platform/radios.dart';
+import '../transport/stay_alive.dart';
 import '../transport/transport_coordinator.dart';
 
 /// Runs the app-load readiness pass: every runtime permission the app
@@ -71,6 +72,11 @@ class _StartupGateState extends ConsumerState<StartupGate>
     try {
       await _requestPermissions();
       await _promptRadios();
+      // Doze is part of readiness: an un-exempted process gets its network
+      // suspended in the background, and every request to the master times
+      // out until the app is foregrounded again. Prompts only while the
+      // exemption is actually missing.
+      await ref.read(stayAliveProvider).ensureBatteryExemption();
     } on Object catch (e) {
       log.w('startup readiness pass failed: $e');
     } finally {
