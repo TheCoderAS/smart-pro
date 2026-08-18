@@ -7,8 +7,11 @@ import '../../features/firmware/data/firmware_repository.dart';
 import '../../features/firmware/domain/firmware_models.dart';
 import '../../features/switches/data/switch_repository.dart';
 import '../api/failure.dart';
+import '../logging/log.dart';
+import '../ws/state_socket.dart';
 import 'control_transport.dart';
 import 'link_state.dart';
+import 'transport_manager.dart';
 import 'wifi_command_gate.dart';
 
 /// Wi-Fi control path — a thin adapter over the existing HTTP
@@ -49,11 +52,41 @@ class WifiControlTransport implements ControlTransport {
     // than any probe, and it lets the heartbeat stay quiet while the user
     // is actively driving switches.
     _ref.read(linkStateProvider.notifier).markAlive();
+    _expectSnapshot();
   }
 
   @override
-  Future<void> killAll() =>
-      _ref.read(wifiCommandGateProvider).killAll(_switch.killAll);
+  Future<void> killAll() async {
+    await _ref.read(wifiCommandGateProvider).killAll(_switch.killAll);
+    _ref.read(linkStateProvider.notifier).markAlive();
+    _expectSnapshot();
+  }
+
+  /// How long a successful command may go unconfirmed by a snapshot
+  /// before the socket is presumed dead and reconnected.
+  static const confirmWithin = Duration(seconds: 2);
+
+  /// The master pushes a snapshot on every state change, so a successful
+  /// command followed by silence means the state socket is lying: it
+  /// looks connected but delivers nothing (the half-open leftover of a
+  /// background suspension), or it is sitting out a reconnect backoff.
+  /// Meanwhile the tile's optimistic override quietly times out and the
+  /// UI snaps back to a stale state — the relay clicked and the app
+  /// disagrees. One reconnect fixes every variant: the master pushes the
+  /// full document immediately on connect (API §4).
+  void _expectSnapshot() {
+    final before = _ref.read(lastWsSnapshotAtProvider);
+    Future<void>.delayed(confirmWithin, () {
+      try {
+        if (_ref.read(currentTransportProvider) != TransportKind.wifi) return;
+        if (_ref.read(lastWsSnapshotAtProvider) != before) return;
+        log.i('no snapshot after a command — reconnecting the state socket');
+        _ref.invalidate(stateSocketProvider);
+      } on Object {
+        // Transport switched and this ref was torn down meanwhile.
+      }
+    });
+  }
 
   @override
   Future<List<ExtensionInfo>> extensions() => _ext.list();

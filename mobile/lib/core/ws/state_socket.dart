@@ -45,6 +45,22 @@ class SocketStatusNotifier extends Notifier<SocketStatus> {
   void set(SocketStatus status) => state = status;
 }
 
+/// When the last Wi-Fi snapshot arrived. The command path reads this to
+/// detect a socket that *looks* connected but delivers nothing — the
+/// half-open leftover of a background suspension — and forces a
+/// reconnect (see WifiControlTransport).
+final lastWsSnapshotAtProvider =
+    NotifierProvider<LastWsSnapshotAtNotifier, DateTime?>(
+  LastWsSnapshotAtNotifier.new,
+);
+
+class LastWsSnapshotAtNotifier extends Notifier<DateTime?> {
+  @override
+  DateTime? build() => null;
+
+  void mark() => state = DateTime.now();
+}
+
 class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
   static const _initialBackoff = Duration(seconds: 1);
   static const _maxBackoff = Duration(seconds: 10);
@@ -115,6 +131,7 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
         try {
           final map = jsonDecode(message as String) as Map<String, dynamic>;
           _out?.add(StateSnapshot.fromJson(map));
+          ref.read(lastWsSnapshotAtProvider.notifier).mark();
         } on FormatException catch (e) {
           log.w('ws message not valid JSON: $e');
         }
