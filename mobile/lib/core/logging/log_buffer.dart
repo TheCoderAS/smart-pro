@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 
 /// The last few hundred log lines, kept in memory so they can be read on
-/// the phone.
+/// the phone — and mirrored to a small file so a CRASH cannot eat the
+/// evidence.
 ///
 /// Diagnosing anything on real hardware meant tethering to a laptop and
 /// running `adb logcat`, which is friction paid on every round of testing —
@@ -10,14 +14,68 @@ import 'package:logger/logger.dart';
 /// same lines the console gets, so Settings can show them and offer a copy
 /// button.
 ///
-/// Memory only: never written to disk, never sent anywhere. It dies with
-/// the process, which is the right lifetime for something that exists to
-/// answer "what just happened".
+/// The mirror exists because a memory-only buffer dies with the process:
+/// the one time the log matters most — the app crashed — the Logs screen
+/// opened on a fresh, empty buffer. Now the previous run's tail is loaded
+/// back on startup, marked as such. Never sent anywhere; lives in the
+/// app's own cache directory.
 class LogBuffer {
   LogBuffer({this.capacity = 500});
 
   final int capacity;
   final List<String> _lines = [];
+
+  /// Debounced disk mirror: cheap enough to survive the logging path,
+  /// fresh enough (2 s) that a crash loses only its final moments.
+  static const _writeAfter = Duration(seconds: 2);
+  Timer? _writeTimer;
+  File? _mirror;
+  bool _restored = false;
+
+  /// Loads the previous run's tail (marked) and starts mirroring. Called
+  /// once from main(); everything is best-effort — logging must never be
+  /// the thing that breaks.
+  Future<void> restoreAndMirror() async {
+    if (_restored) return;
+    _restored = true;
+    try {
+      // On Android, systemTemp is the app's own cache dir.
+      final f = File('${Directory.systemTemp.path}/unisync_log_tail.txt');
+      if (f.existsSync()) {
+        final previous = f
+            .readAsLinesSync()
+            .where((l) => l.trim().isNotEmpty)
+            .toList();
+        if (previous.isNotEmpty) {
+          _lines.insertAll(0, [
+            ...previous.map((l) => '· $l'),
+            '—— previous run ended above (crash or kill) ——',
+          ]);
+          revision.value++;
+        }
+      }
+      _mirror = f;
+    } on Object catch (_) {
+      // No cache dir, no mirror — in-memory behaviour as before.
+    }
+  }
+
+  void _scheduleWrite() {
+    final f = _mirror;
+    if (f == null) return;
+    _writeTimer?.cancel();
+    _writeTimer = Timer(_writeAfter, () {
+      try {
+        // Only this run's lines: previous-run lines are marked with '·'
+        // and must not survive a second restart as fresh evidence.
+        final own =
+            _lines.where((l) => !l.startsWith('· ') && !l.startsWith('——'));
+        f.writeAsStringSync(own.join('\n'));
+      } on Object catch (_) {
+        // Disk full or gone — the in-memory buffer still works.
+      }
+    });
+  }
 
   /// Bumped on every append so a screen can rebuild without polling.
   final revision = ValueNotifier<int>(0);
@@ -33,6 +91,7 @@ class LogBuffer {
       _lines.removeRange(0, _lines.length - capacity);
     }
     revision.value++;
+    _scheduleWrite();
   }
 
   void clear() {

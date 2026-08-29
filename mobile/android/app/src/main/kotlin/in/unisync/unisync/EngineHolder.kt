@@ -34,6 +34,15 @@ object EngineHolder {
         // The constructor registers the generated plugins for us, so the
         // channels main() reaches for are live before it runs.
         val engine = FlutterEngine(context.applicationContext)
+        // The wifi bridge is engine-level, not Activity-level: register it
+        // BEFORE Dart runs, so a headless start (boot receiver, keep-ready
+        // service) has a working channel from the first call. Registering
+        // in the Activity was why every background Wi-Fi call died with
+        // MissingPluginException.
+        WifiBridge.register(
+            context.applicationContext,
+            engine.dartExecutor.binaryMessenger,
+        )
         engine.dartExecutor.executeDartEntrypoint(
             DartExecutor.DartEntrypoint.createDefault(),
         )
