@@ -2,13 +2,17 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../logging/log.dart';
 import '../platform/radios.dart';
+import '../storage/master_registry.dart';
+import '../transport/control_transport.dart';
 import '../transport/stay_alive.dart';
 import '../transport/transport_coordinator.dart';
+import '../transport/transport_manager.dart';
 
 /// Runs the app-load readiness pass: every runtime permission the app
 /// needs, requested upfront, and the system prompts to turn Wi-Fi and
@@ -77,6 +81,11 @@ class _StartupGateState extends ConsumerState<StartupGate>
       // out until the app is foregrounded again. Prompts only while the
       // exemption is actually missing.
       await ref.read(stayAliveProvider).ensureBatteryExemption();
+    } on PlatformException catch (e) {
+      // Headless engine — no screen to ask from. Not a failure: the next
+      // foreground frame re-runs the pass, so let it retry immediately.
+      log.d('startup pass skipped (no screen): ${e.message}');
+      _lastRun = null;
     } on Object catch (e) {
       log.w('startup readiness pass failed: $e');
     } finally {
@@ -117,14 +126,32 @@ class _StartupGateState extends ConsumerState<StartupGate>
 
   Future<void> _promptRadios() async {
     if (!Platform.isAndroid) return;
+    // Only the radios the chosen mode actually needs. In Bluetooth mode
+    // the app used to shove the Wi-Fi panel at the user on every launch
+    // for a radio it wasn't going to use. Automatic genuinely uses both.
+    // One exception: with nothing set up yet, Wi-Fi is required for
+    // sign-in, so setup always counts as needing Wi-Fi.
+    final pref =
+        await ref.read(transportPreferenceProvider.notifier).ensureLoaded();
+    var nothingSetUp = true;
+    try {
+      nothingSetUp =
+          (await ref.read(masterRegistryProvider.future)).isEmpty;
+    } on Object catch (e) {
+      log.w('registry read failed in radio prompt: $e');
+    }
+    final needsWifi =
+        pref != TransportPreference.bluetooth || nothingSetUp;
+    final needsBluetooth = pref != TransportPreference.wifi && !nothingSetUp;
+
     final radios = ref.read(radiosProvider);
     // Bluetooth first: it is a plain dialog, and the Wi-Fi settings
     // panel that may follow slides up over it rather than burying it.
-    if (!await radios.isBluetoothOn()) {
+    if (needsBluetooth && !await radios.isBluetoothOn()) {
       log.i('bluetooth is off — asking to enable');
       await radios.requestEnableBluetooth();
     }
-    if (!await radios.isWifiOn()) {
+    if (needsWifi && !await radios.isWifiOn()) {
       log.i('wifi is off — asking to enable');
       await radios.requestEnableWifi();
     }

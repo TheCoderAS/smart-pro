@@ -6,12 +6,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app/l10n/app_localizations.dart';
 import 'app/router.dart';
 import 'app/theme.dart';
+import 'core/logging/log_buffer.dart';
 import 'core/permissions/startup_gate.dart';
 import 'core/transport/transport_coordinator.dart';
 import 'features/settings/application/theme_mode.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Bring back the previous run's log tail and start mirroring this one:
+  // a crash must leave its trail in Settings → Logs, not vanish with the
+  // process. Best-effort by design.
+  unawaited(logBuffer.restoreAndMirror());
   final container = ProviderContainer();
   // Connect as soon as the isolate starts, rather than waiting for the
   // dashboard's first frame.
