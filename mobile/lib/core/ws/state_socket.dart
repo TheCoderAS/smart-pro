@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../api/dio_client.dart';
 import '../api/endpoints.dart';
 import '../logging/log.dart';
+import '../transport/ble_session.dart';
 import '../transport/control_transport.dart';
 import '../transport/transport_manager.dart';
 import 'state_dto.dart';
@@ -78,6 +79,13 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
     // switching to Bluetooth disconnects it (and back reconnects), so
     // the two transports never run at once (item: auto-switch on login).
     final onWifi = ref.watch(currentTransportProvider) == TransportKind.wifi;
+    // And judged by reality, not only the flag: a startup race can leave
+    // the flag on Wi-Fi while a BLE session is live. Reconnecting this
+    // socket then hammers TCP at the master's single radio and starves
+    // the BLE writes the user is waiting on. Any live BLE session means
+    // no Wi-Fi socket, full stop.
+    final bleLive = ref.watch(bleSessionProvider
+        .select((s) => s.status != BleSessionStatus.idle));
 
     // Tear down any previous connection when the token/transport changes
     // or the provider is disposed.
@@ -94,7 +102,7 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
     // microtask later.
     Future.microtask(() {
       if (_out != out) return; // rebuilt/disposed meanwhile
-      if (token == null || !onWifi) {
+      if (token == null || !onWifi || bleLive) {
         // Not authenticated, or Bluetooth is the active transport — no
         // Wi-Fi socket until a token appears and Wi-Fi is selected.
         _status(SocketStatus.disconnected);

@@ -108,6 +108,13 @@ class TransportCoordinator {
     // Never flip into BLE without a session and permission — the mode
     // must not change unless it can actually work (Epic 5).
     if (await canUseBle() != TransportChoice.ok) {
+      // But never tear a live BLE link down as the "fallback": if a link
+      // is up, the gates were wrong about it, not the link.
+      if (_ref.read(bleSessionProvider.notifier).client?.isConnected ??
+          false) {
+        _ref.read(currentTransportProvider.notifier).set(TransportKind.ble);
+        return;
+      }
       await _applyWifi(epoch);
       return;
     }
@@ -154,6 +161,15 @@ class TransportCoordinator {
   /// change: a Wi-Fi-issued session must exist (BLE has no login) and
   /// the OS permission must be granted.
   Future<TransportChoice> canUseBle() async {
+    // A live BLE link is its own proof: it exists, so it can be used.
+    // Without this, a reconcile racing the startup permission dialogs
+    // could lose a permission *request* (dialog collision), conclude
+    // Bluetooth was unusable, and flip a working BLE session onto Wi-Fi
+    // — leaving both stacks running at once.
+    if (_ref.read(bleSessionProvider.notifier).client?.isConnected ??
+        false) {
+      return TransportChoice.ok;
+    }
     // The vault, not just the in-memory token. On a cold start the
     // dashboard can be up and reconciling before the session bootstrap has
     // restored the token, and reading that as "never signed in" is what
