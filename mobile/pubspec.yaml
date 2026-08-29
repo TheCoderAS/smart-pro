@@ -3,7 +3,11 @@ description: "Unisync — control your switches. Local-first companion app for U
 publish_to: 'none'
 
 # versionName / CFBundleShortVersionString + versionCode / CFBundleVersion
-version: 0.1.0+1
+# The display version (X.Y.Z) is bumped here with every app-changing PR.
+# The Android build number (versionCode) is stamped by CI from the run
+# number (--build-number), so every published APK upgrades cleanly over
+# the previous one; the +1 below only covers local builds.
+version: 1.0.0+1
 
 environment:
   sdk: ^3.12.2
@@ -57,9 +61,15 @@ dev_dependencies:
   freezed: ^3.2.5
   json_serializable: ^6.14.1
   mocktail: ^1.0.5
+  # Regenerates the launcher icons from assets/branding — run
+  # `dart run flutter_launcher_icons` after changing the artwork; the
+  # generated mipmaps are committed.
+  flutter_launcher_icons: ^0.14.4
 flutter:
   uses-material-design: true
   generate: true
+  assets:
+    - assets/branding/
   fonts:
     - family: Manrope
       fonts:
@@ -71,3 +81,13 @@ flutter:
           weight: 600
         - asset: assets/fonts/Manrope-Bold.ttf
           weight: 700
+
+# Launcher icon (logo v2): square mark crop for legacy launchers, dark
+# background + feathered foreground for adaptive ones. iOS is off with
+# the paused iOS build.
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: assets/branding/icon.png
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: assets/branding/icon_foreground.png
