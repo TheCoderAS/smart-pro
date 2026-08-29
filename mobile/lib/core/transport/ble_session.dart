@@ -64,6 +64,10 @@ class BleSessionController extends Notifier<BleSessionState> {
   /// into the scan filter or the registry from here.
   int _connectedBeaconMeshId = 0;
 
+  /// Devices the identity check refused this session. Never contacted
+  /// again until a retarget or teardown — a refusal must not repeat.
+  final _refusedDevices = <String>{};
+
   /// The master the app is pointed at, when it knows. Masters advertise
   /// as `U{UID}`, and that name is the only thing in a beacon that tells
   /// two standalone masters apart — the manufacturer data carries a mesh
@@ -235,6 +239,7 @@ class BleSessionController extends Notifier<BleSessionState> {
       log.d('ble retarget → $uid (mesh ${meshId?.toRadixString(16)})');
       _targetUid = uid;
       _meshId = meshId; // replaces, never merges — this is the fix
+      _refusedDevices.clear();
       await _closeClient();
       _cancelRetry();
     }
@@ -329,22 +334,44 @@ class BleSessionController extends Notifier<BleSessionState> {
     final epoch = _linkEpoch;
     state = state.copyWith(status: BleSessionStatus.scanning);
     try {
-      final beacons = await _scan(mode: mode);
+      // A slightly generous window: the whole point is hearing the RIGHT
+      // beacon, and the added master can be the quietest voice in the
+      // room right after a mode switch (it was busy being the Wi-Fi
+      // master; its single radio starves its own advertising).
+      final beacons = await _scan(
+        mode: mode,
+        window: const Duration(seconds: 6),
+      );
       if (epoch != _linkEpoch) return;
-      if (beacons.isEmpty) {
-        state = const BleSessionState(
+      final want = _targetUid?.toUpperCase();
+      bool isTarget(MasterBeacon b) =>
+          want != null && b.name.toUpperCase() == 'U$want';
+      // Never re-court a device the identity check already refused.
+      var candidates = beacons
+          .where((b) => !_refusedDevices.contains(b.deviceId))
+          .toList();
+      // A standalone home has exactly ONE acceptable master: the added
+      // uid. Connecting to anything else is a guaranteed refusal that
+      // burns a 12 s connect and keeps the radio from hearing the right
+      // beacon — the "courting the neighbour forever" loop. Only a
+      // meshed home may consider other uids (its mates, which the mesh
+      // scan filter has already vetted).
+      if (want != null && (_meshId == null || _meshId == 0)) {
+        candidates = candidates.where(isTarget).toList();
+      }
+      if (candidates.isEmpty) {
+        state = BleSessionState(
           status: BleSessionStatus.failed,
-          error: 'No switch found nearby over Bluetooth.',
+          error: beacons.isEmpty
+              ? 'No switch found nearby over Bluetooth.'
+              : 'Your switch was not heard nearby yet — still looking.',
         );
         return;
       }
       // The master we are actually pointed at wins outright, however weak
       // it is; a stronger stranger is not a substitute for it. Below that,
       // prefer an unoccupied master, then the strongest.
-      final want = _targetUid?.toUpperCase();
-      bool isTarget(MasterBeacon b) =>
-          want != null && b.name.toUpperCase() == 'U$want';
-      beacons.sort((a, b) {
+      candidates.sort((a, b) {
         final targetCmp =
             (isTarget(b) ? 1 : 0).compareTo(isTarget(a) ? 1 : 0);
         if (targetCmp != 0) return targetCmp;
@@ -353,7 +380,7 @@ class BleSessionController extends Notifier<BleSessionState> {
         if (busyCmp != 0) return busyCmp;
         return b.rssi.compareTo(a.rssi);
       });
-      final target = beacons.first;
+      final target = candidates.first;
       // What THIS device claims to belong to, held for the post-connect
       // identity check. Never merged into the scan filter: the filter
       // describes the user's home (from the registry), and learning it
@@ -434,6 +461,7 @@ class BleSessionController extends Notifier<BleSessionState> {
       // did.
       if (!await _isKnownMaster(snap.selfUid)) {
         log.w('ble: ${snap.selfUid} is not set up in this app, refusing');
+        _refusedDevices.add(deviceId);
         await _closeClient();
         state = const BleSessionState(
           status: BleSessionStatus.failed,
@@ -581,6 +609,7 @@ class BleSessionController extends Notifier<BleSessionState> {
 
   Future<void> _teardown() async {
     _cancelRetry();
+    _refusedDevices.clear();
     await _closeClient();
   }
 }
