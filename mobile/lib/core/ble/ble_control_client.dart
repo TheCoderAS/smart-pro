@@ -131,6 +131,20 @@ class BleControlClient {
         );
     await connectedCompleter.future.timeout(_connectTimeout);
 
+    // A high-performance connection interval: writes stay in the tens of
+    // milliseconds even when something else brushes the radio. Without
+    // it, Android can settle on a slow interval and a 160-byte write
+    // takes seconds. Best-effort — refusal is survivable, slow is not
+    // fatal, and iOS has no such request.
+    try {
+      await _ble.requestConnectionPriority(
+        deviceId: deviceId,
+        priority: ConnectionPriority.highPerformance,
+      );
+    } on Exception catch (e) {
+      log.w('connection priority request refused: $e');
+    }
+
     // Ask for a big MTU; fall back to the safe default if refused.
     try {
       final mtu = await _ble.requestMtu(deviceId: deviceId, mtu: 185);
