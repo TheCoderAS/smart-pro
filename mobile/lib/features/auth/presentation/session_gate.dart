@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
+import '../../../core/platform/radios.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/access_reset.dart';
 import '../../../core/transport/control_transport.dart';
@@ -98,11 +99,30 @@ class _WrongNetworkScreen extends ConsumerWidget {
                       ),
                 ),
                 const SizedBox(height: 24),
+                // The phone's own Wi-Fi picker, not an app-driven join:
+                // the user chooses "$network" themselves, which is
+                // deterministic — the old in-app join here could land on
+                // whichever box answered and loop right back to this
+                // screen.
                 FilledButton.icon(
                   onPressed: () =>
-                      ref.read(sessionProvider.notifier).rejoinHome(),
+                      ref.read(radiosProvider).openWifiSettings(),
                   icon: const Icon(Icons.wifi),
-                  label: Text('Connect to $network'),
+                  label: const Text("Open the phone's Wi-Fi settings"),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () =>
+                      ref.read(sessionProvider.notifier).refresh(),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text("I've joined — check again"),
+                ),
+                const SizedBox(height: 8),
+                // No identity screen is allowed to be a dead end.
+                TextButton.icon(
+                  onPressed: () => confirmSetupDifferentSwitch(context, ref),
+                  icon: const Icon(Icons.swap_horiz),
+                  label: const Text('Set up a different switch'),
                 ),
               ],
             ),
@@ -261,7 +281,7 @@ class _UnreachableScreen extends ConsumerWidget {
                 // dashboard and the dashboard needs the master — without
                 // this, a dead master bricks the app forever.
                 TextButton.icon(
-                  onPressed: () => _confirmSetupDifferent(context, ref),
+                  onPressed: () => confirmSetupDifferentSwitch(context, ref),
                   icon: const Icon(Icons.swap_horiz),
                   label: const Text('Set up a different switch'),
                 ),
@@ -273,10 +293,16 @@ class _UnreachableScreen extends ConsumerWidget {
     );
   }
 
-  Future<void> _confirmSetupDifferent(
-    BuildContext context,
-    WidgetRef ref,
-  ) async {
+}
+
+/// The shared escape hatch: forget the current home (with consent) and
+/// land on the setup screen. Reachable from every identity screen —
+/// unreachable and wrong-network — because no such screen may be a dead
+/// end.
+Future<void> confirmSetupDifferentSwitch(
+  BuildContext context,
+  WidgetRef ref,
+) async {
     final masters = ref.read(masterRegistryProvider).value ?? const [];
     final name = masters.isEmpty ? 'this switch' : '"${masters.first.name}"';
     final ok = await showDialog<bool>(
@@ -300,7 +326,6 @@ class _UnreachableScreen extends ConsumerWidget {
         ],
       ),
     );
-    if (ok != true) return;
-    await ref.read(sessionProvider.notifier).forgetHome();
-  }
+  if (ok != true) return;
+  await ref.read(sessionProvider.notifier).forgetHome();
 }

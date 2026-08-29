@@ -22,8 +22,6 @@
         android:maxSdkVersion="30"/>
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30"/>
-    <!-- QR scan of the device card during onboarding (mobile_scanner) -->
-    <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30"/>
     <!-- Holding the Bluetooth link to the master while the app is in the

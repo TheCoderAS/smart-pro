@@ -155,10 +155,14 @@ void main() {
     expect((state! as Authenticated).mesh, isTrue);
     expect(c.read(tokenProvider), '3f2ac81d');
     verify(() => store.writeToken('C5F77720', '3f2ac81d')).called(1);
-    // The device password is the Wi-Fi password (API §1); stored so the
-    // app can rejoin the home network itself when Android's scorer
-    // refuses to auto-join an internet-less AP.
+    // The device password is the Wi-Fi password (API §1); stored for the
+    // change-password rejoin dance.
     verify(() => store.writePassword('C5F77720', 'goodpass')).called(1);
+    // Signing in IS adding the switch: recorded immediately, never left
+    // to whenever a Wi-Fi status update arrives. The unrecorded window
+    // is what let Bluetooth's old adopt shortcut re-add a removed master.
+    final registered = await c.read(masterRegistryProvider.future);
+    expect(registered.map((m) => m.uid), contains('C5F77720'));
   });
 
   test('login failure → NeedsLogin carrying the failure', () async {

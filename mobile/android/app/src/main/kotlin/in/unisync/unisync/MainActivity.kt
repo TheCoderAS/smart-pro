@@ -130,6 +130,7 @@ class MainActivity : FlutterActivity() {
                 "isWifiOn" -> result.success(isWifiOn())
                 "requestEnableWifi" -> result.success(requestEnableWifi())
                 "isLocationOn" -> result.success(isLocationOn())
+                "openWifiSettings" -> result.success(openWifiSettings())
                 "openLocationSettings" -> result.success(openLocationSettings())
                 "release" -> {
                     releaseJoin()
@@ -303,6 +304,24 @@ class MainActivity : FlutterActivity() {
             }
         } catch (_: Exception) {
             true // unknown must not trigger a prompt
+        }
+    }
+
+    /**
+     * The phone's own Wi-Fi picker — the one join mechanism the app
+     * relies on. The panel (API 29+) slides over the app with the
+     * network list; older Android gets the full settings screen.
+     */
+    private fun openWifiSettings(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startActivity(Intent(Settings.Panel.ACTION_WIFI))
+            } else {
+                startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+            }
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 

@@ -37,6 +37,10 @@ class Radios {
 
   Future<void> openLocationSettings() => _fire('openLocationSettings');
 
+  /// The phone's own Wi-Fi picker — the one join mechanism the app
+  /// relies on (panel on API 29+, full settings screen before that).
+  Future<void> openWifiSettings() => _fire('openWifiSettings');
+
   Future<bool> _read(String method) async {
     try {
       return await _channel.invokeMethod<bool>(method) ?? true;
