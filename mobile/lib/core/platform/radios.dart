@@ -29,6 +29,14 @@ class Radios {
   /// directly.
   Future<void> requestEnableWifi() => _fire('requestEnableWifi');
 
+  /// The Location *service* (the quick-settings toggle), distinct from
+  /// the location permission. Android ties Wi-Fi scanning to it: off
+  /// means every scan — the system's own connect dialog included —
+  /// silently sees no networks.
+  Future<bool> isLocationOn() => _read('isLocationOn');
+
+  Future<void> openLocationSettings() => _fire('openLocationSettings');
+
   Future<bool> _read(String method) async {
     try {
       return await _channel.invokeMethod<bool>(method) ?? true;

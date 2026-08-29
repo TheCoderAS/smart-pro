@@ -127,7 +127,13 @@ class WifiService {
       log.w('cannot start Wi-Fi scan: $can');
       return const [];
     }
-    await WiFiScan.instance.startScan();
+    // startScan can be refused (Android throttles foreground apps to ~4
+    // scans per 2 minutes) — getScannedResults then returns the OS's
+    // *cached* results. A list of networks is not proof scanning works
+    // right now, so say so: a stale list followed by an empty system
+    // connect dialog is exactly the confusing failure the log explains.
+    final fresh = await WiFiScan.instance.startScan();
+    if (!fresh) log.w('Wi-Fi scan throttled — showing cached results');
     final results = await WiFiScan.instance.getScannedResults();
     final ssids = results
         .map((r) => r.ssid)

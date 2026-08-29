@@ -7,6 +7,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../app/router.dart';
 import '../../../core/logging/log.dart';
+import '../../../core/platform/radios.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/wifi/wifi_service.dart';
@@ -36,6 +37,9 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
   bool _busy = false;
   bool _scanningQr = false;
   String? _error;
+
+  /// The in-app join failed or found nothing — offer the manual route.
+  bool _offerManualJoin = false;
   List<String> _nearbySsids = const [];
 
   @override
@@ -167,6 +171,20 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
                       )
                     : const Text('Connect'),
               ),
+              if (_offerManualJoin) ...[
+                const SizedBox(height: 8),
+                // The manual route always works: join in the phone's own
+                // settings, come back, tap "check again" — the app binds
+                // to whatever Wi-Fi the phone is on and adopts whoever
+                // answers.
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.settings_outlined),
+                  label: const Text("Open the phone's Wi-Fi settings"),
+                  onPressed: _busy
+                      ? null
+                      : () => ref.read(radiosProvider).requestEnableWifi(),
+                ),
+              ],
               const SizedBox(height: 8),
               // A reinstall wipes the app but not a forgotten password.
               // Recovery runs over Bluetooth without one, so it has to be
@@ -235,6 +253,23 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
           'the card.');
       return;
     }
+    // The system's connect dialog scans for the network itself, and its
+    // scan comes back empty with Wi-Fi off or the Location service off
+    // (Android ties scanning to location) — "no available networks"
+    // while the switch is beaconing away. Catch both before the dialog
+    // can mislead.
+    final radios = ref.read(radiosProvider);
+    if (Platform.isAndroid && !await radios.isWifiOn()) {
+      await radios.requestEnableWifi();
+      setState(() => _error = 'Turn Wi-Fi on, then tap Connect again.');
+      return;
+    }
+    if (Platform.isAndroid && !await radios.isLocationOn()) {
+      await radios.openLocationSettings();
+      setState(() => _error = 'Turn Location on, then tap Connect again — '
+          'Android needs it to find nearby networks.');
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -244,7 +279,10 @@ class _AddMasterScreenState extends ConsumerState<AddMasterScreen> {
     if (!joined) {
       setState(() {
         _busy = false;
-        _error = 'Could not join "$ssid". Check the password on the card.';
+        _offerManualJoin = true;
+        _error = 'Could not join "$ssid" from here. Check the password on '
+            'the card — or join the network in your phone\'s Wi-Fi '
+            'settings and come back.';
       });
       return;
     }

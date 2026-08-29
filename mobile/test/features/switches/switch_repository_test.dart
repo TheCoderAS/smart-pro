@@ -13,7 +13,9 @@ void main() {
   setUp(() {
     dio = MockDio();
     repo = SwitchRepository(dio);
-    when(() => dio.post<dynamic>(any(), data: any(named: 'data')))
+    registerFallbackValue(Options());
+    when(() => dio.post<dynamic>(any(),
+            data: any(named: 'data'), options: any(named: 'options')))
         .thenAnswer((_) async => Response<dynamic>(
               requestOptions: RequestOptions(path: Api.relay),
               statusCode: 200,
@@ -22,7 +24,9 @@ void main() {
 
   Map<String, dynamic> capturedRelayBody() {
     final call = verify(
-      () => dio.post<dynamic>(Api.relay, data: captureAny(named: 'data')),
+      () => dio.post<dynamic>(Api.relay,
+          data: captureAny(named: 'data'),
+          options: any(named: 'options')),
     )..called(1);
     return call.captured.single as Map<String, dynamic>;
   }
