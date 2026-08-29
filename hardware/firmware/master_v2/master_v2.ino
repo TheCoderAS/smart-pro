@@ -3274,6 +3274,23 @@ static void task_bus(void *arg) {
         static uint32_t last_reap = 0;
         if (millis() - last_reap >= 2000) { last_reap = millis(); ble_reap_connections(); }
 
+        /* Advertising watchdog. Every restart path can fail once (the
+         * radio is shared with Wi-Fi and the mesh), and a single ignored
+         * failure meant no beacon until a power cycle -- the bench saw
+         * exactly that after a long out-of-range disconnect. If a slot is
+         * free and we are silent, start again and say so. */
+        static uint32_t last_adv_check = 0;
+        if (millis() - last_adv_check >= 3000) {
+            last_adv_check = millis();
+            if (ble_conn_count < BLE_MAX_CONN &&
+                !NimBLEDevice::getAdvertising()->isAdvertising()) {
+                bool adv_ok = NimBLEDevice::startAdvertising();
+                Serial.printf("[BLE] advertising was OFF with %u slot(s) free -- restart %s\n",
+                              (unsigned)(BLE_MAX_CONN - ble_conn_count),
+                              adv_ok ? "OK" : "FAILED");
+            }
+        }
+
         reset_button_tick();
         ble_recovery_apply();
 
@@ -6712,8 +6729,12 @@ class BleSrvCB : public NimBLEServerCallbacks {
                       reason, ble_conn_count);
         ble_update_adv_data();
         /* Keep advertising so the phone can hop to whichever master is
-         * nearest as the user moves, without any manual step. */
-        NimBLEDevice::startAdvertising();
+         * nearest as the user moves, without any manual step. A failed
+         * start here (radio busy with Wi-Fi at this exact moment) used to
+         * go unnoticed and left this master BLE-invisible until a power
+         * cycle; now it is logged and the watchdog in task_web retries. */
+        if (!NimBLEDevice::startAdvertising())
+            Serial.println("[BLE] adv restart FAILED after disconnect (watchdog will retry)");
     }
     void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
         Serial.printf("[BLE] MTU now %u\n", mtu);

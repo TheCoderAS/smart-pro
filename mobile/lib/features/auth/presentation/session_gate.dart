@@ -16,6 +16,7 @@ import '../../onboarding/presentation/commissioning_screen.dart';
 import '../../onboarding/presentation/welcome_screen.dart';
 import '../application/session.dart';
 import 'login_screen.dart';
+import 'setup_escape.dart';
 
 /// Root widget behind `/` — renders whatever the session state calls
 /// for. Navigation stays flat because the states are exclusive.
@@ -192,6 +193,9 @@ class _AccessResetScreen extends ConsumerWidget {
                   icon: const Icon(Icons.wifi_rounded),
                   label: Text(l10n.joinWifi),
                 ),
+                const SizedBox(height: 8),
+                // Always an exit, by decree: no screen is a dead end.
+                const SetupEscapeButton(),
               ],
             ),
           ),
@@ -295,37 +299,3 @@ class _UnreachableScreen extends ConsumerWidget {
 
 }
 
-/// The shared escape hatch: forget the current home (with consent) and
-/// land on the setup screen. Reachable from every identity screen —
-/// unreachable and wrong-network — because no such screen may be a dead
-/// end.
-Future<void> confirmSetupDifferentSwitch(
-  BuildContext context,
-  WidgetRef ref,
-) async {
-    final masters = ref.read(masterRegistryProvider).value ?? const [];
-    final name = masters.isEmpty ? 'this switch' : '"${masters.first.name}"';
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Set up a different switch?'),
-        content: Text(
-          'This removes $name from the app, including its saved sign-in. '
-          'The switch itself is not changed, and you can add it back any '
-          'time with its network name and password.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Remove and set up new'),
-          ),
-        ],
-      ),
-    );
-  if (ok != true) return;
-  await ref.read(sessionProvider.notifier).forgetHome();
-}

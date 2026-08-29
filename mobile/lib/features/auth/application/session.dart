@@ -282,13 +282,12 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
         // The device password doubles as the Wi-Fi password (API §1);
         // stored for the change-password rejoin dance.
         await _store.writePassword(ctx.uid, password);
-        // Signing in IS adding the switch — record it now, not whenever
-        // the first status update happens to arrive over Wi-Fi. The
-        // unrecorded window between login and that update is what let
-        // Bluetooth's adopt shortcut re-add a freshly removed master.
-        await ref.read(masterRegistryProvider.notifier).ensure(
-              uid: ctx.uid,
-              ssid: ctx.ssid,
+        // Signing in IS adding the switch — the ONE writer. Unconditional
+        // replace: whatever the list held (a removed master's ghost, a
+        // half-finished setup), the switch whose password just verified
+        // is the home now. Name refines from the next status update.
+        await ref.read(masterRegistryProvider.notifier).setHome(
+              SavedMaster(uid: ctx.uid, name: 'Master', ssid: ctx.ssid),
             );
         ref.read(tokenProvider.notifier).set(result.token);
         return Authenticated(ctx, mesh: result.mesh);
@@ -400,6 +399,12 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   /// whose master died for good could never be replaced: Settings lives
   /// behind the dashboard, and the dashboard needs the master.
   Future<void> forgetHome() async {
+    // Token first: every socket and command dies THIS instant, so no
+    // stale status update can arrive during the teardown below — the
+    // exact window a removed master's ghost used to write itself back
+    // through.
+    ref.read(tokenProvider.notifier).set(null);
+    ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
     try {
       final masters = await ref.read(masterRegistryProvider.future);
       for (final m in masters) {
@@ -408,7 +413,6 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     } on Object catch (e) {
       log.w('forgetHome purge skipped: $e');
     }
-    ref.read(tokenProvider.notifier).set(null);
     await ref.read(snapshotCacheProvider.notifier).clear();
     await ref.read(masterRegistryProvider.notifier).clear();
     // The connection-mode choice belonged to the removed switch's era.
@@ -418,8 +422,17 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     await ref
         .read(transportPreferenceProvider.notifier)
         .set(TransportPreference.auto);
-    ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
-    await ref.read(bleSessionProvider.notifier).deactivate();
+    // Capped: removal is app-side bookkeeping and must feel instant,
+    // and the BLE plugin's teardown is allowed to dawdle in the
+    // background — the epoch/gate machinery copes with a late dispose.
+    try {
+      await ref
+          .read(bleSessionProvider.notifier)
+          .deactivate()
+          .timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      log.w('ble teardown still finishing in the background');
+    }
     await refresh();
   }
 
