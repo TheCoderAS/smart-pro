@@ -7,11 +7,8 @@ import 'package:unisync/features/auth/application/session.dart';
 import 'package:unisync/features/auth/domain/models.dart';
 import 'package:unisync/features/auth/presentation/login_screen.dart';
 
-/// The post-removal wall: remove a switch, land on a login form for the
-/// very switch that was removed (the phone is still on its Wi-Fi), and
-/// have nowhere to go. With nothing paired the form is an adoption
-/// offer, so it must carry an exit to the setup screen; with a home
-/// paired it must not — wrong-network and unreachable own those cases.
+/// By decree, no screen is a dead end: the sign-in form always carries
+/// the "set up a different switch" escape, whatever the registry holds.
 void main() {
   const info = DeviceInfo(
     uptime: 1,
@@ -38,13 +35,14 @@ void main() {
     expect(find.textContaining('Set up a different'), findsOneWidget);
   });
 
-  testWidgets('a paired home hides it', (tester) async {
+  testWidgets('a paired home still has the escape (no dead ends, ever)',
+      (tester) async {
     SharedPreferences.setMockInitialValues({
       'masters': '[{"uid":"C5F77720","name":"Hall"}]',
     });
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Set up a different'), findsNothing);
+    expect(find.textContaining('Set up a different'), findsOneWidget);
   });
 }

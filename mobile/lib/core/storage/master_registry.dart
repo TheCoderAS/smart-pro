@@ -97,11 +97,15 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     state = AsyncValue.data(masters);
   }
 
-  /// Records a master seen on a live connection (any transport),
-  /// keeping any existing `ssid`/`meshId` and only refreshing the name.
-  /// Called from the dashboard on every state snapshot so a master the
-  /// user signed into — not just one commissioned from scratch — is
-  /// known to the BLE cold-start path. No-op when nothing changes.
+  /// Refreshes the name/network of an ALREADY-ADDED master. Never adds.
+  ///
+  /// The single-writer rule, learned the hard way: this used to add a
+  /// master when the list was empty, which let a stale status update —
+  /// in flight while the user removed their switch — quietly write the
+  /// removed master straight back in. The next sign-in's registration
+  /// was then refused ("unknown master"), Wi-Fi worked (it never reads
+  /// this list) and Bluetooth hunted the ghost. Adding happens through
+  /// [setHome], from sign-in, and nowhere else.
   Future<void> ensure({
     required String uid,
     String? name,
@@ -110,38 +114,32 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     if (uid.isEmpty) return;
     final current = [...state.value ?? await _load()];
     final i = current.indexWhere((m) => m.uid == uid);
-    // Only what the user added is ever recorded. The old rule quietly
-    // adopted any unknown uid as long as the home was meshed — which is
-    // how a removed master could creep back into the books. Mesh mates
-    // are accepted per-connection by the transport identity checks; they
-    // do not need a registry entry to be controlled.
-    if (i < 0 && current.isNotEmpty) {
-      log.w('ignoring unknown master $uid: not added to this app');
+    if (i < 0) {
+      log.d('not recording $uid: only sign-in adds a switch');
       return;
     }
-    if (i >= 0) {
-      final m = current[i];
-      final nextName = (name?.isNotEmpty ?? false) ? name! : m.name;
-      // The network name is cached from the master's own report every time
-      // we are connected, so instruction copy heals itself after a rename.
-      final nextSsid = (ssid?.isNotEmpty ?? false) ? ssid : m.ssid;
-      if (nextName == m.name && nextSsid == m.ssid) return;
-      current[i] = SavedMaster(
-        uid: m.uid,
-        name: nextName,
-        ssid: nextSsid,
-        meshId: m.meshId,
-      );
-    } else {
-      current.add(
-        SavedMaster(
-          uid: uid,
-          name: (name?.isNotEmpty ?? false) ? name! : 'Master',
-          ssid: (ssid?.isNotEmpty ?? false) ? ssid : null,
-        ),
-      );
-    }
+    final m = current[i];
+    final nextName = (name?.isNotEmpty ?? false) ? name! : m.name;
+    // The network name is cached from the master's own report every time
+    // we are connected, so instruction copy heals itself after a rename.
+    final nextSsid = (ssid?.isNotEmpty ?? false) ? ssid : m.ssid;
+    if (nextName == m.name && nextSsid == m.ssid) return;
+    current[i] = SavedMaster(
+      uid: m.uid,
+      name: nextName,
+      ssid: nextSsid,
+      meshId: m.meshId,
+    );
     await _persist(current);
+  }
+
+  /// THE one way a switch is added: a successful sign-in. Replaces the
+  /// list with exactly this master — unconditional, so no ghost entry
+  /// (however it got there) can ever refuse or outrank the switch the
+  /// user just proved they own with a password.
+  Future<void> setHome(SavedMaster master) async {
+    log.i('home = ${master.uid} "${master.name}" (set by sign-in)');
+    await _persist([master]);
   }
 
   /// Adds or updates (by uid).

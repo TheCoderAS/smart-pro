@@ -6,6 +6,7 @@ import '../../../app/router.dart';
 import '../../../core/platform/radios.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../auth/application/session.dart';
+import '../../auth/presentation/setup_escape.dart';
 
 /// The setup screen: get the phone onto the switch's Wi-Fi, then the
 /// session flow takes over (sign-in or commissioning). Rendered as the
@@ -45,14 +46,24 @@ class AddMasterScreen extends ConsumerWidget {
                       style: Theme.of(context).textTheme.titleLarge),
                   const SizedBox(height: 8),
                   Text(
-                    'This app is set up with "${masters.first.name}". To use '
-                    'a different switch, remove this one in Settings first.',
+                    'This app is set up with "${masters.first.name}".',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                           color:
                               Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                   ),
+                  const SizedBox(height: 16),
+                  // Even a state that should be impossible (this panel as
+                  // the root screen) must have exits — by decree, no
+                  // screen is a dead end.
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Check again'),
+                    onPressed: () =>
+                        ref.read(sessionProvider.notifier).refresh(),
+                  ),
+                  const SetupEscapeButton(),
                 ],
               ),
             ),

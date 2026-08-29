@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -361,9 +362,11 @@ class SettingsScreen extends ConsumerWidget {
       ),
     );
     if (!(confirmed ?? false)) return;
-    // Best-effort server-side sign-out first, while the token still
-    // exists, so the audit log records it. logout() swallows failures.
-    await ref.read(authRepositoryProvider).logout();
+    // Best-effort server-side sign-out, fired without waiting: on an
+    // unreachable master this request can sit out a 5 s timeout, and
+    // removal is app-side work that must feel instant. logout()
+    // swallows its own failures.
+    unawaited(ref.read(authRepositoryProvider).logout());
     // One path for "this switch leaves the app": secrets, cache,
     // registry, token — then a re-bootstrap. Ending on signOut() here
     // used to hard-land on a login form for the switch that was just

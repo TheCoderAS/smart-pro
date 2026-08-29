@@ -6,6 +6,7 @@ import '../../../core/storage/master_registry.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
+import '../../auth/presentation/setup_escape.dart';
 
 /// Factory-fresh master (info.auth == false): the API is wide open
 /// until an owner password is set, and whoever sets it first owns the
@@ -89,6 +90,9 @@ class _CommissioningScreenState extends ConsumerState<CommissioningScreen> {
                           )
                         : const Text('Claim this switch'),
                   ),
+                  const SizedBox(height: 8),
+                  // Always an exit, by decree: no screen is a dead end.
+                  const SetupEscapeButton(),
                 ],
               ),
             ),
