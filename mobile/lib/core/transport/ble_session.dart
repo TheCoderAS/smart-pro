@@ -73,6 +73,9 @@ class BleSessionController extends Notifier<BleSessionState> {
   /// two standalone masters apart — the manufacturer data carries a mesh
   /// id and flags, nothing identifying.
   String? _targetUid;
+
+  /// The registry name for [_targetUid], for logs a human can read.
+  String? _targetName;
   bool _active = false;
 
   // Serialises scans: flutter_reactive_ble allows only one active scan,
@@ -269,6 +272,11 @@ class BleSessionController extends Notifier<BleSessionState> {
         await deactivate();
         return;
       }
+      final t = _targetUid;
+      _targetName = masters
+          .where((m) => m.uid == t)
+          .map((m) => m.name)
+          .followedBy([masters.first.name]).first;
     } on Object catch (e) {
       log.w('ble activate: registry unreadable, staying down: $e');
       await deactivate();
@@ -360,6 +368,14 @@ class BleSessionController extends Notifier<BleSessionState> {
         candidates = candidates.where(isTarget).toList();
       }
       if (candidates.isEmpty) {
+        // Say it in the log, not only on screen — the whole story has to
+        // be readable from Settings → Logs alone.
+        if (beacons.isEmpty) {
+          log.w('ble: heard no Unisync beacon at all — will retry');
+        } else {
+          log.w('ble: target U$want ("$_targetName") not heard; ignoring '
+              '${beacons.map((b) => b.name).join(', ')} — will retry');
+        }
         state = BleSessionState(
           status: BleSessionStatus.failed,
           error: beacons.isEmpty
@@ -388,6 +404,9 @@ class BleSessionController extends Notifier<BleSessionState> {
       _connectedBeaconMeshId =
           target.advert.isStandalone ? 0 : target.meshId;
 
+      log.i('ble connecting → ${target.name}'
+          '${isTarget(target) ? ' (your "$_targetName")' : ' (mesh mate)'}'
+          ' ${target.rssi}dBm');
       state = state.copyWith(
         status: BleSessionStatus.connecting,
         masterName: target.name,
@@ -469,6 +488,9 @@ class BleSessionController extends Notifier<BleSessionState> {
         );
         return;
       }
+      log.i('ble connected: ${snap.selfUid} "${snap.masterName}" '
+          '(${snap.switches.length} switch(es), '
+          '${snap.peers.length} peer(s))');
       _emit(snap);
       // Only now, from an accepted master, may the home's mesh id be
       // learned — see _rememberMesh.
