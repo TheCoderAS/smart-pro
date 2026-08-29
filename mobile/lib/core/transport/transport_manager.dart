@@ -88,7 +88,7 @@ final activeControlProvider = Provider<ControlTransport>((ref) {
     final session = ref.watch(bleSessionProvider.notifier);
     return BleControlTransport(
       session.client,
-      onTokenRejected: ref.read(accessResetProvider.notifier).flag,
+      onTokenRejected: ref.read(accessResetProvider.notifier).strike,
     );
   }
   return WifiControlTransport(ref);

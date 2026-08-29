@@ -10,14 +10,35 @@ final accessResetProvider =
     NotifierProvider<AccessResetNotifier, bool>(AccessResetNotifier.new);
 
 class AccessResetNotifier extends Notifier<bool> {
+  /// Two rejected proofs inside this window mean the password really
+  /// changed; one alone is noise. During reconnect churn (a roam, the
+  /// two-master case) a single handshake can fail purely on timing —
+  /// interleaved connections desync the per-connection nonce — and that
+  /// one blip used to throw the "your access was reset" screen at a user
+  /// whose password had not changed at all.
+  static const window = Duration(seconds: 90);
+
+  DateTime? _firstStrike;
+
   @override
   bool build() => false;
 
-  void flag() {
-    if (!state) state = true;
+  /// A master rejected our proof. The first strike arms; a second within
+  /// [window] confirms — a genuinely changed password rejects again on
+  /// the very next reconnect, within seconds.
+  void strike() {
+    final now = DateTime.now();
+    final first = _firstStrike;
+    if (first != null && now.difference(first) <= window) {
+      _firstStrike = null;
+      if (!state) state = true;
+      return;
+    }
+    _firstStrike = now;
   }
 
   void clear() {
+    _firstStrike = null;
     if (state) state = false;
   }
 }

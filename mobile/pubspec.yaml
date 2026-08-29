@@ -7,7 +7,7 @@ publish_to: 'none'
 # The Android build number (versionCode) is stamped by CI from the run
 # number (--build-number), so every published APK upgrades cleanly over
 # the previous one; the +1 below only covers local builds.
-version: 1.1.0+1
+version: 1.1.1+1
 
 environment:
   sdk: ^3.12.2
@@ -82,12 +82,11 @@ flutter:
         - asset: assets/fonts/Manrope-Bold.ttf
           weight: 700
 
-# Launcher icon (logo v2): square mark crop for legacy launchers, dark
-# background + feathered foreground for adaptive ones. iOS is off with
-# the paused iOS build.
+# Launcher icon (logo v1): the flat U mark, no glow, on white — by
+# request. iOS is off with the paused iOS build.
 flutter_launcher_icons:
   android: true
   ios: false
   image_path: assets/branding/icon.png
-  adaptive_icon_background: "#000000"
+  adaptive_icon_background: "#FFFFFF"
   adaptive_icon_foreground: assets/branding/icon_foreground.png
