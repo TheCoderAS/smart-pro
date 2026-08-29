@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
+import '../../../core/storage/master_registry.dart';
 import '../application/session.dart';
 
 /// Password prompt. One password joins the Wi-Fi and logs in (API §1);
@@ -45,6 +46,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     final l10n = AppLocalizations.of(context)!;
     final locked = widget.state.failure is LockedOut;
     final error = _failureText(l10n);
+    // With nothing paired, this form is an adoption offer: whoever
+    // answers 192.168.4.1 is being proposed, and signing in pairs it.
+    // Right after "remove this switch" the phone is usually still on the
+    // removed master's Wi-Fi, so without an exit the removed switch's
+    // own login form is a wall. Hidden until the registry has loaded so
+    // a paired home never sees it flash.
+    final registry = ref.watch(masterRegistryProvider);
+    final adopting = registry.hasValue && (registry.value?.isEmpty ?? false);
 
     return Scaffold(
       body: SafeArea(
@@ -103,6 +112,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     onPressed: () => context.push(Routes.recovery),
                     child: Text(l10n.forgotPassword),
                   ),
+                  if (adopting)
+                    TextButton(
+                      onPressed: () => context.push(Routes.addMaster),
+                      child:
+                          const Text('Not this switch? Set up a different one'),
+                    ),
                 ],
               ),
             ),
