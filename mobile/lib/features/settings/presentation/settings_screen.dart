@@ -7,8 +7,6 @@ import 'package:go_router/go_router.dart';
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
-import '../../../core/storage/master_registry.dart';
-import '../../../core/storage/secure_store.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
@@ -19,7 +17,6 @@ import '../../../core/widgets/password_field.dart';
 import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
-import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_socket.dart';
 import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
@@ -364,11 +361,15 @@ class SettingsScreen extends ConsumerWidget {
       ),
     );
     if (!(confirmed ?? false)) return;
-    await ref.read(secureStoreProvider).purgeMaster(uid);
-    // Otherwise the next launch paints a house that is no longer yours.
-    await ref.read(snapshotCacheProvider.notifier).clear();
-    await ref.read(masterRegistryProvider.notifier).remove(uid);
-    await ref.read(sessionProvider.notifier).signOut();
+    // Best-effort server-side sign-out first, while the token still
+    // exists, so the audit log records it. logout() swallows failures.
+    await ref.read(authRepositoryProvider).logout();
+    // One path for "this switch leaves the app": secrets, cache,
+    // registry, token — then a re-bootstrap. Ending on signOut() here
+    // used to hard-land on a login form for the switch that was just
+    // removed; only the bootstrap knows that an empty registry means
+    // the setup screen.
+    await ref.read(sessionProvider.notifier).forgetHome();
     if (context.mounted) Navigator.of(context).pop();
   }
 }
