@@ -16,6 +16,7 @@ import '../ble/roaming.dart';
 import '../logging/log.dart';
 import '../storage/master_registry.dart';
 import '../ws/state_dto.dart';
+import 'access_reset.dart';
 import 'control_transport.dart';
 
 /// Runtime status of the BLE control session, surfaced to the UI.
@@ -59,6 +60,11 @@ class BleSessionController extends Notifier<BleSessionState> {
   final _roam = RoamPolicy();
   Timer? _roamTimer;
   int? _meshId;
+
+  /// The mesh id the connected device's own beacon advertised (0 =
+  /// standalone/none). Input to the identity check only — never merged
+  /// into the scan filter or the registry from here.
+  int _connectedBeaconMeshId = 0;
 
   /// The master the app is pointed at, when it knows. Masters advertise
   /// as `U{UID}`, and that name is the only thing in a beacon that tells
@@ -164,6 +170,16 @@ class BleSessionController extends Notifier<BleSessionState> {
     log.d('ble retry in ${delay.inSeconds}s (attempt $_retryAttempt)');
     _retryTimer = Timer(delay, () async {
       if (!_active) return;
+      // The link can have healed while this timer waited (another flow
+      // connected first). Running anyway was the two-master flap: the
+      // retry's connect pass tears the healthy link down (close before
+      // connect), the master logs "remote user terminated", the teardown
+      // schedules the next retry, and the cycle feeds itself forever.
+      if ((_client?.isConnected ?? false) &&
+          state.status == BleSessionStatus.connected) {
+        _cancelRetry();
+        return;
+      }
       try {
         // Balanced, not lowLatency: this can run for a long time when the
         // user is away from the house, and it is a background retry rather
@@ -286,10 +302,11 @@ class BleSessionController extends Notifier<BleSessionState> {
     _roamTimer?.cancel();
     _roam.clear();
     // An explicit ask, so start the backoff over: the user is standing
-    // there waiting, not sitting in a background retry cycle.
+    // there waiting, not sitting in a background retry cycle. Forced —
+    // this is the one caller allowed to rebuild a live link.
     _cancelRetry();
     try {
-      await _serialised(_connectNearest);
+      await _serialised(() => _connectNearest(force: true));
     } on Object catch (e) {
       log.w('ble reconnect attempt failed: $e');
     }
@@ -299,8 +316,19 @@ class BleSessionController extends Notifier<BleSessionState> {
 
   Future<void> _connectNearest({
     ScanMode mode = ScanMode.lowLatency,
+    bool force = false,
   }) async {
     if (!_active) return;
+    // A healthy link makes this a no-op unless the user explicitly asked
+    // for a rebuild. Every racing caller — a reconcile queued behind a
+    // succeeding connect, a stale retry — used to reach _openClient,
+    // whose first act is closing the live client: the self-inflicted
+    // "link lost" at the heart of the two-master flap.
+    if (!force &&
+        (_client?.isConnected ?? false) &&
+        state.status == BleSessionStatus.connected) {
+      return;
+    }
     // If this attempt is abandoned by the gate, its late state writes
     // must not stomp whatever a fresh attempt has since established.
     final epoch = _linkEpoch;
@@ -331,19 +359,18 @@ class BleSessionController extends Notifier<BleSessionState> {
         return b.rssi.compareTo(a.rssi);
       });
       final target = beacons.first;
-      _meshId ??= target.advert.isStandalone ? null : target.meshId;
+      // What THIS device claims to belong to, held for the post-connect
+      // identity check. Never merged into the scan filter: the filter
+      // describes the user's home (from the registry), and learning it
+      // from whatever answered the scan let a stranger redefine the home.
+      _connectedBeaconMeshId =
+          target.advert.isStandalone ? 0 : target.meshId;
 
       state = state.copyWith(
         status: BleSessionStatus.connecting,
         masterName: target.name,
       );
       await _openClient(target.deviceId, target.name);
-
-      // Remember the mesh id against a saved master so future scans
-      // filter to this system.
-      if (target.meshId != 0) {
-        await _rememberMesh(target);
-      }
     } on Object catch (e) {
       log.w('ble connect failed: $e');
       if (epoch != _linkEpoch) return;
@@ -412,7 +439,7 @@ class BleSessionController extends Notifier<BleSessionState> {
       // Wi-Fi path has guarded this since the beginning; Bluetooth never
       // did.
       if (!await _isKnownMaster(snap.selfUid)) {
-        log.w('ble: unknown master ${snap.selfUid}, refusing');
+        log.w('ble: ${snap.selfUid} is not set up in this app, refusing');
         await _closeClient();
         state = const BleSessionState(
           status: BleSessionStatus.failed,
@@ -421,6 +448,15 @@ class BleSessionController extends Notifier<BleSessionState> {
         return;
       }
       _emit(snap);
+      // Only now, from an accepted master, may the home's mesh id be
+      // learned — see _rememberMesh.
+      await _rememberMesh(snap.selfUid);
+    } on BleTokenRejected {
+      // Counts toward access-reset (a genuinely changed password rejects
+      // here again on the very next reconnect); a single churn blip
+      // never shows the screen.
+      ref.read(accessResetProvider.notifier).strike();
+      log.w('initial ble state fetch rejected');
     } on Exception catch (e) {
       log.w('initial ble state fetch failed: $e');
     }
@@ -489,9 +525,12 @@ class BleSessionController extends Notifier<BleSessionState> {
 
   /// Whether [uid] is a master this app is actually set up with.
   ///
-  /// A peer of a mesh we are paired with counts: roaming between masters
-  /// in one home is the point. A stranger does not, however strong its
-  /// signal.
+  /// The rule, verbatim from the owner: only what is currently added in
+  /// the app counts — removed means removed, never recalled. The one
+  /// exception is the mesh feature: a master is family only when the
+  /// added master has a valid mesh id AND the answering device's own
+  /// broadcast carries that same id. Zero/null is never a valid mesh id
+  /// and matches nothing.
   Future<bool> _isKnownMaster(String uid) async {
     try {
       final masters = await ref.read(masterRegistryProvider.future);
@@ -499,8 +538,11 @@ class BleSessionController extends Notifier<BleSessionState> {
       // the whole of onboarding.
       if (masters.isEmpty) return true;
       if (masters.any((m) => m.uid == uid)) return true;
-      final mesh = _meshId;
-      if (mesh != null && mesh != 0 && masters.any((m) => m.meshId == mesh)) {
+      final advertised = _connectedBeaconMeshId;
+      if (advertised != 0 &&
+          masters.any((m) => m.meshId != null &&
+              m.meshId != 0 &&
+              m.meshId == advertised)) {
         return true;
       }
       return false;
@@ -512,22 +554,30 @@ class BleSessionController extends Notifier<BleSessionState> {
     }
   }
 
-  Future<void> _rememberMesh(MasterBeacon beacon) async {
+  /// Records the home's mesh id — learned ONLY from the master the user
+  /// actually added, about itself, after it passed the identity check.
+  ///
+  /// The old version stamped the answering device's mesh id onto any
+  /// saved master that lacked one, before identity was even verified.
+  /// That is how a removed master talked its way back in: one connection
+  /// to it grafted its mesh id onto the new master's record, and the
+  /// next identity check waved it through as family.
+  Future<void> _rememberMesh(String uid) async {
+    final mesh = _connectedBeaconMeshId;
+    if (mesh == 0) return;
     try {
       final notifier = ref.read(masterRegistryProvider.notifier);
       final masters = ref.read(masterRegistryProvider).value ?? const [];
-      // Attach the mesh id to a saved master that lacks one.
       for (final m in masters) {
-        if (m.meshId == null) {
+        if (m.uid == uid && (m.meshId == null || m.meshId == 0)) {
           await notifier.upsert(
             SavedMaster(
               uid: m.uid,
               name: m.name,
               ssid: m.ssid,
-              meshId: beacon.meshId,
+              meshId: mesh,
             ),
           );
-          break;
         }
       }
     } on Object catch (e) {

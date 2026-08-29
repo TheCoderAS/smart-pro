@@ -110,16 +110,14 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     if (uid.isEmpty) return;
     final current = [...state.value ?? await _load()];
     final i = current.indexWhere((m) => m.uid == uid);
-    // One device per app. A uid that is neither the home nor one of its
-    // mesh-mates is a stranger and is not recorded — quietly adopting it
-    // is how a second device used to creep in.
+    // Only what the user added is ever recorded. The old rule quietly
+    // adopted any unknown uid as long as the home was meshed — which is
+    // how a removed master could creep back into the books. Mesh mates
+    // are accepted per-connection by the transport identity checks; they
+    // do not need a registry entry to be controlled.
     if (i < 0 && current.isNotEmpty) {
-      final mesh = current.first.meshId;
-      final sameMesh = mesh != null && mesh != 0;
-      if (!sameMesh) {
-        log.w('ignoring unknown master $uid: one device per app');
-        return;
-      }
+      log.w('ignoring unknown master $uid: not added to this app');
+      return;
     }
     if (i >= 0) {
       final m = current[i];

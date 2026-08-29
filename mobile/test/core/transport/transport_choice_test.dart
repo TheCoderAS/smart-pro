@@ -97,11 +97,14 @@ void main() {
   });
 
   group('accessReset', () {
-    test('starts clear, flags, and clears again', () {
+    test('starts clear, sets after two strikes, and clears again', () {
       final c = makeContainer();
       expect(c.read(accessResetProvider), isFalse);
 
-      c.read(accessResetProvider.notifier).flag();
+      // Two strikes: one rejected proof is churn noise, a repeat inside
+      // the window is a genuinely changed password.
+      c.read(accessResetProvider.notifier).strike();
+      c.read(accessResetProvider.notifier).strike();
       expect(c.read(accessResetProvider), isTrue);
 
       c.read(accessResetProvider.notifier).clear();
