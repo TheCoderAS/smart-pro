@@ -27,7 +27,11 @@ void main() {
   test('a scan that never completes is abandoned and retried', () {
     fakeAsync((async) {
       TestWidgetsFlutterBinding.ensureInitialized();
-      SharedPreferences.setMockInitialValues({});
+      // A registered home: with nothing added, Bluetooth (correctly)
+      // refuses to run at all now — adding happens by sign-in only.
+      SharedPreferences.setMockInitialValues({
+        'masters': '[{"uid":"C5F77720","name":"Hall"}]',
+      });
       final scanner = MockScanner();
       var calls = 0;
       when(() => scanner.collect(

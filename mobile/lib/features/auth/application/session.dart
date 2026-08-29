@@ -9,6 +9,7 @@ import '../../../core/logging/log.dart';
 import '../../../core/storage/master_registry.dart';
 import '../../../core/storage/saved_session.dart';
 import '../../../core/storage/secure_store.dart';
+import '../../../core/transport/ble_session.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/wifi/wifi_service.dart';
@@ -278,11 +279,17 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       try {
         final result = await _repo.login(password);
         await _store.writeToken(ctx.uid, result.token);
-        // The device password doubles as the Wi-Fi password (API §1).
-        // Stored so the app can rejoin the home network by itself —
-        // Android deprioritises saved networks with no internet, so
-        // "auto-connect" is otherwise at the OS scorer's mercy.
+        // The device password doubles as the Wi-Fi password (API §1);
+        // stored for the change-password rejoin dance.
         await _store.writePassword(ctx.uid, password);
+        // Signing in IS adding the switch — record it now, not whenever
+        // the first status update happens to arrive over Wi-Fi. The
+        // unrecorded window between login and that update is what let
+        // Bluetooth's adopt shortcut re-add a freshly removed master.
+        await ref.read(masterRegistryProvider.notifier).ensure(
+              uid: ctx.uid,
+              ssid: ctx.ssid,
+            );
         ref.read(tokenProvider.notifier).set(result.token);
         return Authenticated(ctx, mesh: result.mesh);
       } on ApiFailure catch (e) {
@@ -404,26 +411,15 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     ref.read(tokenProvider.notifier).set(null);
     await ref.read(snapshotCacheProvider.notifier).clear();
     await ref.read(masterRegistryProvider.notifier).clear();
-    await refresh();
-  }
-
-  /// Rejoin the paired home's network and re-probe -- the wrong-network
-  /// screen's one action. One home per app: there is nothing to choose,
-  /// there is only going back.
-  Future<void> rejoinHome() async {
-    try {
-      final masters = await ref.read(masterRegistryProvider.future);
-      final home = masters.isEmpty ? null : masters.first;
-      final ssid = home?.ssid;
-      if (home != null && ssid != null && ssid.isNotEmpty) {
-        final password = await _store.readPassword(home.uid);
-        if (password != null) {
-          await ref.read(wifiServiceProvider).join(ssid, password);
-        }
-      }
-    } on Object catch (e) {
-      log.w('rejoin skipped: $e');
-    }
+    // The connection-mode choice belonged to the removed switch's era.
+    // Left standing, a stale "bluetooth" raced ahead of the next
+    // sign-in's registration and handed the link to whatever Bluetooth
+    // found. A fresh home starts on automatic.
+    await ref
+        .read(transportPreferenceProvider.notifier)
+        .set(TransportPreference.auto);
+    ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
+    await ref.read(bleSessionProvider.notifier).deactivate();
     await refresh();
   }
 

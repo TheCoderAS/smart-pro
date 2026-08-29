@@ -7,7 +7,7 @@ publish_to: 'none'
 # The Android build number (versionCode) is stamped by CI from the run
 # number (--build-number), so every published APK upgrades cleanly over
 # the previous one; the +1 below only covers local builds.
-version: 1.1.3+1
+version: 1.2.0+1
 
 environment:
   sdk: ^3.12.2
@@ -46,7 +46,6 @@ dependencies:
   # Runtime permission prompts (BLE split, NEARBY_WIFI_DEVICES)
   permission_handler: ^13.0.0
   flutter_reactive_ble: ^5.5.0
-  mobile_scanner: ^7.4.0
   flutter_localizations:
     sdk: flutter
   intl: any

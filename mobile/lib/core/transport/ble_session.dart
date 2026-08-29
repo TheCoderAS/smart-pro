@@ -253,6 +253,22 @@ class BleSessionController extends Notifier<BleSessionState> {
       _meshId ??= meshId;
       return;
     }
+    // A switch is added by signing in, and no other way. With nothing
+    // added, Bluetooth does not scan, connect, or record. The old
+    // "nothing paired yet — adopt whoever we find" shortcut is how a
+    // freshly REMOVED master re-added itself while a new sign-in's
+    // registration was still in flight.
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      if (masters.isEmpty) {
+        await deactivate();
+        return;
+      }
+    } on Object catch (e) {
+      log.w('ble activate: registry unreadable, staying down: $e');
+      await deactivate();
+      return;
+    }
     _active = true;
     // Keep a mesh id learned from a previous connect when the caller
     // hasn't got one — it is what filters the scan to the user's own
@@ -461,9 +477,10 @@ class BleSessionController extends Notifier<BleSessionState> {
   Future<bool> _isKnownMaster(String uid) async {
     try {
       final masters = await ref.read(masterRegistryProvider.future);
-      // Nothing paired yet — this is the first master and adopting it is
-      // the whole of onboarding.
-      if (masters.isEmpty) return true;
+      // Nothing added means nothing is trusted. Adding happens by
+      // signing in over Wi-Fi, never by Bluetooth discovery — the old
+      // "empty list ⇒ adopt" escape re-added a removed master.
+      if (masters.isEmpty) return false;
       if (masters.any((m) => m.uid == uid)) return true;
       final advertised = _connectedBeaconMeshId;
       if (advertised != 0 &&
