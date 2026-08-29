@@ -4,6 +4,9 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unisync/core/api/dio_client.dart';
+import 'package:unisync/core/transport/ble_session.dart';
+import 'package:unisync/core/transport/control_transport.dart';
+import 'package:unisync/core/transport/transport_manager.dart';
 import 'package:unisync/core/ws/state_dto.dart';
 import 'package:unisync/core/ws/state_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -40,6 +43,13 @@ class _FakeSink implements WebSocketSink {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+/// A BLE session that reports itself live without touching any radio.
+class _BleLive extends BleSessionController {
+  @override
+  BleSessionState build() =>
+      const BleSessionState(status: BleSessionStatus.connecting);
 }
 
 void main() {
@@ -190,5 +200,31 @@ void main() {
     expect(seen, isNotNull);
     expect(seen!.port, 81);
     expect(seen!.queryParameters['t'], '3f2ac81d');
+  });
+
+  test('a live BLE session forbids the Wi-Fi socket, whatever the flag says',
+      () async {
+    // The split-brain the startup races produced: transport flag on
+    // Wi-Fi, BLE session live and carrying commands. The socket's TCP
+    // reconnects then hammer the master's single radio and starve the
+    // BLE writes — so a live BLE session means no Wi-Fi socket, period.
+    var attempts = 0;
+    final container = ProviderContainer(
+      overrides: [
+        channelFactoryProvider.overrideWithValue((uri) {
+          attempts++;
+          return FakeChannel();
+        }),
+        bleSessionProvider.overrideWith(_BleLive.new),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(tokenProvider.notifier).set('cafebabe');
+    container.read(currentTransportProvider.notifier).set(TransportKind.wifi);
+    container.listen(stateSocketProvider, (_, _) {});
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(attempts, 0);
   });
 }

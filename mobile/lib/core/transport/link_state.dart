@@ -83,7 +83,9 @@ class LinkMonitor extends Notifier<LinkState> {
   void markAlive() {
     _lastGood = DateTime.now();
     final kind = ref.read(currentTransportProvider);
-    final next = kind == TransportKind.ble
+    final bleLive =
+        ref.read(bleSessionProvider).status != BleSessionStatus.idle;
+    final next = (kind == TransportKind.ble || bleLive)
         ? LinkState.connectedBle
         : LinkState.connectedWifi;
     if (state != next) state = next;
@@ -91,7 +93,18 @@ class LinkMonitor extends Notifier<LinkState> {
 
   Future<void> _tick() async {
     final kind = ref.read(currentTransportProvider);
-    if (kind == TransportKind.ble) {
+    // One transport at a time, judged by reality rather than the flag.
+    // At startup the permission dialogs, the session bootstrap and the
+    // transport reconciler race, and a losing reconcile can leave the
+    // flag on Wi-Fi while a BLE session is live and carrying commands.
+    // The Wi-Fi heartbeat then probed HTTP every few seconds — and every
+    // probe wakes the master's single radio (Wi-Fi, BLE and mesh share
+    // one chip), starving the very BLE writes the user is waiting on.
+    // While a BLE session exists in any form, this monitor treats the
+    // link as Bluetooth: no HTTP probe, no rebind, no rejoin.
+    final bleLive =
+        ref.read(bleSessionProvider).status != BleSessionStatus.idle;
+    if (kind == TransportKind.ble || bleLive) {
       // Both, deliberately. The session status is a state machine and can
       // go stale — it did: a master powered off for five minutes still read
       // as connected, because nothing moved the status off it. isConnected
