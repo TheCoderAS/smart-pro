@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/dio_client.dart';
 import '../api/endpoints.dart';
 import '../logging/log.dart';
+import '../storage/master_registry.dart';
+import '../storage/secure_store.dart';
 import '../wifi/wifi_service.dart';
 import 'ble_session.dart';
 import 'control_transport.dart';
@@ -151,8 +153,56 @@ class LinkMonitor extends Notifier<LinkState> {
       }
       _degrade();
       await _rebindWifi();
+      await _rejoinHomeWifi();
     } finally {
       _probing = false;
+    }
+  }
+
+  /// After this many consecutive misses (~15-20 s down), re-binding is
+  /// presumed insufficient: the phone has probably left the network.
+  static const rejoinAfterMisses = 3;
+
+  /// At most one rejoin attempt per this window.
+  static const rejoinEvery = Duration(seconds: 30);
+
+  DateTime? _lastRejoin;
+
+  /// Actively rejoin the home network instead of waiting for Android.
+  ///
+  /// The user's report: auto-connect ON, yet coming back into range
+  /// sometimes reconnected and sometimes didn't. Android deprioritises
+  /// saved networks with no internet — with mobile data available its
+  /// scorer often refuses the master's AP no matter what the toggle
+  /// says; the times it *did* reconnect were this app's own network
+  /// request still being alive. So the app owns the rejoin: SSID from
+  /// the registry, password from the vault (stored at login — it is the
+  /// Wi-Fi password, API §1), silently re-approved by the OS after the
+  /// first join. Throttled, and only after re-binding alone has failed
+  /// a few times running.
+  Future<void> _rejoinHomeWifi() async {
+    if (_misses < rejoinAfterMisses) return;
+    final last = _lastRejoin;
+    if (last != null && DateTime.now().difference(last) < rejoinEvery) return;
+    try {
+      final masters =
+          await ref.read(masterRegistryProvider.future).timeout(grace);
+      final ssid = masters.isEmpty ? null : masters.first.ssid;
+      if (ssid == null || ssid.isEmpty) return;
+      // Any member's stored password drives the mesh — same fallback the
+      // saved-session token uses.
+      String? password;
+      final store = ref.read(secureStoreProvider);
+      for (final m in masters) {
+        password = await store.readPassword(m.uid);
+        if (password != null) break;
+      }
+      if (password == null) return; // nothing stored yet (pre-1.1 login)
+      _lastRejoin = DateTime.now();
+      log.i('link down ${_misses}x — rejoining "$ssid"');
+      await ref.read(wifiServiceProvider).join(ssid, password);
+    } on Object catch (e) {
+      log.d('auto-rejoin skipped: $e');
     }
   }
 

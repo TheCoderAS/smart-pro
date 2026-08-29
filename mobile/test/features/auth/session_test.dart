@@ -48,6 +48,7 @@ void main() {
     store = MockSecureStore();
     wifi = MockWifiService();
     when(() => store.writeToken(any(), any())).thenAnswer((_) async {});
+    when(() => store.writePassword(any(), any())).thenAnswer((_) async {});
     when(() => store.deleteToken(any())).thenAnswer((_) async {});
     when(() => store.readToken(any())).thenAnswer((_) async => null);
     when(() => repo.logout()).thenAnswer((_) async {});
@@ -154,6 +155,10 @@ void main() {
     expect((state! as Authenticated).mesh, isTrue);
     expect(c.read(tokenProvider), '3f2ac81d');
     verify(() => store.writeToken('C5F77720', '3f2ac81d')).called(1);
+    // The device password is the Wi-Fi password (API §1); stored so the
+    // app can rejoin the home network itself when Android's scorer
+    // refuses to auto-join an internet-less AP.
+    verify(() => store.writePassword('C5F77720', 'goodpass')).called(1);
   });
 
   test('login failure → NeedsLogin carrying the failure', () async {

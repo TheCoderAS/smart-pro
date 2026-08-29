@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.PowerManager
@@ -128,6 +129,8 @@ class MainActivity : FlutterActivity() {
                 "requestEnableBluetooth" -> result.success(requestEnableBluetooth())
                 "isWifiOn" -> result.success(isWifiOn())
                 "requestEnableWifi" -> result.success(requestEnableWifi())
+                "isLocationOn" -> result.success(isLocationOn())
+                "openLocationSettings" -> result.success(openLocationSettings())
                 "release" -> {
                     releaseJoin()
                     result.success(true)
@@ -276,6 +279,36 @@ class MainActivity : FlutterActivity() {
                     wm.isWifiEnabled = true
                 }
             }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Android ties Wi-Fi scanning to the Location service: with it off,
+     * scans silently return nothing — including the scan behind the
+     * system's own network-request dialog, which then claims there are
+     * no networks while the AP is beaconing away.
+     */
+    private fun isLocationOn(): Boolean {
+        return try {
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                lm.isLocationEnabled
+            } else {
+                @Suppress("DEPRECATION")
+                (lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                    lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
+            }
+        } catch (_: Exception) {
+            true // unknown must not trigger a prompt
+        }
+    }
+
+    private fun openLocationSettings(): Boolean {
+        return try {
+            startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             true
         } catch (_: Exception) {
             false

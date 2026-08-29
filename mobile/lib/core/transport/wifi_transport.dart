@@ -30,6 +30,10 @@ class WifiControlTransport implements ControlTransport {
   @override
   TransportKind get kind => TransportKind.wifi;
 
+  /// Anything slower than this gets a log line — user-visible lag with a
+  /// number attached beats guessing where the time went.
+  static const slowCommand = Duration(milliseconds: 500);
+
   @override
   Future<void> setRelay({
     required String id,
@@ -37,6 +41,7 @@ class WifiControlTransport implements ControlTransport {
     int? ch,
     String? masterUid,
   }) async {
+    final clock = Stopwatch()..start();
     // Through the gate: one command in flight, repeat taps on one switch
     // coalesced to the final state. The master's server is tiny; offered
     // load has to be bounded on this side.
@@ -48,6 +53,10 @@ class WifiControlTransport implements ControlTransport {
           send: ({required id, required on, ch, masterUid}) => _switch
               .setRelay(id: id, on: on, ch: ch, masterUid: masterUid),
         );
+    // Queue wait included on purpose: this is the delay the user feels.
+    if (clock.elapsed > slowCommand) {
+      log.i('relay $id took ${clock.elapsedMilliseconds}ms');
+    }
     // A command that went through is proof the link works — better proof
     // than any probe, and it lets the heartbeat stay quiet while the user
     // is actively driving switches.

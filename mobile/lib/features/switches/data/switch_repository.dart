@@ -24,6 +24,18 @@ class SwitchRepository {
   /// and the state document's channel field is named inconsistently
   /// (`channel` for local switches, `ch` for peers) — deriving it from
   /// the id is the one source of truth that always holds.
+  /// Relay commands answer in milliseconds on a healthy LAN, and they run
+  /// through a single-flight queue — a command allowed to hang for the
+  /// default 10 s stalls every tap behind it, which is what "command lag"
+  /// feels like. Failing fast releases the queue and hands the problem to
+  /// the healing paths (rebind, rejoin, socket reconnect).
+  static const _commandReceiveWindow = Duration(seconds: 3);
+
+  Options get _commandOptions => Options(
+        receiveTimeout: _commandReceiveWindow,
+        sendTimeout: const Duration(seconds: 2),
+      );
+
   Future<void> setRelay({
     required String id,
     required bool on,
@@ -44,6 +56,7 @@ class SwitchRepository {
             'ch': channel,
             'state': on ? 1 : 0,
           },
+          options: _commandOptions,
         );
         return;
       }
@@ -54,6 +67,7 @@ class SwitchRepository {
           'state': on ? 1 : 0,
           'ch': channel,
         },
+        options: _commandOptions,
       );
     } on DioException catch (e) {
       throw e.apiFailure;
@@ -71,7 +85,7 @@ class SwitchRepository {
   /// POST /api/relay/killall — everything off, everywhere.
   Future<void> killAll() async {
     try {
-      await _dio.post<dynamic>(Api.relayKillAll);
+      await _dio.post<dynamic>(Api.relayKillAll, options: _commandOptions);
     } on DioException catch (e) {
       throw e.apiFailure;
     }

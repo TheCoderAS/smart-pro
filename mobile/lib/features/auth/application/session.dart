@@ -278,6 +278,11 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
       try {
         final result = await _repo.login(password);
         await _store.writeToken(ctx.uid, result.token);
+        // The device password doubles as the Wi-Fi password (API §1).
+        // Stored so the app can rejoin the home network by itself —
+        // Android deprioritises saved networks with no internet, so
+        // "auto-connect" is otherwise at the OS scorer's mercy.
+        await _store.writePassword(ctx.uid, password);
         ref.read(tokenProvider.notifier).set(result.token);
         return Authenticated(ctx, mesh: result.mesh);
       } on ApiFailure catch (e) {
@@ -452,6 +457,8 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
           final result = await _repo.login(newPassword);
           final freshInfo = info ?? await _repo.info();
           await _store.writeToken(freshInfo.uid, result.token);
+          // Keep the stored rejoin password in step with the change.
+          await _store.writePassword(freshInfo.uid, newPassword);
           ref.read(tokenProvider.notifier).set(result.token);
           return Authenticated(freshInfo, mesh: result.mesh);
         } on Unreachable {
