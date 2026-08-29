@@ -143,24 +143,55 @@ jobs:
           restore-keys: gradle-${{ runner.os }}-
       - run: flutter pub get
       - run: dart run build_runner build --delete-conflicting-outputs
-      # The universal release APK, and nothing else. The per-ABI splits
-      # and the debug APK tripled the Gradle work for artifacts nobody was
-      # installing -- the universal APK runs on every phone. The in-app
-      # Logs screen (Settings -> Logs) works on release builds, which is
-      # what the debug APK was for. The .aab (Play Store format) is still
-      # built on a manual workflow_dispatch, the only place it is needed.
-      - run: flutter build apk --release
+      # Version: the display version (X.Y.Z) comes from pubspec.yaml,
+      # bumped per change; the Android build number (versionCode) is the
+      # workflow run number, so it only ever grows and every published
+      # APK installs cleanly over the previous one.
+      - name: read version
+        id: ver
+        run: |
+          name=$(sed -n 's/^version: *\([0-9][0-9.]*\).*/\1/p' pubspec.yaml | head -1)
+          echo "name=${name:-0.0.0}" >> "$GITHUB_OUTPUT"
+          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+      # Per-ABI release APKs (the R8 work happens once for all three, so
+      # this costs the same as one universal build at a third the download
+      # size). The debug APK stays gone -- the in-app Logs screen works on
+      # release builds. The .aab (Play Store format) is still built on a
+      # manual workflow_dispatch, the only place it is needed.
+      - run: flutter build apk --release --split-per-abi
+          --build-number=${{ steps.ver.outputs.build }}
       - run: flutter build appbundle --release
+          --build-number=${{ steps.ver.outputs.build }}
         if: github.event_name == 'workflow_dispatch'
-      - name: publish to mobile-latest release
+      - name: publish versioned + rolling releases
         env:
           GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.ver.outputs.name }}
+          BUILD: ${{ steps.ver.outputs.build }}
         run: |
-          notes="Rebuilt on every mobile change. Install app-release.apk -- it runs on every phone. Built from ${GITHUB_SHA}."
-          # `create` is a no-op once the release exists, so the notes used
-          # to freeze at whatever commit first published them while the
-          # assets kept updating -- the description named a build nobody
-          # was downloading. Edit when it is already there.
+          apkdir=build/app/outputs/flutter-apk
+          abis=(arm64-v8a armeabi-v7a x86_64)
+
+          # 1. Permanent versioned release: one per publish, versioned
+          # file names, so every build that ever reached a phone stays
+          # downloadable and identifiable.
+          tag="v${VER}-b${BUILD}"
+          versioned=()
+          for abi in "${abis[@]}"; do
+            cp "$apkdir/app-$abi-release.apk" \
+               "$apkdir/unisync-v${VER}-b${BUILD}-$abi.apk"
+            versioned+=("$apkdir/unisync-v${VER}-b${BUILD}-$abi.apk")
+          done
+          gh release create "$tag" \
+            --title "Unisync Android v${VER} (build ${BUILD})" \
+            --notes "Most phones want the arm64-v8a APK. Built from ${GITHUB_SHA}." \
+            "${versioned[@]}"
+
+          # 2. Rolling mobile-latest: stable file names, clobbered every
+          # publish, so the bookmark keeps working. `create` is a no-op
+          # once the release exists, so edit-then-create keeps the notes
+          # naming the build people actually download.
+          notes="Latest build: v${VER} (build ${BUILD}), from ${GITHUB_SHA}. Most phones want app-arm64-v8a-release.apk. Older versions live in the v* releases."
           if gh release view mobile-latest >/dev/null 2>&1; then
             gh release edit mobile-latest --prerelease \
               --title "Unisync Android (rolling)" --notes "$notes"
@@ -168,18 +199,16 @@ jobs:
             gh release create mobile-latest --prerelease \
               --title "Unisync Android (rolling)" --notes "$notes"
           fi
-          assets=(build/app/outputs/flutter-apk/app-release.apk)
+          assets=()
+          for abi in "${abis[@]}"; do
+            assets+=("$apkdir/app-$abi-release.apk")
+          done
           # Only when this run built one (workflow_dispatch). A push run
-          # leaves the previously uploaded .aab in place rather than
-          # deleting it.
+          # leaves the previously uploaded .aab in place.
           if [ -f build/app/outputs/bundle/release/app-release.aab ]; then
             assets+=(build/app/outputs/bundle/release/app-release.aab)
           fi
           gh release upload mobile-latest "${assets[@]}" --clobber
-          # The splits and the debug APK are not built any more; delete the
-          # stale copies so nobody installs an old build by picking the
-          # wrong asset.
-          for stale in app-arm64-v8a-release.apk app-armeabi-v7a-release.apk \
-                       app-x86_64-release.apk app-debug.apk; do
-            gh release delete-asset mobile-latest "$stale" -y || true
-          done
+          # The universal APK is not built any more; drop the stale copy
+          # so nobody installs an old build by picking the wrong asset.
+          gh release delete-asset mobile-latest app-release.apk -y || true

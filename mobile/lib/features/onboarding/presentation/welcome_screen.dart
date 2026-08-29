@@ -32,34 +32,19 @@ class WelcomeScreen extends ConsumerWidget {
           child: Column(
             children: [
               const Spacer(flex: 2),
-              Container(
-                padding: const EdgeInsets.all(28),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      scheme.primary,
-                      scheme.primary.withValues(alpha: 0.65),
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.lightbulb_rounded,
-                  size: 56,
-                  color: scheme.onPrimary,
+              // The logo carries the wordmark, so no separate app-name
+              // text. Its artwork is on a dark ground; the rounded clip
+              // makes it read as a deliberate branded card on the light
+              // theme instead of a floating black rectangle.
+              ClipRRect(
+                borderRadius: BorderRadius.circular(28),
+                child: Image.asset(
+                  'assets/branding/logo.png',
+                  width: 300,
+                  fit: BoxFit.contain,
                 ),
               ).animate().scale(duration: 500.ms, curve: Curves.easeOutBack),
-              const SizedBox(height: 28),
-              Text(
-                'Unisync',
-                style: theme.textTheme.displaySmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.5,
-                ),
-              ).animate().fadeIn(delay: 150.ms, duration: 400.ms),
-              const SizedBox(height: 10),
+              const SizedBox(height: 20),
               Text(
                 'Your switches, your network, your home.',
                 textAlign: TextAlign.center,
