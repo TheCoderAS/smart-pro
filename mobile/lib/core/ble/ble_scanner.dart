@@ -20,8 +20,7 @@ class BleScanner {
 
   final FlutterReactiveBle _ble;
 
-  /// Emits the latest-seen beacon per device. Callers dedupe/track
-  /// RSSI over time (see [RoamPolicy]). [meshId] null keeps every
+  /// Emits the latest-seen beacon per device. [meshId] null keeps every
   /// Unisync beacon (used at first pairing); a value keeps only that
   /// mesh (standalone pairs by device id, so pass null there).
   ///

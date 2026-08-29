@@ -12,7 +12,6 @@ import '../ble/ble_proof.dart';
 import '../ble/ble_scanner.dart';
 import '../ble/endpoints_ble.dart';
 import '../ble/recovery_service.dart' show reactiveBleProvider;
-import '../ble/roaming.dart';
 import '../logging/log.dart';
 import '../storage/master_registry.dart';
 import '../ws/state_dto.dart';
@@ -49,16 +48,15 @@ final bleSessionProvider =
   BleSessionController.new,
 );
 
-/// Owns the live BLE connection: scan for the paired mesh, connect to
-/// the nearest master, hold the client, and roam when a stronger master
-/// appears. Activated when the active transport is BLE; torn down when
-/// it isn't.
+/// Owns the live BLE connection: scan for the paired home, connect to
+/// the nearest master, hold the client. Activated when the active
+/// transport is BLE; torn down when it isn't. Handoff between masters
+/// happens through the retry loop when a link drops — never by scanning
+/// alongside a live connection.
 class BleSessionController extends Notifier<BleSessionState> {
   BleControlClient? _client;
   StreamSubscription<StateSnapshot>? _stateSub;
   final _stateController = StreamController<StateSnapshot>.broadcast();
-  final _roam = RoamPolicy();
-  Timer? _roamTimer;
   int? _meshId;
 
   /// The mesh id the connected device's own beacon advertised (0 =
@@ -71,19 +69,14 @@ class BleSessionController extends Notifier<BleSessionState> {
   /// two standalone masters apart — the manufacturer data carries a mesh
   /// id and flags, nothing identifying.
   String? _targetUid;
-  String? _connectedDeviceId;
   bool _active = false;
-  // Whether the connected master reports peers. No peers ⇒ nothing to
-  // roam to ⇒ the roam loop skips scanning entirely, so a single-master
-  // system never runs the radio-hungry background scan.
-  bool _hasPeers = false;
 
   // Serialises scans: flutter_reactive_ble allows only one active scan,
-  // so a manual reconnect and the roam loop must not scan at once.
+  // so a manual reconnect and a background retry must not scan at once.
   Future<void> _scanGate = Future<void>.value();
 
-  // Serialises link changes. The roam loop and a reconnect could both
-  // call _openClient, leaving two GATT connections open to the same
+  // Serialises link changes. A background retry and a reconnect could
+  // both call _openClient, leaving two GATT connections open to the same
   // master. The master keys each connection's proof on its own nonce but
   // tracks the request handle globally, so whichever wrote last decided
   // which nonce the other's proof was checked against — and the loser was
@@ -122,22 +115,15 @@ class BleSessionController extends Notifier<BleSessionState> {
     return next;
   }
 
-  /// How often the roam loop wakes, how long it scans, and how long it
-  /// keeps off the radio after a command.
-  ///
-  /// This used to wake every 3 seconds and scan for 3 — a scan finished
-  /// and the next began, so the radio was scanning essentially all the
-  /// time while a GATT connection was live. That is what made control
-  /// horribly slow: on Android a concurrent scan and an active connection
-  /// fight for the same radio, and the connection loses.
-  ///
-  /// 2 seconds in 20 is a 10% duty cycle instead of 100%, and roaming is
-  /// suppressed entirely for [roamQuietFor] after a command, so nothing
-  /// competes with the tap someone is waiting on. A handoff a few seconds
-  /// later is invisible; a switch that takes seconds to fire is not.
-  static const roamEvery = Duration(seconds: 20);
-  static const roamWindow = Duration(seconds: 2);
-  static const roamQuietFor = Duration(seconds: 8);
+  // There is deliberately NO background roam scanning. While connected,
+  // this session never touches the scanner: a scan and a live GATT
+  // connection share one radio, and every duty-cycle scheme tried here
+  // (3s/3s, then 2s in 20s with quiet windows) ended the same way —
+  // writes crawling into seconds whenever a scan overlapped a tap, and a
+  // hung scan-cancel leaving the radio scanning forever. Roaming still
+  // works: leaving a master's range drops the link, and the retry loop
+  // scans and connects to the strongest master of the home — which is
+  // what a real-world handoff is.
 
   Timer? _retryTimer;
   int _retryAttempt = 0;
@@ -216,10 +202,8 @@ class BleSessionController extends Notifier<BleSessionState> {
     return result;
   }
 
-  /// Pushes a snapshot to consumers and tracks whether roaming is even
-  /// worth scanning for.
+  /// Pushes a snapshot to consumers.
   void _emit(StateSnapshot snap) {
-    _hasPeers = snap.peers.isNotEmpty;
     _stateController.add(snap);
   }
 
@@ -251,7 +235,6 @@ class BleSessionController extends Notifier<BleSessionState> {
       log.d('ble retarget → $uid (mesh ${meshId?.toRadixString(16)})');
       _targetUid = uid;
       _meshId = meshId; // replaces, never merges — this is the fix
-      _roam.clear();
       await _closeClient();
       _cancelRetry();
     }
@@ -281,7 +264,6 @@ class BleSessionController extends Notifier<BleSessionState> {
       log.w('ble activate attempt failed: $e');
     }
     if (state.status != BleSessionStatus.connected) _scheduleRetry();
-    _startRoamLoop();
   }
 
   Future<void> deactivate() async {
@@ -292,15 +274,13 @@ class BleSessionController extends Notifier<BleSessionState> {
     }
   }
 
-  /// Manual reconnect (the dashboard's refresh action). Stops roaming,
-  /// re-scans, and re-opens the client — safe to call while connected.
+  /// Manual reconnect (the dashboard's refresh action). Re-scans and
+  /// re-opens the client — safe to call while connected.
   Future<void> reconnect() async {
     if (!_active) {
       await activate(meshId: _meshId);
       return;
     }
-    _roamTimer?.cancel();
-    _roam.clear();
     // An explicit ask, so start the backoff over: the user is standing
     // there waiting, not sitting in a background retry cycle. Forced —
     // this is the one caller allowed to rebuild a live link.
@@ -311,7 +291,6 @@ class BleSessionController extends Notifier<BleSessionState> {
       log.w('ble reconnect attempt failed: $e');
     }
     if (state.status != BleSessionStatus.connected) _scheduleRetry();
-    _startRoamLoop();
   }
 
   Future<void> _connectNearest({
@@ -416,7 +395,6 @@ class BleSessionController extends Notifier<BleSessionState> {
       return;
     }
     _client = client;
-    _connectedDeviceId = deviceId;
     _stateSub = client.stateStream.listen(_emit);
     state = state.copyWith(
       status: BleSessionStatus.connected,
@@ -460,57 +438,6 @@ class BleSessionController extends Notifier<BleSessionState> {
     } on Exception catch (e) {
       log.w('initial ble state fetch failed: $e');
     }
-  }
-
-  void _startRoamLoop() {
-    _roamTimer?.cancel();
-    _roamTimer = Timer.periodic(roamEvery, (_) async {
-      // Only scan when roaming is actually possible: an active mesh
-      // session with peers to roam to. A single-master system never
-      // scans in the background — that was the "app feels slow" cause.
-      if (!_active ||
-          _meshId == null ||
-          _connectedDeviceId == null ||
-          !_hasPeers) {
-        return;
-      }
-      // Stay off the radio while the app is being used. A scan alongside
-      // a live GATT link costs real latency on the very tap the user is
-      // waiting on, and roaming a few seconds later costs nothing.
-      final last = _client?.lastActivity;
-      if (last != null && DateTime.now().difference(last) < roamQuietFor) {
-        return;
-      }
-      try {
-        // Balanced (not lowLatency) so background roaming doesn't
-        // saturate the radio the live connection is sharing.
-        final beacons = await _scan(
-          window: roamWindow,
-          mode: ScanMode.balanced,
-        );
-        final now = DateTime.now().millisecondsSinceEpoch;
-        for (final b in beacons) {
-          _roam.observe(b, now);
-        }
-        final hop = _roam.chooseHop(
-          connectedDeviceId: _connectedDeviceId,
-          candidates: beacons,
-          nowMillis: now,
-        );
-        if (hop != null) {
-          final target = beacons.firstWhere((b) => b.deviceId == hop);
-          log.d('ble roam → ${target.name}');
-          // Serialised with reconnects: two overlapping opens leave two
-          // connections to one master, and the master's proof check then
-          // has two nonces to choose between.
-          await _serialised(
-            () => _openClient(target.deviceId, target.name), // token reused
-          );
-        }
-      } on Object catch (e) {
-        log.w('roam scan failed: $e');
-      }
-    });
   }
 
   /// Re-request a full state snapshot now (pull-to-refresh / after a
@@ -621,7 +548,6 @@ class BleSessionController extends Notifier<BleSessionState> {
     _stateSub = null;
     final c = _client;
     _client = null;
-    _connectedDeviceId = null;
     if (c != null) await _disposeQuietly(c);
   }
 
@@ -637,10 +563,7 @@ class BleSessionController extends Notifier<BleSessionState> {
   }
 
   Future<void> _teardown() async {
-    _roamTimer?.cancel();
-    _roamTimer = null;
     _cancelRetry();
-    _roam.clear();
     await _closeClient();
   }
 }
