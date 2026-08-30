@@ -105,7 +105,10 @@ class SettingsScreen extends ConsumerWidget {
                 RadioListTile<TransportPreference>(
                   value: TransportPreference.bluetooth,
                   title: Text('Bluetooth'),
-                  subtitle: Text('Your phone keeps its own network.'),
+                  subtitle: Text(
+                    'Your phone keeps its own network. While earphones '
+                    'stream audio, taps can lag — Wi-Fi is quicker then.',
+                  ),
                 ),
               ],
             ),
