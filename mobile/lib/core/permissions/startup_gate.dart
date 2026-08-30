@@ -126,11 +126,11 @@ class _StartupGateState extends ConsumerState<StartupGate>
 
   Future<void> _promptRadios() async {
     if (!Platform.isAndroid) return;
-    // Only the radios the chosen mode actually needs. In Bluetooth mode
+    // Only the radio the chosen mode actually needs. In Bluetooth mode
     // the app used to shove the Wi-Fi panel at the user on every launch
-    // for a radio it wasn't going to use. Automatic genuinely uses both.
-    // One exception: with nothing set up yet, Wi-Fi is required for
-    // sign-in, so setup always counts as needing Wi-Fi.
+    // for a radio it wasn't going to use. One exception: with nothing
+    // set up yet, Wi-Fi is required for sign-in, so setup always counts
+    // as needing Wi-Fi.
     final pref =
         await ref.read(transportPreferenceProvider.notifier).ensureLoaded();
     var nothingSetUp = true;
@@ -140,9 +140,9 @@ class _StartupGateState extends ConsumerState<StartupGate>
     } on Object catch (e) {
       log.w('registry read failed in radio prompt: $e');
     }
-    final needsWifi =
-        pref != TransportPreference.bluetooth || nothingSetUp;
-    final needsBluetooth = pref != TransportPreference.wifi && !nothingSetUp;
+    final needsWifi = pref == TransportPreference.wifi || nothingSetUp;
+    final needsBluetooth =
+        pref == TransportPreference.bluetooth && !nothingSetUp;
 
     final radios = ref.read(radiosProvider);
     // Bluetooth first: it is a plain dialog, and the Wi-Fi settings

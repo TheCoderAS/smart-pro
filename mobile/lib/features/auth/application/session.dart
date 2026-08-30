@@ -418,10 +418,10 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     // The connection-mode choice belonged to the removed switch's era.
     // Left standing, a stale "bluetooth" raced ahead of the next
     // sign-in's registration and handed the link to whatever Bluetooth
-    // found. A fresh home starts on automatic.
+    // found. A fresh home starts on Wi-Fi — sign-in only works there.
     await ref
         .read(transportPreferenceProvider.notifier)
-        .set(TransportPreference.auto);
+        .set(TransportPreference.wifi);
     // Capped: removal is app-side bookkeeping and must feel instant,
     // and the BLE plugin's teardown is allowed to dawdle in the
     // background — the epoch/gate machinery copes with a late dispose.
@@ -433,6 +433,49 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     } on TimeoutException {
       log.w('ble teardown still finishing in the background');
     }
+    await refresh();
+  }
+
+  /// "Disconnect `<name>`": wipe the app back to a fresh install and land
+  /// on the welcome screen. Everything goes — secrets vault, every
+  /// preference (theme, transport, first-run flags), snapshot cache,
+  /// registry. The switch itself is untouched. Stronger than
+  /// [forgetHome] on purpose: forgetting keeps app-level choices for the
+  /// next switch; disconnecting must leave nothing to recall.
+  Future<void> disconnectAndWipe() async {
+    // Token first — every socket and command dies this instant, so no
+    // stale status update can write anything back during the teardown.
+    ref.read(tokenProvider.notifier).set(null);
+    ref.read(currentTransportProvider.notifier).set(TransportKind.wifi);
+    try {
+      await _store.wipeAll();
+    } on Object catch (e) {
+      log.w('secure-store wipe failed: $e');
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+    } on Object catch (e) {
+      log.w('preferences wipe failed: $e');
+    }
+    await ref.read(snapshotCacheProvider.notifier).clear();
+    await ref.read(masterRegistryProvider.notifier).clear();
+    // In-memory copies of what was just erased must not outlive it.
+    ref.invalidate(firstRunProvider);
+    ref.invalidate(transportPreferenceProvider);
+    // Capped, like forgetHome: the wipe must feel instant, and the BLE
+    // plugin's teardown may dawdle in the background.
+    try {
+      await ref
+          .read(bleSessionProvider.notifier)
+          .deactivate()
+          .timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      log.w('ble teardown still finishing in the background');
+    }
+    log.i('disconnected — app wiped to fresh-install state');
+    // Empty registry + welcomeSeen gone → the welcome screen, exactly
+    // like a new install.
     await refresh();
   }
 

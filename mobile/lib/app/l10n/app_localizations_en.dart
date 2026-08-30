@@ -134,25 +134,16 @@ class AppLocalizationsEn extends AppLocalizations {
   String get connectionSection => 'Connection';
 
   @override
-  String get transportAuto => 'Automatic';
+  String get transportWifi => 'Wi-Fi';
 
   @override
-  String get transportAutoDesc =>
-      'Wi-Fi when you\'re on the switch\'s network, Bluetooth otherwise.';
-
-  @override
-  String get transportWifi => 'Wi-Fi only';
-
-  @override
-  String get transportWifiDesc =>
-      'Always use the switch\'s Wi-Fi. Unlocks setup and updates.';
+  String get transportWifiDesc => 'Over the switch\'s own network.';
 
   @override
   String get transportBluetooth => 'Bluetooth';
 
   @override
-  String get transportBluetoothDesc =>
-      'Control over Bluetooth so your phone keeps its own network.';
+  String get transportBluetoothDesc => 'Your phone keeps its own network.';
 
   @override
   String get switchTransport => 'Switch connection';
@@ -191,16 +182,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get joinWifi => 'Add / join Wi-Fi';
 
   @override
-  String get menuReorder => 'Reorder switches';
-
-  @override
   String get menuExtensions => 'Extensions';
-
-  @override
-  String get menuMesh => 'Mesh';
-
-  @override
-  String get menuFirmware => 'Firmware';
 
   @override
   String get menuSettings => 'Settings';

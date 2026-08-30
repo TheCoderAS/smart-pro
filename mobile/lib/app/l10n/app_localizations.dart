@@ -316,28 +316,16 @@ abstract class AppLocalizations {
   /// **'Connection'**
   String get connectionSection;
 
-  /// No description provided for @transportAuto.
-  ///
-  /// In en, this message translates to:
-  /// **'Automatic'**
-  String get transportAuto;
-
-  /// No description provided for @transportAutoDesc.
-  ///
-  /// In en, this message translates to:
-  /// **'Wi-Fi when you\'re on the switch\'s network, Bluetooth otherwise.'**
-  String get transportAutoDesc;
-
   /// No description provided for @transportWifi.
   ///
   /// In en, this message translates to:
-  /// **'Wi-Fi only'**
+  /// **'Wi-Fi'**
   String get transportWifi;
 
   /// No description provided for @transportWifiDesc.
   ///
   /// In en, this message translates to:
-  /// **'Always use the switch\'s Wi-Fi. Unlocks setup and updates.'**
+  /// **'Over the switch\'s own network.'**
   String get transportWifiDesc;
 
   /// No description provided for @transportBluetooth.
@@ -349,7 +337,7 @@ abstract class AppLocalizations {
   /// No description provided for @transportBluetoothDesc.
   ///
   /// In en, this message translates to:
-  /// **'Control over Bluetooth so your phone keeps its own network.'**
+  /// **'Your phone keeps its own network.'**
   String get transportBluetoothDesc;
 
   /// No description provided for @switchTransport.
@@ -412,29 +400,11 @@ abstract class AppLocalizations {
   /// **'Add / join Wi-Fi'**
   String get joinWifi;
 
-  /// No description provided for @menuReorder.
-  ///
-  /// In en, this message translates to:
-  /// **'Reorder switches'**
-  String get menuReorder;
-
   /// No description provided for @menuExtensions.
   ///
   /// In en, this message translates to:
   /// **'Extensions'**
   String get menuExtensions;
-
-  /// No description provided for @menuMesh.
-  ///
-  /// In en, this message translates to:
-  /// **'Mesh'**
-  String get menuMesh;
-
-  /// No description provided for @menuFirmware.
-  ///
-  /// In en, this message translates to:
-  /// **'Firmware'**
-  String get menuFirmware;
 
   /// No description provided for @menuSettings.
   ///

@@ -10,13 +10,11 @@ import '../features/onboarding/presentation/add_master_screen.dart';
 import '../features/recovery/presentation/recovery_screen.dart';
 import '../features/settings/presentation/logs_screen.dart';
 import '../features/settings/presentation/settings_screen.dart';
-import '../features/switches/presentation/reorder_screen.dart';
 
 /// Route paths, one constant per screen. Feature blocks add theirs here
 /// so deep links stay discoverable in one place.
 abstract final class Routes {
   static const home = '/';
-  static const reorder = '/switches/reorder';
   static const reorderMasters = '/masters/reorder';
   static const recovery = '/recovery';
   static const addMaster = '/add-master';
@@ -34,10 +32,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.home,
         builder: (context, state) => const SessionGate(),
-      ),
-      GoRoute(
-        path: Routes.reorder,
-        builder: (context, state) => const ReorderScreen(),
       ),
       GoRoute(
         path: Routes.reorderMasters,
