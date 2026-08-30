@@ -23,7 +23,6 @@ const COLUMNS = [
     title: "Resources",
     links: [
       { label: "Early access", href: "/#waitlist" },
-      { label: "Brochure (PDF)", href: "/Smart_Switch_Pitch_v1.pdf", download: true },
       {
         label: "Investors",
         href: "mailto:aalokmamtasah@gmail.com?subject=Investors",
@@ -76,7 +75,16 @@ export function Footer() {
       <div className="max-w-content mx-auto px-6 lg:px-24 py-20">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-12">
           <div className="md:col-span-4">
-            <div className="font-display text-2xl mb-3">Unisync</div>
+            <div className="flex items-center gap-3 mb-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/brand/app-icon.png"
+                alt=""
+                className="size-9 rounded-xl"
+                aria-hidden
+              />
+              <div className="font-display text-2xl">Unisync</div>
+            </div>
             <p className="text-fg-muted text-sm max-w-xs leading-relaxed">
               The wall should be smarter than the bulb.
             </p>
@@ -90,23 +98,16 @@ export function Footer() {
                   {col.links.map((link) => {
                     const linkClass =
                       "text-sm text-fg-muted hover:text-fg link-underline";
-                    // Use a plain <a> for in-page anchors, mailto, and downloadable static files;
+                    // Use a plain <a> for in-page anchors and mailto;
                     // Next <Link> for in-app route navigation.
                     const isPlainAnchor =
                       link.href.startsWith("#") ||
                       link.href.startsWith("/#") ||
-                      link.href.startsWith("mailto:") ||
-                      "download" in link;
+                      link.href.startsWith("mailto:");
                     if (isPlainAnchor) {
                       return (
                         <li key={link.label}>
-                          <a
-                            href={link.href}
-                            className={linkClass}
-                            {...("download" in link && link.download
-                              ? { download: true }
-                              : {})}
-                          >
+                          <a href={link.href} className={linkClass}>
                             {link.label}
                           </a>
                         </li>

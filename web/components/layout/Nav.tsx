@@ -9,6 +9,7 @@ import { SMOOTH } from "@/lib/motion";
 const NAV_LINKS = [
   { href: "/#problem", label: "Problem" },
   { href: "/#product", label: "Product" },
+  { href: "/#app", label: "App" },
   { href: "/#approach", label: "Approach" },
 ];
 
@@ -37,9 +38,16 @@ export function Nav() {
       <div className="max-w-content mx-auto px-6 lg:px-24 h-16 flex items-center justify-between">
         <Link
           href="/"
-          className="font-display text-lg tracking-tight"
+          className="flex items-center gap-2.5 font-display text-lg tracking-tight"
           aria-label="Unisync home"
         >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/brand/app-icon.png"
+            alt=""
+            className="size-7 rounded-lg"
+            aria-hidden
+          />
           Unisync
         </Link>
 

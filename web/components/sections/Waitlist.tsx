@@ -91,8 +91,9 @@ export function Waitlist() {
               transition={{ duration: 0.8, ease: SMOOTH, delay: 0.2 }}
               className="text-body-lg leading-relaxed text-fg-muted mt-8"
             >
-              Pilot launching Bangalore, Q3 2026. We&apos;ll notify you when
-              units are available in your city.
+              Unisync is coming soon, city by city. Leave your email and
+              we&apos;ll tell you the moment it&apos;s ready in yours —
+              nothing else, ever.
             </motion.p>
 
             <AnimatePresence mode="wait">
