@@ -90,7 +90,14 @@ class RecoveryService {
     ).listen(
       (device) {
         final name = device.name;
-        if (name.startsWith('U') && name.length >= 5) {
+        // A standalone master advertises as U<uid>; one in a mesh
+        // advertises the mesh instead (M<mesh id>), so recovery has to
+        // accept both or a meshed home becomes unrecoverable — exactly
+        // when recovery matters most, since the mesh password is the one
+        // people forget. The service uuid filter above already limits
+        // this to Unisync masters; the prefix only keeps the list tidy.
+        if ((name.startsWith('U') || name.startsWith('M')) &&
+            name.length >= 5) {
           found[device.id] = RecoveryDevice(name: name, id: device.id);
         }
       },
