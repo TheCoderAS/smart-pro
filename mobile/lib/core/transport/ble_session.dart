@@ -384,13 +384,23 @@ class BleSessionController extends Notifier<BleSessionState> {
         );
         return;
       }
-      // The master we are actually pointed at wins outright, however weak
-      // it is; a stronger stranger is not a substitute for it. Below that,
-      // prefer an unoccupied master, then the strongest.
+      // Standalone: the master we are actually pointed at wins outright,
+      // however weak it is; a stronger stranger is not a substitute for
+      // it. Below that, prefer an unoccupied master, then the strongest.
+      //
+      // Mesh: every candidate here already carries the home's mesh id
+      // (the scan filter saw to that), so they are interchangeable and
+      // the nearest one is simply the right one — that is what makes
+      // walking through the house work. Ranking by uid instead would
+      // drag the phone back to one particular master from three rooms
+      // away.
+      final meshed = _meshId != null && _meshId != 0;
       candidates.sort((a, b) {
-        final targetCmp =
-            (isTarget(b) ? 1 : 0).compareTo(isTarget(a) ? 1 : 0);
-        if (targetCmp != 0) return targetCmp;
+        if (!meshed) {
+          final targetCmp =
+              (isTarget(b) ? 1 : 0).compareTo(isTarget(a) ? 1 : 0);
+          if (targetCmp != 0) return targetCmp;
+        }
         final busyCmp = (a.advert.clientConnected ? 1 : 0)
             .compareTo(b.advert.clientConnected ? 1 : 0);
         if (busyCmp != 0) return busyCmp;

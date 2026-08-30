@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
+import '../../../core/logging/log.dart';
 import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
@@ -9,6 +10,7 @@ import '../../../core/wifi/wifi_service.dart';
 import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
 import '../../auth/application/session.dart';
 import '../../onboarding/application/first_run.dart';
+import '../../settings/application/theme_mode.dart';
 import '../data/mesh_repository.dart';
 import '../domain/mesh_models.dart';
 import 'add_to_mesh_flow.dart';
@@ -24,7 +26,15 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTip());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Always re-ask the master. This provider outlives the screen, so
+      // the answer from the last visit is still sitting here — and the
+      // last visit is necessarily the one where the mesh did not exist
+      // yet, because creating it happens from this very screen. Without
+      // this, a freshly meshed home reads "Standalone master" for ever.
+      ref.invalidate(meshStatusProvider);
+      await _maybeShowTip();
+    });
   }
 
   /// One sentence, once, on first mesh entry: roaming between masters is the
@@ -68,7 +78,38 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
       ),
       body: RefreshIndicator(
         onRefresh: () => ref.read(meshStatusProvider.notifier).refresh(),
+        // Error FIRST. Riverpod keeps the last value on a failed fetch,
+        // so matching on `value` before `error` made the error arm
+        // unreachable: a refresh that failed (the master's network had
+        // just restarted under the mesh name) went on quietly painting
+        // the previous answer — "Standalone master" — with nothing to
+        // say it was stale.
         child: switch (status) {
+          AsyncValue(:final Object error, hasError: true) => ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(48),
+                  child: Column(
+                    children: [
+                      Text(
+                        error is ApiFailure
+                            ? error.describe()
+                            : 'Something went wrong.',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        "Mesh settings need the switch's Wi-Fi. Pull down "
+                        'to try again.',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           AsyncValue(value: final MeshStatus s) => ListView(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.all(16),
@@ -85,20 +126,6 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
                 ],
                 const SizedBox(height: 24),
                 _Actions(status: s),
-              ],
-            ),
-          AsyncValue(:final Object error) => ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(48),
-                  child: Text(
-                    error is ApiFailure
-                        ? error.describe()
-                        : 'Something went wrong.',
-                    textAlign: TextAlign.center,
-                  ),
-                ),
               ],
             ),
           _ => const Center(child: CircularProgressIndicator()),
@@ -211,13 +238,19 @@ class _MeshStatusCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The firmware counts only the peers it can currently hear, while
+    // the list below names every member. Reporting the bare count read
+    // as "0 peer masters" above a list of two — say both numbers, and
+    // count this master, which is by definition online: we are talking
+    // to it.
+    final total = status.peers.length + 1;
+    final online = status.peerCount + 1;
     return Card(
       child: ListTile(
         leading: const Icon(Icons.hub_outlined),
         title: Text(status.meshName.isEmpty ? 'Mesh' : status.meshName),
         subtitle: Text(
-          '${status.peerCount} peer master'
-          '${status.peerCount == 1 ? "" : "s"}'
+          '$online of $total master${total == 1 ? "" : "s"} online'
           '${status.syncing ? " · syncing…" : ""}',
         ),
       ),
@@ -462,9 +495,69 @@ class _Actions extends ConsumerWidget {
     passController.dispose();
     if (!(ok ?? false) || name.isEmpty || pass.length < 8) return;
     if (!context.mounted) return;
-    await _guard(context, ref, () async {
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
       await ref.read(meshRepositoryProvider).create(name: name, pass: pass);
-    });
+    } on ApiFailure catch (e) {
+      // A refusal ("already in mesh", "password too short") is answered
+      // BEFORE anything restarts, so it is a real failure and the only
+      // kind worth reporting. Silence is not: the master switches its
+      // AP to the new name and password as part of creating the mesh,
+      // which knocks this phone off the network — often before the reply
+      // can reach it. Treating that as a failure left the app signed in
+      // to a network that no longer exists, sitting on "Reconnecting"
+      // for ever. Anything that isn't an explicit refusal is therefore
+      // read as "the mesh was probably created", and the handover runs.
+      if (e is! Unreachable) {
+        messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+        return;
+      }
+      log.i('mesh create: no reply — the AP restarted, assuming created');
+    }
+    if (!context.mounted) return;
+    await _handOverToMesh(context, ref, name);
+  }
+
+  /// The mesh is live under a new network name and password, so nothing
+  /// this phone holds still works: not the Wi-Fi it is joined to, not the
+  /// saved sign-in. Say so, then wipe the app back to a fresh install so
+  /// the user lands on the welcome screen and sets the home up once, the
+  /// same way they would a new switch.
+  Future<void> _handOverToMesh(
+    BuildContext context,
+    WidgetRef ref,
+    String meshName,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Mesh "$meshName" created'),
+        content: Text(
+          'Your switch now runs the network "$meshName", and its new mesh '
+          'password signs you in to the whole home.\n\n'
+          "Join \"$meshName\" in your phone's Wi-Fi settings, then set the "
+          'home up again with that password.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Start over'),
+          ),
+        ],
+      ),
+    );
+    if (!context.mounted) return;
+    final navigator = Navigator.of(context);
+    await ref.read(sessionProvider.notifier).disconnectAndWipe();
+    // Everything the wipe erased that is still held in memory.
+    ref.invalidate(meshStatusProvider);
+    ref.invalidate(themeModeProvider);
+    // Back to the gate at the root — this screen sits two deep (Settings,
+    // then Mesh), so a single pop would strand the user on Settings for a
+    // home the app no longer has.
+    navigator.popUntil((r) => r.isFirst);
   }
 
   Future<void> _renameMesh(BuildContext context, WidgetRef ref) async {

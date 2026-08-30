@@ -45,8 +45,17 @@ class SettingsScreen extends ConsumerWidget {
       _ => null,
     };
     final masters = ref.watch(masterRegistryProvider).value ?? const [];
+    final home = masters.isEmpty ? null : masters.first;
+    // The mesh identity comes from the registry, not a live request: it
+    // was learned from the master over Wi-Fi and cached, so this screen
+    // names the home correctly over Bluetooth too — and never puts an
+    // HTTP request on a link that is deliberately Bluetooth-only.
+    final meshName = (home?.inMesh ?? false) ? home!.meshName : null;
     final masterName = ref.watch(stateSocketProvider).value?.masterName ??
-        (masters.isNotEmpty ? masters.first.name : 'this switch');
+        (home != null ? home.name : 'this switch');
+    // In a mesh, this phone is set up with the whole home, not one box —
+    // so that is what it disconnects from.
+    final disconnectName = meshName ?? masterName;
     final hasPeers =
         ref.watch(activeStateProvider).value?.peers.isNotEmpty ?? false;
     final version = ref.watch(appVersionProvider).value ?? 'Version —';
@@ -131,7 +140,11 @@ class SettingsScreen extends ConsumerWidget {
           ListTile(
             leading: const Icon(Icons.hub_outlined),
             title: const Text('Mesh'),
-            subtitle: const Text('Link switches so they work as one home.'),
+            subtitle: Text(
+              meshName != null
+                  ? 'In "$meshName" — masters, invites and peers.'
+                  : 'Not in a mesh. Link switches into one home.',
+            ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               if (requireWifi(context, ref)) {
@@ -181,15 +194,18 @@ class SettingsScreen extends ConsumerWidget {
               color: Theme.of(context).colorScheme.error,
             ),
             title: Text(
-              'Disconnect $masterName',
+              'Disconnect $disconnectName',
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
-            subtitle: const Text(
-              'Erase everything from this phone and start over.',
+            subtitle: Text(
+              meshName != null
+                  ? 'Erase this home from the phone and start over.'
+                  : 'Erase everything from this phone and start over.',
             ),
             // Always tappable — no dead ends, whatever state the
             // connection is in.
-            onTap: () => _disconnect(context, ref, masterName),
+            onTap: () =>
+                _disconnect(context, ref, disconnectName, meshed: meshName != null),
           ),
           const Divider(),
           const _SectionHeader('About'),
@@ -328,19 +344,22 @@ class SettingsScreen extends ConsumerWidget {
   Future<void> _disconnect(
     BuildContext context,
     WidgetRef ref,
-    String masterName,
-  ) async {
+    String disconnectName, {
+    required bool meshed,
+  }) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text('Disconnect $masterName?'),
+        title: Text('Disconnect $disconnectName?'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
+            Text(
               'Everything saved on this phone is erased — sign-in, names '
               'and settings — and the app starts over like a new install. '
-              'The switch itself keeps working.',
+              '${meshed ? "Every master in the mesh keeps working, and the "
+                  "mesh itself is untouched." : "The switch itself keeps "
+                  "working."}',
             ),
             const SizedBox(height: 16),
             FormActions(

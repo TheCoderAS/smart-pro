@@ -186,9 +186,19 @@ class _DashboardHeader extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context)!;
     final scheme = Theme.of(context).colorScheme;
-    final name = (snapshot?.masterName.isNotEmpty ?? false)
+    final masterName = (snapshot?.masterName.isNotEmpty ?? false)
         ? snapshot!.masterName
         : l10n.appTitle;
+    // In a mesh the app is set up with the whole home, so the home is
+    // what the header names; the master actually answering is named on
+    // its own card below. Standalone is unchanged — there is no mesh
+    // name to show, and the master IS the home.
+    final masters =
+        ref.watch(masterRegistryProvider).value ?? const <SavedMaster>[];
+    final home = masters.isEmpty ? null : masters.first;
+    final meshName = (home?.inMesh ?? false) ? (home!.meshName ?? '') : '';
+    final meshed = meshName.isNotEmpty;
+    final name = meshed ? meshName : masterName;
     final switches = snapshot?.switches ?? const <SwitchState>[];
     final onCount = switches.where((s) => s.on).length;
 
@@ -259,7 +269,13 @@ class _DashboardHeader extends ConsumerWidget {
                   Text(
                     switches.isEmpty
                         ? l10n.dashboardEmptyTitle
-                        : l10n.onOfTotal(onCount, switches.length),
+                        // Meshed: the header names the home, so the master
+                        // actually answering is named here — it is still
+                        // worth knowing which box you are talking to.
+                        : meshed
+                            ? '${l10n.onOfTotal(onCount, switches.length)}'
+                                ' · $masterName'
+                            : l10n.onOfTotal(onCount, switches.length),
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       color: scheme.onSurfaceVariant,
                     ),

@@ -208,6 +208,17 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
           uid: info.uid,
           ssid: info.ssid,
         );
+    // Learn the home's mesh identity from the master itself, over Wi-Fi.
+    // Before this, the mesh id was only ever learned from a BLE beacon
+    // after a successful BLE connect — so a mesh created over Wi-Fi left
+    // the app thinking its home was standalone, and Bluetooth would only
+    // ever look for the one uid and never a mesh mate.
+    await ref.read(masterRegistryProvider.notifier).setMesh(
+          uid: info.uid,
+          inMesh: info.mesh,
+          meshId: info.meshId,
+          meshName: info.ssid,
+        );
 
     ref.read(tokenProvider.notifier).set(stored);
     try {
@@ -287,7 +298,16 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
         // half-finished setup), the switch whose password just verified
         // is the home now. Name refines from the next status update.
         await ref.read(masterRegistryProvider.notifier).setHome(
-              SavedMaster(uid: ctx.uid, name: 'Master', ssid: ctx.ssid),
+              SavedMaster(
+                uid: ctx.uid,
+                name: 'Master',
+                ssid: ctx.ssid,
+                // Carried in at the moment of adding: a meshed home must
+                // know its mesh id before Bluetooth is ever used, and
+                // this sign-in is the only guaranteed Wi-Fi contact.
+                meshId: ctx.mesh && ctx.meshId != 0 ? ctx.meshId : null,
+                meshName: ctx.mesh && ctx.ssid.isNotEmpty ? ctx.ssid : null,
+              ),
             );
         ref.read(tokenProvider.notifier).set(result.token);
         return Authenticated(ctx, mesh: result.mesh);

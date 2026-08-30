@@ -13,6 +13,7 @@ class SavedMaster {
     required this.name,
     this.ssid,
     this.meshId,
+    this.meshName,
   });
 
   factory SavedMaster.fromJson(Map<String, dynamic> json) => SavedMaster(
@@ -20,6 +21,7 @@ class SavedMaster {
         name: json['name'] as String? ?? '',
         ssid: json['ssid'] as String?,
         meshId: json['meshId'] as int?,
+        meshName: json['meshName'] as String?,
       );
 
   final String uid;
@@ -28,16 +30,25 @@ class SavedMaster {
   /// The AP's SSID, when known — used to auto-join on switch.
   final String? ssid;
 
-  /// The BLE mesh id (BLE spec §Discovery), captured at pairing. Used
-  /// to filter BLE scans to this system. Null until learned; 0 =
-  /// standalone.
+  /// The BLE mesh id (BLE spec §Discovery). Used to filter BLE scans to
+  /// this home. Null until learned; 0 = standalone.
   final int? meshId;
+
+  /// The mesh's display name, cached so screens can name the home
+  /// ("Disconnect UnisyncMesh") on either transport and offline.
+  final String? meshName;
+
+  /// True only for a real, non-zero mesh id. Zero and null are
+  /// standalone and match nothing — the rule the whole BLE trust check
+  /// rests on.
+  bool get inMesh => meshId != null && meshId != 0;
 
   Map<String, dynamic> toJson() => {
         'uid': uid,
         'name': name,
         if (ssid != null) 'ssid': ssid,
         if (meshId != null) 'meshId': meshId,
+        if (meshName != null) 'meshName': meshName,
       };
 }
 
@@ -129,6 +140,46 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
       name: nextName,
       ssid: nextSsid,
       meshId: m.meshId,
+      meshName: m.meshName,
+    );
+    await _persist(current);
+  }
+
+  /// Records what the master says about its own mesh membership, from
+  /// `/api/info` over Wi-Fi. Authoritative in BOTH directions: it sets
+  /// the mesh id when the master is meshed and CLEARS it when it is not,
+  /// so a master that left a mesh stops vouching for its old mates.
+  ///
+  /// Like [ensure] this never adds — only sign-in adds a switch. And
+  /// like [ensure] it is a no-op when nothing changed, which is every
+  /// call in a standalone home (null → null).
+  Future<void> setMesh({
+    required String uid,
+    required bool inMesh,
+    required int meshId,
+    required String meshName,
+  }) async {
+    if (uid.isEmpty) return;
+    final current = [...state.value ?? await _load()];
+    final i = current.indexWhere((m) => m.uid == uid);
+    if (i < 0) return;
+    final m = current[i];
+    // A meshed master with a zero id is a firmware that hasn't finished
+    // deriving one; leave what we had rather than half-clearing.
+    if (inMesh && meshId == 0) return;
+    final nextId = inMesh ? meshId : null;
+    final nextName = inMesh && meshName.isNotEmpty ? meshName : null;
+    if (nextId == m.meshId && nextName == m.meshName) return;
+    log.i(inMesh
+        ? 'mesh: ${m.uid} is in "$nextName" '
+            '(0x${meshId.toRadixString(16)})'
+        : 'mesh: ${m.uid} is standalone — mesh id cleared');
+    current[i] = SavedMaster(
+      uid: m.uid,
+      name: m.name,
+      ssid: m.ssid,
+      meshId: nextId,
+      meshName: nextName,
     );
     await _persist(current);
   }
