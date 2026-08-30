@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/logging/log.dart';
 import '../../../core/platform/radios.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../../core/widgets/password_field.dart';
 import '../application/mesh_join_mode.dart';
 import '../data/join_target_api.dart';
@@ -155,32 +156,26 @@ class _AddToMeshScreenState extends ConsumerState<AddToMeshScreen> {
 
   /// Step 3: the honest one. The join happens between the two masters
   /// over their own radio and no HTTP reply ever carries its outcome, so
-  /// the only real proof is the new switch appearing in the mesh's peer
-  /// list. Ask the mesh, don't ask the user.
+  /// the app has to go and look. Ask the mesh, don't ask the user.
   Future<void> _verifyJoined() async {
     setState(() {
       _busy = true;
       _error = null;
     });
     final uid = _joinerUid;
+    final home = (ref.read(masterRegistryProvider).value ?? const [])
+        .cast<SavedMaster?>()
+        .firstWhere((m) => m?.inMesh ?? false, orElse: () => null);
+    final homeMeshId = home?.meshId ?? 0;
     try {
       // A freshly joined master needs a moment to be counted.
       for (var attempt = 1; attempt <= 4; attempt++) {
-        try {
-          final status = await ref.read(meshRepositoryProvider).status();
-          final found = uid == null
-              ? status.peers.isNotEmpty
-              : status.peers.any((p) => p.uid.toUpperCase() == uid);
-          if (found) {
-            log.i('mesh join confirmed: $uid is a peer of "${status.meshName}"');
-            ref.invalidate(meshStatusProvider);
-            if (mounted) setState(() => _step = _Step.done);
-            return;
-          }
-          log.d('mesh join not confirmed yet (attempt $attempt)');
-        } on ApiFailure catch (e) {
-          log.d('mesh status unreachable during verify: ${e.describe()}');
+        if (await _joinerIsInTheMesh(uid, homeMeshId)) {
+          ref.invalidate(meshStatusProvider);
+          if (mounted) setState(() => _step = _Step.done);
+          return;
         }
+        log.d('mesh join not confirmed yet (attempt $attempt)');
         await Future<void>.delayed(const Duration(seconds: 2));
       }
       if (mounted) {
@@ -193,6 +188,43 @@ class _AddToMeshScreenState extends ConsumerState<AddToMeshScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Two ways to see the same truth, because after a join BOTH masters
+  /// broadcast the mesh's network name and the phone attaches to
+  /// whichever is stronger — very often the new one, since the user has
+  /// just walked over to it.
+  ///
+  /// - Landed on an existing master: the joiner shows up in its peers.
+  /// - Landed on the joiner itself: it will never list itself as a peer,
+  ///   so ask who it is instead — its own uid, saying it is in a mesh,
+  ///   is proof enough, and the mesh id keeps that from matching some
+  ///   unrelated mesh next door.
+  Future<bool> _joinerIsInTheMesh(String? uid, int homeMeshId) async {
+    try {
+      final status = await ref.read(meshRepositoryProvider).status();
+      final found = uid == null
+          ? status.peers.isNotEmpty
+          : status.peers.any((p) => p.uid.toUpperCase() == uid);
+      if (found) {
+        log.i('mesh join confirmed: $uid is a peer of "${status.meshName}"');
+        return true;
+      }
+    } on ApiFailure catch (e) {
+      log.d('mesh status unreachable during verify: ${e.describe()}');
+    }
+    if (uid == null) return false;
+    try {
+      final self = await ref.read(joinTargetApiProvider).identity();
+      final sameMesh = homeMeshId == 0 || self.meshId == homeMeshId;
+      if (self.uid == uid && self.mesh && sameMesh) {
+        log.i('mesh join confirmed: standing on $uid and it is in the mesh');
+        return true;
+      }
+    } on Object catch (e) {
+      log.d('identity check unavailable during verify: $e');
+    }
+    return false;
   }
 
   @override

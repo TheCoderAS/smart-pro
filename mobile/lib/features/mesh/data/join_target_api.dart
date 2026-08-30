@@ -30,14 +30,25 @@ class JoinTargetApi {
 
   final Dio _dio;
 
-  /// The uid of whatever is answering on the master address right now.
-  /// Read before anything else: it is how the app later proves the join
-  /// worked, by finding this uid among the mesh's peers.
-  Future<String> uid() async {
+  /// Who is answering on the master address right now, and whether they
+  /// are in a mesh. `/api/info` is open, so this needs no token — which
+  /// is the point: it works on a switch we have never signed in to, and
+  /// on one we no longer hold a session for.
+  Future<({String uid, bool mesh, int meshId})> identity() async {
     final res = await _dio.get<Map<String, dynamic>>(Api.info);
     _throwIfBad(res);
-    return (res.data?['uid'] as String? ?? '').toUpperCase();
+    final data = res.data ?? const <String, dynamic>{};
+    return (
+      uid: (data['uid'] as String? ?? '').toUpperCase(),
+      mesh: data['mesh'] as bool? ?? false,
+      meshId: (data['mesh_id'] as num?)?.toInt() ?? 0,
+    );
   }
+
+  /// The uid of whatever is answering on the master address right now.
+  /// Read before anything else: it is how the app later recognises this
+  /// switch, whether from the mesh's peer list or from the switch itself.
+  Future<String> uid() async => (await identity()).uid;
 
   /// Signs in with the password from the new switch's card. The token
   /// lives in this object for the length of the flow and is never stored.

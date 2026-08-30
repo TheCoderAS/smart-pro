@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.30.1"
+#define MASTER_FW_VERSION  "11.30.2"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -1824,11 +1824,24 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 esp_now_add_peer(&pi);
             mesh_nvs_save();
             Serial.printf("[MESH] Joined mesh: %s\n", mesh_name);
-            /* Switch to mesh-name SSID */
-            WiFi.softAPdisconnect(false);
-            delay(100);
-            WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
-            Serial.printf("[WIFI] Switched to mesh SSID: %s\n", mesh_name);
+            /* Switch to the mesh SSID -- from loop(), NOT from here.
+             *
+             * This runs inside the ESP-NOW receive callback, and driving
+             * the WiFi driver from that context leaves a partial AP and a
+             * ghost SSID -- the same trap the password-change path below
+             * documents and avoids. Doing it here (with a 100 ms block in
+             * a radio callback, no less) left the freshly joined master
+             * with a crippled radio: its gossip never reached the mesh,
+             * so the master that invited it never entered it in the peer
+             * table, and the home showed "1 of 1 master online" with none
+             * of the new switches -- a join that had in fact succeeded.
+             */
+            strncpy(mesh_cfg_pending_name, mesh_name,
+                    sizeof(mesh_cfg_pending_name)-1);
+            strncpy(mesh_cfg_pending_pass, mesh_pass,
+                    sizeof(mesh_cfg_pending_pass)-1);
+            mesh_cfg_pending = true;
+            Serial.printf("[WIFI] mesh SSID switch queued: %s\n", mesh_name);
             notify_ui();
         }
 
