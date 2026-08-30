@@ -136,7 +136,19 @@ class BleControlClient {
     // it, Android can settle on a slow interval and a 160-byte write
     // takes seconds. Best-effort — refusal is survivable, slow is not
     // fatal, and iOS has no such request.
-    await _assertPriority();
+    //
+    // Requested ONCE, here, and deliberately never again: re-asserting
+    // in front of a write (v1.4.2) put a parameter renegotiation in the
+    // path of the first tap after an idle gap, stalling the very
+    // command it meant to speed up.
+    try {
+      await _ble.requestConnectionPriority(
+        deviceId: deviceId,
+        priority: ConnectionPriority.highPerformance,
+      );
+    } on Exception catch (e) {
+      log.w('connection priority request refused: $e');
+    }
 
     // Ask for a big MTU; fall back to the safe default if refused.
     try {
@@ -250,37 +262,8 @@ class BleControlClient {
   static bool _isInvalidProof(String message) =>
       message.toLowerCase().contains('proof');
 
-  DateTime? _priorityAssertedAt;
-
-  /// How stale the high-performance request may get before a command
-  /// re-asserts it. Android stacks quietly decay the connection interval
-  /// a while after the one request at connect — and audio streaming to
-  /// Bluetooth earphones squeezes our airtime hard, so the short
-  /// interval must actually be in force when a burst of taps arrives.
-  static const _priorityRefresh = Duration(seconds: 20);
-
-  Future<void> _assertPriority() async {
-    try {
-      await _ble.requestConnectionPriority(
-        deviceId: deviceId,
-        priority: ConnectionPriority.highPerformance,
-      );
-      _priorityAssertedAt = DateTime.now();
-    } on Exception catch (e) {
-      log.w('connection priority request refused: $e');
-    }
-  }
-
   Future<Map<String, Object?>> _doRequest(Map<String, Object?> command) async {
     _lastActivity = DateTime.now();
-    // Re-assert before the write when the last request has gone stale.
-    // The native call returns immediately (it does not wait for the
-    // radio), so this costs the command nothing.
-    final asserted = _priorityAssertedAt;
-    if (asserted == null ||
-        DateTime.now().difference(asserted) > _priorityRefresh) {
-      await _assertPriority();
-    }
     final pending = Completer<Map<String, Object?>>();
     _pending = pending;
     final chunks = BleFraming.encodeJson(command, maxPayloadBytes: _maxPayload);
