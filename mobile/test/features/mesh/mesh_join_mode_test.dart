@@ -1,7 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:unisync/core/api/dio_client.dart';
 import 'package:unisync/core/transport/access_reset.dart';
+import 'package:unisync/core/ws/state_socket.dart';
 import 'package:unisync/features/mesh/application/mesh_join_mode.dart';
 
 /// While the app is parked on ANOTHER master's network to hand it a mesh
@@ -53,5 +55,25 @@ void main() {
         reason: 'the first strike after the flow only arms');
     reset.strike();
     expect(c.read(accessResetProvider), isTrue);
+  });
+
+  // The new master rejects a socket opened with the home's token and
+  // says so on its own console, once per retry: "Client #0 rejected, no
+  // session". Six of those turned up in a real bench log during a join.
+  test('no socket is opened at a master that never issued our token',
+      () async {
+    final c = ProviderContainer(overrides: [
+      channelFactoryProvider.overrideWithValue((Uri _) {
+        fail('the socket must not connect while parked on another master');
+      }),
+    ]);
+    addTearDown(c.dispose);
+
+    c.read(meshJoinModeProvider.notifier).enter();
+    c.read(tokenProvider.notifier).set('home-token');
+    c.listen(stateSocketProvider, (_, _) {});
+    await Future<void>.delayed(Duration.zero);
+
+    expect(c.read(socketStatusProvider), SocketStatus.disconnected);
   });
 }
