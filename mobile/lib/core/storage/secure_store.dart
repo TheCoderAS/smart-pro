@@ -43,4 +43,8 @@ class SecureStore {
     await deleteToken(masterUid);
     await deletePassword(masterUid);
   }
+
+  /// Erases the whole vault — "Disconnect" wipes the app back to a
+  /// fresh install, and a wipe that enumerates keys can miss one.
+  Future<void> wipeAll() => _storage.deleteAll();
 }

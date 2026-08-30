@@ -11,7 +11,7 @@ import 'ble_session.dart';
 import 'control_transport.dart';
 import 'wifi_transport.dart';
 
-/// Persisted transport preference (Settings). Defaults to auto and
+/// Persisted transport preference (Settings). Defaults to Wi-Fi and
 /// loads asynchronously after first frame — reading it synchronously
 /// never touches SharedPreferences, so it is safe in tests.
 final transportPreferenceProvider =
@@ -27,21 +27,23 @@ class TransportPreferenceNotifier extends Notifier<TransportPreference> {
   @override
   TransportPreference build() {
     Future.microtask(_restore);
-    return TransportPreference.auto;
+    return TransportPreference.wifi;
   }
 
   Future<void> _restore() => ensureLoaded();
 
   /// Reads (and applies) the persisted preference, returning it. The
   /// coordinator awaits this before deciding a transport so a fresh
-  /// login doesn't race the async restore and read the default `auto`.
+  /// login doesn't race the async restore and read the default.
+  ///
+  /// A persisted 'auto' from a build that still had automatic mode reads
+  /// as Wi-Fi — Bluetooth must only ever be an explicit choice.
   Future<TransportPreference> ensureLoaded() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString(key);
-    final pref = TransportPreference.values.firstWhere(
-      (p) => p.name == saved,
-      orElse: () => TransportPreference.auto,
-    );
+    final pref = saved == TransportPreference.bluetooth.name
+        ? TransportPreference.bluetooth
+        : TransportPreference.wifi;
     if (pref != state) state = pref;
     return pref;
   }

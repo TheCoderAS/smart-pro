@@ -159,7 +159,10 @@ class StayAliveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Unisync")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            // The Unisync mark as a white silhouette — status-bar icons
+            // are alpha-masked, so a full-colour bitmap would render as
+            // a formless blob.
+            .setSmallIcon(R.drawable.ic_stat_unisync)
             .setContentIntent(open)
             .setOngoing(true)
             .setShowWhen(false)

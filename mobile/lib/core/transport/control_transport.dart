@@ -4,11 +4,12 @@ import '../../features/firmware/domain/firmware_models.dart';
 /// Which physical path control commands and state currently flow over.
 enum TransportKind { wifi, ble }
 
-/// The user's transport preference (Settings). `auto` prefers Wi-Fi
-/// when the master is reachable on the LAN (faster, unlocks config-only
-/// features), else BLE. `wifi` forces Wi-Fi. `bluetooth` stays on BLE
-/// even when Wi-Fi is reachable, so the phone keeps its own network.
-enum TransportPreference { auto, wifi, bluetooth }
+/// The user's transport preference (Settings). Exactly two, by decree:
+/// `wifi` uses the switch's Wi-Fi; `bluetooth` stays on BLE even when
+/// Wi-Fi is reachable, so the phone keeps its own network. There is no
+/// automatic mode — a silent fallback was how the app ended up on the
+/// wrong transport with no way to see why.
+enum TransportPreference { wifi, bluetooth }
 
 /// The control operations the UI issues, independent of transport.
 /// Both `WifiControlTransport` (HTTP) and `BleControlTransport` (GATT)

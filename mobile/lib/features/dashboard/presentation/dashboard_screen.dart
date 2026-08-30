@@ -16,7 +16,6 @@ import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/transport_refusal.dart';
-import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_dto.dart';
 import '../../../core/ws/state_socket.dart';
@@ -195,13 +194,29 @@ class _DashboardHeader extends ConsumerWidget {
 
     return SliverAppBar(
       pinned: true,
-      expandedHeight: 178,
-      titleSpacing: 0,
+      expandedHeight: 140,
+      // Match the app's 20px content gutter — the pill used to sit flush
+      // against the left edge of the canvas.
+      titleSpacing: 20,
       // The connection pill lives inline in the toolbar row (with the
-      // grid, reconnect and menu icons) — one row, always visible.
+      // quick-action icons) — one row, always visible.
       title: _StatusPill(status: status, transport: transport),
       actions: [
-        _OverflowMenu(),
+        IconButton(
+          icon: const Icon(Icons.receipt_long_rounded),
+          tooltip: 'Logs',
+          onPressed: () => context.push(Routes.logs),
+        ),
+        IconButton(
+          icon: const Icon(Icons.extension_rounded),
+          tooltip: l10n.menuExtensions,
+          onPressed: () => context.push(Routes.extensions),
+        ),
+        IconButton(
+          icon: const Icon(Icons.settings_rounded),
+          tooltip: l10n.menuSettings,
+          onPressed: () => context.push(Routes.settings),
+        ),
         const SizedBox(width: 4),
       ],
       flexibleSpace: FlexibleSpaceBar(
@@ -221,7 +236,7 @@ class _DashboardHeader extends ConsumerWidget {
             child: Padding(
               // Below the toolbar row so the master name never rides
               // under the pill/icons.
-              padding: const EdgeInsets.fromLTRB(20, kToolbarHeight + 8, 20, 16),
+              padding: const EdgeInsets.fromLTRB(20, kToolbarHeight, 20, 12),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -377,7 +392,6 @@ class _StatusPill extends ConsumerWidget {
               ),
             ),
             for (final entry in const [
-              (TransportPreference.auto, Icons.autorenew_rounded),
               (TransportPreference.wifi, Icons.wifi_rounded),
               (TransportPreference.bluetooth, Icons.bluetooth_rounded),
             ])
@@ -405,13 +419,11 @@ class _StatusPill extends ConsumerWidget {
 
 String _prefLabel(AppLocalizations l10n, TransportPreference p) =>
     switch (p) {
-      TransportPreference.auto => l10n.transportAuto,
       TransportPreference.wifi => l10n.transportWifi,
       TransportPreference.bluetooth => l10n.transportBluetooth,
     };
 
 String _prefDesc(AppLocalizations l10n, TransportPreference p) => switch (p) {
-  TransportPreference.auto => l10n.transportAutoDesc,
   TransportPreference.wifi => l10n.transportWifiDesc,
   TransportPreference.bluetooth => l10n.transportBluetoothDesc,
 };
@@ -442,62 +454,6 @@ class _MeshBadge extends StatelessWidget {
               fontWeight: FontWeight.w600,
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _OverflowMenu extends ConsumerWidget {
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = AppLocalizations.of(context)!;
-    return PopupMenuButton<String>(
-      icon: const Icon(Icons.more_vert_rounded),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-      onSelected: (v) async {
-        // Reorder, extensions, activity log and firmware *info* all work
-        // over Bluetooth (BLE spec v2). Only mesh admin stays Wi-Fi-only
-        // here; firmware *transfer* is guarded inside its own screen.
-        switch (v) {
-          case 'reorder':
-            unawaited(context.push(Routes.reorder));
-          case 'reorderMasters':
-            unawaited(context.push(Routes.reorderMasters));
-          case 'extensions':
-            unawaited(context.push(Routes.extensions));
-          case 'mesh':
-            if (requireWifi(context, ref)) unawaited(context.push(Routes.mesh));
-          case 'firmware':
-            unawaited(context.push(Routes.firmware));
-          case 'settings':
-            unawaited(context.push(Routes.settings));
-        }
-      },
-      itemBuilder: (context) => [
-        _menuItem('extensions', Icons.extension_rounded, l10n.menuExtensions),
-        _menuItem('mesh', Icons.hub_rounded, l10n.menuMesh),
-        _menuItem('firmware', Icons.system_update_rounded, l10n.menuFirmware),
-        _menuItem('reorder', Icons.swap_vert_rounded, l10n.menuReorder),
-        // Only worth offering once there is more than one master card.
-        if (_hasSeveralMasters(ref))
-          _menuItem('reorderMasters', Icons.reorder_rounded, 'Reorder masters'),
-        _menuItem('settings', Icons.settings_rounded, l10n.menuSettings),
-      ],
-    );
-  }
-
-  bool _hasSeveralMasters(WidgetRef ref) =>
-      (ref.read(activeStateProvider).value?.peers.length ?? 0) > 0;
-
-  PopupMenuItem<String> _menuItem(String value, IconData icon, String label) {
-    return PopupMenuItem(
-      value: value,
-      child: Row(
-        children: [
-          Icon(icon, size: 20),
-          const SizedBox(width: 12),
-          Text(label),
         ],
       ),
     );
@@ -714,14 +670,44 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-class _SwitchGrid extends StatelessWidget {
+/// The flat single-master grid, with one long-press doing double duty:
+/// drag a tile onto another to reorder, or lift without moving to
+/// rename. Tap stays toggle-only. A separate reorder screen used to
+/// carry this; the gesture everyone tries first now just works.
+class _SwitchGrid extends ConsumerStatefulWidget {
   const _SwitchGrid({required this.switches, this.masterUid});
 
   final List<SwitchState> switches;
   final String? masterUid;
 
   @override
+  ConsumerState<_SwitchGrid> createState() => _SwitchGridState();
+}
+
+class _SwitchGridState extends ConsumerState<_SwitchGrid> {
+  /// The order the user just chose, painted immediately and kept until
+  /// the master's snapshots confirm it (or the save fails).
+  List<String>? _localOrder;
+
+  /// Moved less than this during the drag counts as "released in
+  /// place" — which means rename, not reorder.
+  static const _renameSlop = 16.0;
+
+  List<SwitchState> get _display {
+    final order = _localOrder;
+    if (order == null) return widget.switches;
+    final byId = {for (final s in widget.switches) s.id: s};
+    return [
+      for (final id in order) ?byId.remove(id),
+      // Anything the saved order doesn't know (a switch added since)
+      // keeps its snapshot position at the end.
+      ...byId.values,
+    ];
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final switches = _display;
     return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       sliver: SliverGrid(
@@ -732,11 +718,113 @@ class _SwitchGrid extends StatelessWidget {
           mainAxisSpacing: 14,
         ),
         delegate: SliverChildBuilderDelegate((context, i) {
-          return SwitchTile(sw: switches[i], masterUid: masterUid)
+          final sw = switches[i];
+          return _DraggableSwitchTile(
+            key: ValueKey(sw.id),
+            index: i,
+            sw: sw,
+            masterUid: widget.masterUid,
+            renameSlop: _renameSlop,
+            onMove: _move,
+          )
               .animate()
               .fadeIn(duration: 260.ms, delay: (40 * i).ms)
               .slideY(begin: 0.15, curve: Curves.easeOut);
         }, childCount: switches.length),
+      ),
+    );
+  }
+
+  Future<void> _move(int from, int to) async {
+    if (from == to) return;
+    final list = [..._display];
+    final item = list.removeAt(from);
+    list.insert(to, item);
+    final order = [for (final s in list) s.id];
+    setState(() => _localOrder = order);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(activeControlProvider).reorder(order);
+      // Nudge a fresh snapshot so the master's order catches up without
+      // waiting on the next spontaneous push.
+      await ref.read(transportCoordinatorProvider).refreshState();
+    } on Exception {
+      if (mounted) setState(() => _localOrder = null);
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Could not save the order — check the connection.'),
+        ),
+      );
+    }
+  }
+}
+
+/// One grid cell: a [SwitchTile] that can be long-press-dragged onto a
+/// sibling (reorder) or long-pressed and released in place (rename).
+class _DraggableSwitchTile extends ConsumerStatefulWidget {
+  const _DraggableSwitchTile({
+    required this.index,
+    required this.sw,
+    required this.masterUid,
+    required this.renameSlop,
+    required this.onMove,
+    super.key,
+  });
+
+  final int index;
+  final SwitchState sw;
+  final String? masterUid;
+  final double renameSlop;
+  final void Function(int from, int to) onMove;
+
+  @override
+  ConsumerState<_DraggableSwitchTile> createState() =>
+      _DraggableSwitchTileState();
+}
+
+class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
+  double _dragDistance = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    // The grid's own long-press owns the gesture here, so the tile's
+    // built-in rename long-press is off (handleLongPress: false).
+    final tile = SwitchTile(
+      sw: widget.sw,
+      masterUid: widget.masterUid,
+      handleLongPress: false,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) => LongPressDraggable<int>(
+        data: widget.index,
+        // Haptic long-press pickup, sized exactly like the resting tile.
+        feedback: SizedBox(
+          width: constraints.maxWidth,
+          height: constraints.maxHeight,
+          child: Material(
+            color: Colors.transparent,
+            child: Opacity(opacity: 0.9, child: tile),
+          ),
+        ),
+        childWhenDragging: Opacity(opacity: 0.25, child: tile),
+        onDragStarted: () => _dragDistance = 0,
+        onDragUpdate: (d) => _dragDistance += d.delta.distance,
+        onDragEnd: (details) {
+          // A pickup that never really moved and never landed on a
+          // sibling is the rename gesture.
+          if (!details.wasAccepted && _dragDistance < widget.renameSlop) {
+            showRenameSwitchSheet(context, ref, widget.sw);
+          }
+        },
+        child: DragTarget<int>(
+          onWillAcceptWithDetails: (d) => d.data != widget.index,
+          onAcceptWithDetails: (d) => widget.onMove(d.data, widget.index),
+          builder: (context, candidates, _) => AnimatedScale(
+            scale: candidates.isEmpty ? 1 : 1.04,
+            duration: const Duration(milliseconds: 120),
+            child: tile,
+          ),
+        ),
       ),
     );
   }
@@ -850,6 +938,7 @@ class SwitchTile extends ConsumerStatefulWidget {
     required this.sw,
     this.masterUid,
     this.enabled = true,
+    this.handleLongPress = true,
     super.key,
   });
 
@@ -861,6 +950,10 @@ class SwitchTile extends ConsumerStatefulWidget {
 
   /// False when the owning master itself is unreachable.
   final bool enabled;
+
+  /// False when a parent (the draggable home grid) owns the long-press
+  /// gesture — two long-press handlers on one tile would fight.
+  final bool handleLongPress;
 
   @override
   ConsumerState<SwitchTile> createState() => _SwitchTileState();
@@ -938,7 +1031,9 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
           child: InkWell(
             onTap: live ? () => _toggle(on) : null,
             // Rename works on either transport (firmware v11.18.0).
-            onLongPress: () => showRenameSwitchSheet(context, ref, sw),
+            onLongPress: widget.handleLongPress
+                ? () => showRenameSwitchSheet(context, ref, sw)
+                : null,
             onTapDown: live ? (_) => setState(() => _pressed = true) : null,
             onTapUp: live ? (_) => setState(() => _pressed = false) : null,
             onTapCancel: () => setState(() => _pressed = false),

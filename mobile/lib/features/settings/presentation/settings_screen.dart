@@ -4,10 +4,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
+import '../../../core/storage/master_registry.dart';
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
@@ -23,6 +25,13 @@ import '../../auth/application/session.dart';
 import '../../auth/data/auth_repository.dart';
 import '../application/theme_mode.dart';
 
+/// The real installed version, read from the platform (never hardcoded —
+/// a hardcoded string drifted from the release the moment it shipped).
+final appVersionProvider = FutureProvider<String>((ref) async {
+  final info = await PackageInfo.fromPlatform();
+  return 'Version ${info.version} (build ${info.buildNumber})';
+});
+
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -35,6 +44,12 @@ class SettingsScreen extends ConsumerWidget {
       Authenticated(:final info) => info,
       _ => null,
     };
+    final masters = ref.watch(masterRegistryProvider).value ?? const [];
+    final masterName = ref.watch(stateSocketProvider).value?.masterName ??
+        (masters.isNotEmpty ? masters.first.name : 'this switch');
+    final hasPeers =
+        ref.watch(activeStateProvider).value?.peers.isNotEmpty ?? false;
+    final version = ref.watch(appVersionProvider).value ?? 'Version —';
 
     return Scaffold(
       appBar: AppBar(
@@ -83,49 +98,20 @@ class SettingsScreen extends ConsumerWidget {
             child: const Column(
               children: [
                 RadioListTile<TransportPreference>(
-                  value: TransportPreference.auto,
-                  title: Text('Automatic'),
-                  subtitle: Text(
-                    "Wi-Fi when you're on the switch's network, "
-                    'Bluetooth otherwise.',
-                  ),
-                ),
-                RadioListTile<TransportPreference>(
                   value: TransportPreference.wifi,
-                  title: Text('Wi-Fi only'),
-                  subtitle: Text(
-                    "Always use the switch's Wi-Fi. Unlocks setup and updates.",
-                  ),
+                  title: Text('Wi-Fi'),
+                  subtitle: Text("Over the switch's own network."),
                 ),
                 RadioListTile<TransportPreference>(
                   value: TransportPreference.bluetooth,
                   title: Text('Bluetooth'),
-                  subtitle: Text(
-                    'Control over Bluetooth so your phone keeps its own '
-                    'network.',
-                  ),
+                  subtitle: Text('Your phone keeps its own network.'),
                 ),
               ],
             ),
           ),
           const Divider(),
-          const _SectionHeader('Security'),
-          ListTile(
-            leading: const Icon(Icons.group_off_outlined),
-            // Named for what it does. There are no guest tiers and no
-            // per-person identity, so "remove someone" does not exist —
-            // pretending otherwise would be the lie (story Epic 4).
-            title: const Text('Reset access'),
-            subtitle: const Text(
-              'Sets a new password. Everyone who had the old one loses '
-              'access, including you on your other devices — this is the '
-              'only way to un-share.',
-            ),
-            enabled: info != null,
-            onTap: () => _changePassword(context, ref),
-          ),
-          const Divider(),
-          const _SectionHeader('This master'),
+          const _SectionHeader('This switch'),
           if (info != null)
             ListTile(
               leading: const Icon(Icons.info_outline),
@@ -134,82 +120,82 @@ class SettingsScreen extends ConsumerWidget {
             ),
           ListTile(
             leading: const Icon(Icons.drive_file_rename_outline),
-            title: const Text('Rename this master'),
-            subtitle: const Text('The name shown at the top of the dashboard.'),
+            title: const Text('Rename'),
+            subtitle: const Text('The name at the top of the home screen.'),
             enabled: info != null,
             onTap: info == null ? null : () => _renameMaster(context, ref),
           ),
           ListTile(
-            leading: const Icon(Icons.logout),
-            title: const Text('Sign out'),
-            subtitle: const Text('Only on this phone.'),
-            enabled: info != null,
-            onTap: () => ref.read(sessionProvider.notifier).signOut(),
+            leading: const Icon(Icons.hub_outlined),
+            title: const Text('Mesh'),
+            subtitle: const Text('Link switches so they work as one home.'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              if (requireWifi(context, ref)) {
+                unawaited(context.push(Routes.mesh));
+              }
+            },
           ),
+          if (hasPeers)
+            ListTile(
+              leading: const Icon(Icons.reorder_rounded),
+              title: const Text('Reorder masters'),
+              subtitle: const Text('The card order on the home screen.'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => unawaited(context.push(Routes.reorderMasters)),
+            ),
           ListTile(
-            leading: Icon(
-              Icons.delete_outline,
-              color: Theme.of(context).colorScheme.error,
-            ),
-            title: Text(
-              'Remove this master from the app',
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
-            enabled: info != null,
-            onTap: info == null
-                ? null
-                : () => _removeMaster(context, ref, info.uid),
+            leading: const Icon(Icons.system_update_outlined),
+            title: const Text('Firmware update'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => unawaited(context.push(Routes.firmware)),
           ),
           const Divider(),
-          const _SectionHeader('Readiness'),
+          const _SectionHeader('Security'),
+          ListTile(
+            leading: const Icon(Icons.password_outlined),
+            title: const Text('Reset access'),
+            subtitle: const Text(
+              'Set a new password. Everyone with the old one is signed out.',
+            ),
+            enabled: info != null,
+            onTap: () => _changePassword(context, ref),
+          ),
+          const Divider(),
+          const _SectionHeader('Reliability'),
           const _StayAliveTile(),
           ListTile(
             leading: const Icon(Icons.receipt_long_outlined),
             title: const Text('Logs'),
-            subtitle: const Text(
-              'What the app has been doing, with a copy button. Useful when '
-              'something misbehaves and the detail is worth sending on. '
-              'Kept in memory only — it never leaves the phone and clears '
-              'when the app stops.',
-            ),
+            subtitle: const Text('What the app has been doing.'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push(Routes.logs),
           ),
           const Divider(),
-          const _SectionHeader('Sharing'),
-          const ListTile(
-            leading: Icon(Icons.people_outline),
-            title: Text('Everyone with the password has full control'),
-            subtitle: Text(
-              'Sharing the password is the whole model — it joins the '
-              'network and signs in. There are no guest accounts and no '
-              'per-person access, so anyone you tell can do anything you '
-              'can. Any number of people can control the home at once.',
-              maxLines: 5,
+          ListTile(
+            leading: Icon(
+              Icons.link_off,
+              color: Theme.of(context).colorScheme.error,
             ),
-            isThreeLine: true,
-          ),
-          const Divider(),
-          const _SectionHeader('If you get stuck'),
-          const ListTile(
-            leading: Icon(Icons.restart_alt),
-            title: Text('Factory reset'),
-            subtitle: Text(
-              'Hold the reset button on the back of the box for 9 seconds. '
-              'That returns it to its out-of-box network name and card '
-              'password and forgets every name, setting and extension. It '
-              'cannot be done from the app — a shorter press does nothing.',
-              maxLines: 5,
+            title: Text(
+              'Disconnect $masterName',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
-            isThreeLine: true,
+            subtitle: const Text(
+              'Erase everything from this phone and start over.',
+            ),
+            // Always tappable — no dead ends, whatever state the
+            // connection is in.
+            onTap: () => _disconnect(context, ref, masterName),
           ),
           const Divider(),
           const _SectionHeader('About'),
-          const ListTile(
-            leading: Icon(Icons.phone_iphone),
-            title: Text('Unisync'),
-            subtitle: Text('Version 0.1.0'),
+          ListTile(
+            leading: const Icon(Icons.phone_iphone),
+            title: const Text('Unisync'),
+            subtitle: Text(version),
           ),
+          const SizedBox(height: 24),
         ],
       ),
     );
@@ -234,8 +220,8 @@ class SettingsScreen extends ConsumerWidget {
                 PasswordField(
                   controller: controller,
                   label: 'New password',
-                  helper: 'At least 8 characters. Every token everywhere '
-                      'stops working ("sign out all devices").',
+                  helper: 'At least 8 characters. Every signed-in device '
+                      'must sign in again.',
                   helperMaxLines: 3,
                 ),
                 PasswordField(
@@ -293,7 +279,7 @@ class SettingsScreen extends ConsumerWidget {
     final name = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Rename master'),
+        title: const Text('Rename'),
         content: StatefulBuilder(
           builder: (context, setState) {
             final value = controller.text.trim();
@@ -325,7 +311,7 @@ class SettingsScreen extends ConsumerWidget {
     final messenger = ScaffoldMessenger.of(context);
     try {
       await ref.read(activeControlProvider).renameMaster(name);
-      messenger.showSnackBar(const SnackBar(content: Text('Master renamed.')));
+      messenger.showSnackBar(const SnackBar(content: Text('Renamed.')));
     } on Exception catch (e) {
       final msg = e is ApiFailure
           ? e.describe()
@@ -334,25 +320,28 @@ class SettingsScreen extends ConsumerWidget {
     }
   }
 
-  Future<void> _removeMaster(
+  /// "Disconnect `<name>`": full wipe, then the welcome screen — the app
+  /// forgets this switch ever existed, exactly like a fresh install.
+  Future<void> _disconnect(
     BuildContext context,
     WidgetRef ref,
-    String uid,
+    String masterName,
   ) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Remove this master?'),
+        title: Text('Disconnect $masterName?'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'Its saved sign-in is deleted from this phone. The switch '
-              'itself keeps working and can be added again any time.',
+              'Everything saved on this phone is erased — sign-in, names '
+              'and settings — and the app starts over like a new install. '
+              'The switch itself keeps working.',
             ),
             const SizedBox(height: 16),
             FormActions(
-              saveLabel: 'Remove',
+              saveLabel: 'Disconnect',
               destructive: true,
               onCancel: () => Navigator.of(dialogContext).pop(false),
               onSave: () => Navigator.of(dialogContext).pop(true),
@@ -364,15 +353,12 @@ class SettingsScreen extends ConsumerWidget {
     if (!(confirmed ?? false)) return;
     // Best-effort server-side sign-out, fired without waiting: on an
     // unreachable master this request can sit out a 5 s timeout, and
-    // removal is app-side work that must feel instant. logout()
-    // swallows its own failures.
+    // the wipe is app-side work that must feel instant.
     unawaited(ref.read(authRepositoryProvider).logout());
-    // One path for "this switch leaves the app": secrets, cache,
-    // registry, token — then a re-bootstrap. Ending on signOut() here
-    // used to hard-land on a login form for the switch that was just
-    // removed; only the bootstrap knows that an empty registry means
-    // the setup screen.
-    await ref.read(sessionProvider.notifier).forgetHome();
+    await ref.read(sessionProvider.notifier).disconnectAndWipe();
+    // The theme preference was just erased with everything else; drop
+    // the in-memory copy too so even the look resets to day one.
+    ref.invalidate(themeModeProvider);
     if (context.mounted) Navigator.of(context).pop();
   }
 }
@@ -410,12 +396,9 @@ class _StayAliveTileState extends ConsumerState<_StayAliveTile> {
           value: on,
           title: const Text('Keep switches ready'),
           subtitle: const Text(
-            'Keeps running in the background so a switch fires the instant '
-            'you tap it — after closing the app, clearing it from recents, '
-            'or restarting your phone. Shows a permanent notification, '
-            'which is what Android charges for the privilege.',
+            'Stay running in the background so taps fire instantly. '
+            'Shows a permanent notification.',
           ),
-          isThreeLine: true,
           onChanged: (v) async {
             setState(() => _on = v);
             await ref.read(stayAliveProvider).setEnabled(v);
@@ -426,12 +409,9 @@ class _StayAliveTileState extends ConsumerState<_StayAliveTile> {
             leading: const Icon(Icons.battery_saver_outlined),
             title: const Text('Not staying connected?'),
             subtitle: const Text(
-              'Some phones — Xiaomi, Oppo, Vivo, Huawei — stop apps like '
-              'this whatever the app asks for. Allow Unisync to run in the '
-              "background in your phone's battery settings, and add it to "
-              'any "protected" or "auto-start" list it offers.',
+              "Allow Unisync to run in the background in your phone's "
+              'battery settings.',
             ),
-            isThreeLine: true,
             onTap: () => ref.read(stayAliveProvider).openBatterySettings(),
           ),
       ],

@@ -27,13 +27,13 @@ enum TransportChoice {
 final transportCoordinatorProvider =
     Provider<TransportCoordinator>(TransportCoordinator.new);
 
-/// Reconciles the transport preference with actual reachability, then
-/// drives `currentTransportProvider` and the BLE session. One device per
-/// app — standalone or mesh — so there is exactly one preference.
+/// Applies the transport preference, driving `currentTransportProvider`
+/// and the BLE session. One device per app — standalone or mesh — so
+/// there is exactly one preference, and exactly two modes:
 ///
-/// - **auto:** Wi-Fi when the master answers on the LAN, else BLE.
-/// - **wifi:** force Wi-Fi (BLE session torn down).
-/// - **bluetooth:** BLE even when Wi-Fi is reachable.
+/// - **wifi:** Wi-Fi (BLE session torn down).
+/// - **bluetooth:** BLE even when Wi-Fi is reachable — never a silent
+///   fallback to Wi-Fi.
 ///
 /// Because the token is shared, flipping transports needs no re-login.
 class TransportCoordinator {
@@ -73,21 +73,12 @@ class TransportCoordinator {
   }
 
   Future<void> _apply(TransportPreference pref, int epoch) async {
-    final wifi = _ref.read(wifiServiceProvider);
     try {
       switch (pref) {
         case TransportPreference.wifi:
           await _applyWifi(epoch);
         case TransportPreference.bluetooth:
           await _applyBle(epoch);
-        case TransportPreference.auto:
-          final reachable = await wifi.masterReachable();
-          if (epoch != _epoch) return;
-          if (reachable) {
-            await _applyWifi(epoch);
-          } else {
-            await _applyBle(epoch);
-          }
       }
     } on Object catch (e) {
       log.w('transport apply failed: $e');

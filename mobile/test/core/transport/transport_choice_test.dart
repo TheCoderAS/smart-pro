@@ -40,7 +40,7 @@ void main() {
     expect(result, TransportChoice.needsWifiLogin);
     // Preference not persisted and transport not flipped — no
     // half-switched state.
-    expect(c.read(transportPreferenceProvider), TransportPreference.auto);
+    expect(c.read(transportPreferenceProvider), TransportPreference.wifi);
     expect(c.read(currentTransportProvider), TransportKind.wifi);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString(TransportPreferenceNotifier.key), isNull);
