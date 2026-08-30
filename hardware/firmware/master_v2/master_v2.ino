@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.29.3"
+#define MASTER_FW_VERSION  "11.30.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -4593,13 +4593,21 @@ static void setup_web(void) {
         master_order_add(self_uid4);
         mesh_nvs_save();
         Serial.printf("[MESH] New mesh created: %s\n", mesh_name);
+        notify_ui();
+        /* Answer BEFORE the AP goes down. Restarting it first knocked the
+         * phone off the network mid-reply, so a mesh that was created
+         * perfectly reached the app as a connection error: it stayed
+         * signed in to an SSID that no longer existed and sat on
+         * "Reconnecting" for ever. The delay gives the reply time onto
+         * the wire. The client loses the network either way -- now it
+         * knows why, and can hand the user to the new one. */
+        server.send(200,"application/json","{\"ok\":true}");
+        delay(400);
         /* Switch to mesh-name SSID */
         WiFi.softAPdisconnect(false);
         delay(100);
         WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
         Serial.printf("[WIFI] Switched to mesh SSID: %s\n", mesh_name);
-        notify_ui();
-        server.send(200,"application/json","{\"ok\":true}");
     });
 
     /* Leave mesh */
@@ -4879,13 +4887,19 @@ static void setup_web(void) {
         String payload; serializeJson(doc,payload);
         mesh_broadcast(payload.c_str(), payload.length()+1);
         Serial.printf("[MESH] Password change broadcast: %s\n", mesh_name);
+        notify_ui();
+        /* Reply first, restart after -- the same rule as mesh create, and
+         * the one the app was always told to expect (API 6: "reply, then
+         * the Wi-Fi restarts ~400 ms later"). The code did the opposite,
+         * so the rejoin dance began from an error instead of a
+         * confirmation. */
+        server.send(200,"application/json","{\"ok\":true}");
+        delay(400);
         /* Apply locally */
         WiFi.softAPdisconnect(false);
         delay(100);
         WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
         Serial.printf("[WIFI] AP restarted: %s\n", mesh_name);
-        notify_ui();
-        server.send(200,"application/json","{\"ok\":true}");
     });
 
     /* Rename mesh */
@@ -6768,9 +6782,19 @@ static void ble_update_adv_data(void) {
            | ((root_key_set && fw_key_set) ? 0x02 : 0)
            | (ble_connected ? 0x04 : 0);
 
+    /* In a mesh the beacon announces the MESH, not this box: to a phone
+     * that belongs to the home every member is interchangeable, and the
+     * uid is nobody else's business. The mesh id in the manufacturer
+     * data above is what the app selects on; this name is what a person
+     * sees in a Bluetooth scan, and what the recovery picker lists.
+     * Standalone is unchanged -- it has no mesh to name, and its uid is
+     * how the app finds exactly it. */
     char name[24];
-    snprintf(name, sizeof(name), "U%02X%02X%02X%02X",
-             master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+    if (mesh_active && mid)
+        snprintf(name, sizeof(name), "M%04X", mid);
+    else
+        snprintf(name, sizeof(name), "U%02X%02X%02X%02X",
+                 master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
 
     NimBLEAdvertisementData ad;
     ad.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
@@ -6860,8 +6884,14 @@ static void ble_recovery_begin(void) {
     adv->enableScanResponse(true);
 
     bool started = NimBLEDevice::startAdvertising();
+    /* Print the ADVERTISED name, which is the mesh id once meshed -- the
+     * GAP name above is not what a scanning phone lists. */
+    char advertised[24];
+    uint16_t mid_now = ble_mesh_id();
+    if (mesh_active && mid_now) snprintf(advertised, sizeof(advertised), "M%04X", mid_now);
+    else                        snprintf(advertised, sizeof(advertised), "%s", name);
     Serial.printf("[BLE] control + recovery advertising as %s mesh=%04X : %s\n",
-                  name, ble_mesh_id(), started ? "OK" : "FAILED");
+                  advertised, mid_now, started ? "OK" : "FAILED");
 }
 
 /* Called from task_web: performs the change the BLE callback authorised. */
