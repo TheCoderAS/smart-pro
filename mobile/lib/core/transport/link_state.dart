@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/mesh/application/mesh_join_mode.dart';
 import '../api/dio_client.dart';
 import '../api/endpoints.dart';
 import '../logging/log.dart';
@@ -90,6 +91,11 @@ class LinkMonitor extends Notifier<LinkState> {
   }
 
   Future<void> _tick() async {
+    // Parked on another master's network to hand it a mesh invite: the
+    // home is genuinely unreachable and that is the plan, not a fault.
+    // Counting misses here would only spend the user's radio and paint
+    // the flow red behind its own dialog.
+    if (ref.read(meshJoinModeProvider)) return;
     final kind = ref.read(currentTransportProvider);
     // One transport at a time, judged by reality rather than the flag.
     // At startup the permission dialogs, the session bootstrap and the

@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/mesh/application/mesh_join_mode.dart';
+
 /// Set when a master rejects our session over BLE (the password was
 /// changed, so every token everywhere died — v5.1 Epic 5).
 ///
@@ -27,6 +29,10 @@ class AccessResetNotifier extends Notifier<bool> {
   /// [window] confirms — a genuinely changed password rejects again on
   /// the very next reconnect, within seconds.
   void strike() {
+    // A rejection from a master that never issued our token proves
+    // nothing about our password. While the app is parked on another
+    // master's network for a mesh invite, every 401 is expected.
+    if (ref.read(meshJoinModeProvider)) return;
     final now = DateTime.now();
     final first = _firstStrike;
     if (first != null && now.difference(first) <= window) {

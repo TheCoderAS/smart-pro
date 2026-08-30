@@ -13,7 +13,7 @@ import '../../onboarding/application/first_run.dart';
 import '../../settings/application/theme_mode.dart';
 import '../data/mesh_repository.dart';
 import '../domain/mesh_models.dart';
-import 'add_to_mesh_flow.dart';
+import 'add_to_mesh_screen.dart';
 
 class MeshScreen extends ConsumerStatefulWidget {
   const MeshScreen({super.key});
@@ -398,7 +398,9 @@ class _Actions extends ConsumerWidget {
             label: const Text('Add a switch to this mesh'),
             // The invite is fetched and used inside the flow; the PIN
             // never reaches the screen (v5.1 Epic 7).
-            onPressed: () => runAddToMeshFlow(context, ref),
+            onPressed: () => Navigator.of(context).push<void>(
+              MaterialPageRoute(builder: (_) => const AddToMeshScreen()),
+            ),
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
