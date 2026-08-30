@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../../features/mesh/application/mesh_join_mode.dart';
 import '../api/dio_client.dart';
 import '../api/endpoints.dart';
 import '../logging/log.dart';
@@ -86,6 +87,12 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
     // no Wi-Fi socket, full stop.
     final bleLive = ref.watch(bleSessionProvider
         .select((s) => s.status != BleSessionStatus.idle));
+    // Parked on another master's network to hand it a mesh invite. The
+    // device answering there has never issued our token and refuses the
+    // socket — the new master's log filled with "Client #0 rejected, no
+    // session" while the app retried, spending its radio during the one
+    // flow that needs it.
+    final joiningMesh = ref.watch(meshJoinModeProvider);
 
     // Tear down any previous connection when the token/transport changes
     // or the provider is disposed.
@@ -102,7 +109,7 @@ class StateSocketNotifier extends StreamNotifier<StateSnapshot> {
     // microtask later.
     Future.microtask(() {
       if (_out != out) return; // rebuilt/disposed meanwhile
-      if (token == null || !onWifi || bleLive) {
+      if (token == null || !onWifi || bleLive || joiningMesh) {
         // Not authenticated, or Bluetooth is the active transport — no
         // Wi-Fi socket until a token appears and Wi-Fi is selected.
         _status(SocketStatus.disconnected);

@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.30.0"
+#define MASTER_FW_VERSION  "11.30.1"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -1784,7 +1784,12 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
 
                 uint8_t plen = sec[0];
                 if (plen == 0 || plen > 63 || (uint16_t)(1+plen+18) > n) {
-                    Serial.println("[MESH] JOIN_ACK unwrap failed -- wrong PIN?");
+                    /* Not a wrong PIN: a wrong one is answered with a
+                     * JOIN_REJ, never an ACK. Getting here means the ACK
+                     * arrived and did not unwrap, so say that and send
+                     * the next person somewhere useful. */
+                    Serial.println("[MESH] JOIN_ACK did not unwrap -- join "
+                                   "abandoned, credentials discarded");
                     return;
                 }
                 memcpy(mesh_pass, sec+1, plen); mesh_pass[plen]=0;
@@ -1797,6 +1802,9 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 prefs.putUInt("credver", cred_version);
                 prefs.end();
                 Serial.println("[MESH] credentials unwrapped and stored");
+                /* Done with it: the join PIN is key material and has no
+                 * use once the credentials are ours. */
+                memset(mesh_join_pin, 0, sizeof(mesh_join_pin));
                 ble_update_adv_data();
             }
             const char *mo = doc["master_order"] | "";
@@ -4477,6 +4485,15 @@ static void setup_web(void) {
                 "{\"error\":\"pin must be 6 digits, mac must be 12 hex chars\"}");
             return;
         }
+        /* Keep the PIN: the mesh wraps the credentials it is about to send
+         * us with it, and mesh_recv_cb needs it to unwrap the JOIN_ACK.
+         * Without this line mesh_join_pin stayed all zeros -- it was read
+         * in exactly one place and written in none -- so every join
+         * derived the wrong key and threw its credentials away, on every
+         * PIN and every pair of masters, while the inviting master had
+         * just logged the PIN as correct. */
+        strncpy(mesh_join_pin, pin.c_str(), sizeof(mesh_join_pin)-1);
+        mesh_join_pin[sizeof(mesh_join_pin)-1] = 0;
         /* Parse Master 1 MAC */
         uint8_t peer_mac[6];
         for (int i=0;i<6;i++) {
