@@ -7,23 +7,23 @@ import { SectionNumber } from "@/components/ui/SectionNumber";
 import { SMOOTH, VIEWPORT_REPEAT } from "@/lib/motion";
 
 const PARAGRAPHS = [
-  "A single Master unit fits a standard switchboard. It has the Wi-Fi, the brains, and the radios.",
-  "Up to five Extension units snap onto a low-voltage bus next to it — adding two switches each, with no extra radios and no extra setup. Twelve switches per master, controlled from one place.",
-  "Multiple masters across your home form a single mesh — so any switch is reachable from any room. Even when your internet is down.",
+  "One unit sits in your switchboard and quietly runs it. Your switches stay where they have always been — on the wall, and now also in your pocket.",
+  "As your home grows, it grows with you: add on to a board, add more boards, and everything still behaves as one home in one app.",
+  "And none of it depends on the internet. Everything your switches need lives inside your own four walls.",
 ];
 
 const SUB_BULLETS = [
   {
-    title: "One radio across twelve channels.",
-    body: "Costs less, breaks less.",
+    title: "Feels like a switch.",
+    body: "Because it still is one. Nothing to learn, nothing to babysit.",
   },
   {
-    title: "Snap-in extensions.",
-    body: "No re-wiring, no re-pairing.",
+    title: "Grows with the home.",
+    body: "Start with one board. Add more whenever. Still one app.",
   },
   {
-    title: "Mesh across the home.",
-    body: "No range issues. No cloud dependency.",
+    title: "No internet required.",
+    body: "No cloud dependency, no outages that aren't yours.",
   },
   {
     title: "Standard modular form factor.",
@@ -54,7 +54,7 @@ export function Product() {
 
           <div className="lg:col-span-8">
             <RevealText as="h2" className="font-display text-h1 max-w-3xl">
-              One master. A few extensions. Your whole house, networked.
+              Your whole house, one system.
             </RevealText>
 
             <motion.div

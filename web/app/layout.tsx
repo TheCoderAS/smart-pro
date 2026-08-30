@@ -24,7 +24,7 @@ const jetbrains = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Unisync — The wall should be smarter than the bulb.",
   description:
-    "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — pilot launching Bangalore, Q3 2026.",
+    "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — coming soon.",
   metadataBase: new URL("https://unisync.in"),
   alternates: {
     canonical: "https://unisync.in",
@@ -36,10 +36,9 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Unisync — The wall should be smarter than the bulb.",
     description:
-      "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — pilot launching Bangalore, Q3 2026.",
+      "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — coming soon.",
     url: "https://unisync.in",
     siteName: "Unisync",
-    // TODO: add og-image.jpg at /public/og-image.jpg
     images: [{ url: "/og-image.jpg", width: 1200, height: 630 }],
     locale: "en_IN",
     type: "website",
@@ -48,8 +47,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Unisync — The wall should be smarter than the bulb.",
     description:
-      "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — pilot launching Bangalore, Q3 2026.",
-    // TODO: add og-image.jpg at /public/og-image.jpg
+      "Unisync is rebuilding the most-touched object in your home, from the inside out. A new kind of electrical switch — coming soon.",
     images: ["/og-image.jpg"],
   },
 };

@@ -13,9 +13,16 @@ export function Hero() {
           initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
           animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
           transition={{ delay: 0.4, duration: 0.8, ease: SMOOTH }}
-          className="eyebrow"
+          className="eyebrow inline-flex items-center gap-3"
         >
-          A new kind of electrical switch. Pilot launching Bangalore, Q3 2026.
+          <span
+            aria-hidden
+            className="relative flex size-2"
+          >
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-accent/60" />
+            <span className="relative inline-flex size-2 rounded-full bg-accent" />
+          </span>
+          A new kind of electrical switch — coming soon.
         </motion.div>
 
         <RevealText
@@ -50,11 +57,10 @@ export function Hero() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 2.1, duration: 0.6, ease: SMOOTH }}
-            href="/Smart_Switch_Pitch_v1.pdf"
-            download
+            href="#app"
             className="text-sm text-fg-muted hover:text-accent link-underline inline-flex items-center gap-2 transition-colors duration-300"
           >
-            Download brochure <span aria-hidden>↓</span>
+            See the app <span aria-hidden>↓</span>
           </motion.a>
           <motion.a
             initial={{ opacity: 0, y: 12 }}

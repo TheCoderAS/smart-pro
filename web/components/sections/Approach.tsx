@@ -16,8 +16,8 @@ const PRINCIPLES = [
     body: "Wi-Fi can go down. The cloud can go away. Your lights work either way — schedules, scenes, and physical switches all run on the wall, not in the sky.",
   },
   {
-    title: "Open by default",
-    body: "Your switches should work with whatever app, voice, or system you already use. Not just ours.",
+    title: "Private by design",
+    body: "No account to create, no cloud to trust, no data leaving your home. What happens on your wall stays on your wall.",
   },
   {
     title: "Built for installers",
@@ -31,7 +31,7 @@ export function Approach() {
       id="approach"
       className="relative py-[clamp(6rem,12vw,12rem)] border-t border-fg-faint/40 overflow-hidden"
     >
-      <SectionNumber number="03" side="left" />
+      <SectionNumber number="04" side="left" />
 
       <div className="relative max-w-content mx-auto px-6 lg:px-24">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
@@ -42,7 +42,7 @@ export function Approach() {
               viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
-              <EyebrowLabel withMark>03 — Our approach</EyebrowLabel>
+              <EyebrowLabel withMark>04 — Our approach</EyebrowLabel>
             </motion.div>
           </div>
 

@@ -82,7 +82,7 @@ export function Audiences() {
       id="audiences"
       className="relative py-[clamp(6rem,12vw,12rem)] border-t border-fg-faint/40 overflow-hidden"
     >
-      <SectionNumber number="04" side="right" />
+      <SectionNumber number="05" side="right" />
 
       <div className="relative max-w-content mx-auto px-6 lg:px-24">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
@@ -93,7 +93,7 @@ export function Audiences() {
               viewport={VIEWPORT_REPEAT}
               transition={{ duration: 0.8, ease: SMOOTH }}
             >
-              <EyebrowLabel withMark>04 — Built for</EyebrowLabel>
+              <EyebrowLabel withMark>05 — Built for</EyebrowLabel>
             </motion.div>
           </div>
           <div className="lg:col-span-8">
