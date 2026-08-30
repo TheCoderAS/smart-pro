@@ -337,7 +337,7 @@ abstract class AppLocalizations {
   /// No description provided for @transportBluetoothDesc.
   ///
   /// In en, this message translates to:
-  /// **'Your phone keeps its own network.'**
+  /// **'Your phone keeps its own network. While earphones stream audio, taps can lag — Wi-Fi is quicker then.'**
   String get transportBluetoothDesc;
 
   /// No description provided for @switchTransport.

@@ -143,7 +143,8 @@ class AppLocalizationsEn extends AppLocalizations {
   String get transportBluetooth => 'Bluetooth';
 
   @override
-  String get transportBluetoothDesc => 'Your phone keeps its own network.';
+  String get transportBluetoothDesc =>
+      'Your phone keeps its own network. While earphones stream audio, taps can lag — Wi-Fi is quicker then.';
 
   @override
   String get switchTransport => 'Switch connection';

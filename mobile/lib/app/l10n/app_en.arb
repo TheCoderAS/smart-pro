@@ -74,7 +74,7 @@
   "transportWifi": "Wi-Fi",
   "transportWifiDesc": "Over the switch's own network.",
   "transportBluetooth": "Bluetooth",
-  "transportBluetoothDesc": "Your phone keeps its own network.",
+  "transportBluetoothDesc": "Your phone keeps its own network. While earphones stream audio, taps can lag — Wi-Fi is quicker then.",
   "switchTransport": "Switch connection",
   "btNeedsWifiLogin": "Sign in over Wi-Fi first — Bluetooth mode uses that sign-in.",
   "btPermissionDenied": "Bluetooth permission is needed for this mode.",
