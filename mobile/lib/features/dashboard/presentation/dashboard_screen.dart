@@ -685,16 +685,22 @@ class _SwitchGrid extends ConsumerStatefulWidget {
 }
 
 class _SwitchGridState extends ConsumerState<_SwitchGrid> {
-  /// The order the user just chose, painted immediately and kept until
-  /// the master's snapshots confirm it (or the save fails).
+  /// The order the user last committed, painted immediately and kept
+  /// until the master's snapshots confirm it (or the save fails).
   List<String>? _localOrder;
+
+  /// The order shown *while a drag is in flight*: tiles step aside the
+  /// moment the finger passes over them, so the grid always shows
+  /// exactly what releasing would save. Null when nothing is dragging.
+  List<String>? _previewOrder;
+  String? _dragId;
 
   /// Moved less than this during the drag counts as "released in
   /// place" — which means rename, not reorder.
   static const _renameSlop = 16.0;
 
   List<SwitchState> get _display {
-    final order = _localOrder;
+    final order = _previewOrder ?? _localOrder;
     if (order == null) return widget.switches;
     final byId = {for (final s in widget.switches) s.id: s};
     return [
@@ -717,34 +723,87 @@ class _SwitchGridState extends ConsumerState<_SwitchGrid> {
           crossAxisSpacing: 14,
           mainAxisSpacing: 14,
         ),
-        delegate: SliverChildBuilderDelegate((context, i) {
-          final sw = switches[i];
-          return _DraggableSwitchTile(
-            key: ValueKey(sw.id),
-            index: i,
-            sw: sw,
-            masterUid: widget.masterUid,
-            renameSlop: _renameSlop,
-            onMove: _move,
-          )
-              .animate()
-              .fadeIn(duration: 260.ms, delay: (40 * i).ms)
-              .slideY(begin: 0.15, curve: Curves.easeOut);
-        }, childCount: switches.length),
+        delegate: SliverChildBuilderDelegate(
+          (context, i) {
+            final sw = switches[i];
+            // Keyed at the top level so the live preview MOVES each
+            // tile's element instead of recreating it — recreating the
+            // dragged tile mid-gesture would kill the drag (its
+            // onDragEnd dies with the state) and leave the grid stuck
+            // in preview.
+            return KeyedSubtree(
+              key: ValueKey(sw.id),
+              child: _DraggableSwitchTile(
+                sw: sw,
+                masterUid: widget.masterUid,
+                renameSlop: _renameSlop,
+                onDragStarted: _startDrag,
+                onHover: _hover,
+                onDragEnded: _endDrag,
+              )
+                  .animate()
+                  .fadeIn(duration: 260.ms, delay: (40 * i).ms)
+                  .slideY(begin: 0.15, curve: Curves.easeOut),
+            );
+          },
+          childCount: switches.length,
+          // The other half of the move-don't-recreate contract.
+          findChildIndexCallback: (key) {
+            final id = (key as ValueKey<String>).value;
+            final index = switches.indexWhere((s) => s.id == id);
+            return index < 0 ? null : index;
+          },
+        ),
       ),
     );
   }
 
-  Future<void> _move(int from, int to) async {
-    if (from == to) return;
-    final list = [..._display];
-    final item = list.removeAt(from);
-    list.insert(to, item);
-    final order = [for (final s in list) s.id];
-    setState(() => _localOrder = order);
+  void _startDrag(String id) {
+    setState(() {
+      _dragId = id;
+      _previewOrder = [for (final s in _display) s.id];
+    });
+  }
+
+  /// Live reorder: the dragged tile takes [overId]'s slot the moment
+  /// the finger reaches it, and everything between shifts one place.
+  void _hover(String overId) {
+    final drag = _dragId;
+    final order = _previewOrder;
+    if (drag == null || order == null || drag == overId) return;
+    final from = order.indexOf(drag);
+    final to = order.indexOf(overId);
+    if (from < 0 || to < 0 || from == to) return;
+    setState(() {
+      final next = [...order]..removeAt(from);
+      // Dragging forward lands after the hovered tile, backward lands
+      // before it — the natural step-aside in both directions.
+      next.insert(
+        from < to ? next.indexOf(overId) + 1 : next.indexOf(overId),
+        drag,
+      );
+      _previewOrder = next;
+    });
+  }
+
+  /// Commit whatever the drag left on screen. Live preview means the
+  /// visible grid IS the user's choice — a release anywhere keeps it.
+  Future<void> _endDrag() async {
+    final preview = _previewOrder;
+    if (preview == null) return;
+    final before = [for (final s in widget.switches) s.id];
+    final changed = _localOrder != null
+        ? !_sameOrder(preview, _localOrder!)
+        : !_sameOrder(preview, before);
+    setState(() {
+      _dragId = null;
+      _previewOrder = null;
+      if (changed) _localOrder = preview;
+    });
+    if (!changed) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await ref.read(activeControlProvider).reorder(order);
+      await ref.read(activeControlProvider).reorder(preview);
       // Nudge a fresh snapshot so the master's order catches up without
       // waiting on the next spontaneous push.
       await ref.read(transportCoordinatorProvider).refreshState();
@@ -757,25 +816,35 @@ class _SwitchGridState extends ConsumerState<_SwitchGrid> {
       );
     }
   }
+
+  static bool _sameOrder(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }
 
-/// One grid cell: a [SwitchTile] that can be long-press-dragged onto a
-/// sibling (reorder) or long-pressed and released in place (rename).
+/// One grid cell: a [SwitchTile] that can be long-press-dragged (the
+/// grid re-arranges live under the finger) or long-pressed and released
+/// in place (rename).
 class _DraggableSwitchTile extends ConsumerStatefulWidget {
   const _DraggableSwitchTile({
-    required this.index,
     required this.sw,
     required this.masterUid,
     required this.renameSlop,
-    required this.onMove,
-    super.key,
+    required this.onDragStarted,
+    required this.onHover,
+    required this.onDragEnded,
   });
 
-  final int index;
   final SwitchState sw;
   final String? masterUid;
   final double renameSlop;
-  final void Function(int from, int to) onMove;
+  final void Function(String id) onDragStarted;
+  final void Function(String overId) onHover;
+  final VoidCallback onDragEnded;
 
   @override
   ConsumerState<_DraggableSwitchTile> createState() =>
@@ -795,8 +864,8 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
       handleLongPress: false,
     );
     return LayoutBuilder(
-      builder: (context, constraints) => LongPressDraggable<int>(
-        data: widget.index,
+      builder: (context, constraints) => LongPressDraggable<String>(
+        data: widget.sw.id,
         // Haptic long-press pickup, sized exactly like the resting tile.
         feedback: SizedBox(
           width: constraints.maxWidth,
@@ -807,23 +876,29 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
           ),
         ),
         childWhenDragging: Opacity(opacity: 0.25, child: tile),
-        onDragStarted: () => _dragDistance = 0,
+        onDragStarted: () {
+          _dragDistance = 0;
+          widget.onDragStarted(widget.sw.id);
+        },
         onDragUpdate: (d) => _dragDistance += d.delta.distance,
         onDragEnd: (details) {
-          // A pickup that never really moved and never landed on a
-          // sibling is the rename gesture.
+          // The grid commits whatever the live preview shows; a pickup
+          // that never really moved is the rename gesture instead.
+          widget.onDragEnded();
           if (!details.wasAccepted && _dragDistance < widget.renameSlop) {
             showRenameSwitchSheet(context, ref, widget.sw);
           }
         },
-        child: DragTarget<int>(
-          onWillAcceptWithDetails: (d) => d.data != widget.index,
-          onAcceptWithDetails: (d) => widget.onMove(d.data, widget.index),
-          builder: (context, candidates, _) => AnimatedScale(
-            scale: candidates.isEmpty ? 1 : 1.04,
-            duration: const Duration(milliseconds: 120),
-            child: tile,
-          ),
+        child: DragTarget<String>(
+          // Entering a sibling's cell re-arranges the grid right away —
+          // this hover IS the reorder; the drop just ends it.
+          onWillAcceptWithDetails: (d) {
+            if (d.data == widget.sw.id) return false;
+            widget.onHover(widget.sw.id);
+            return true;
+          },
+          onAcceptWithDetails: (_) {},
+          builder: (context, candidates, _) => tile,
         ),
       ),
     );
