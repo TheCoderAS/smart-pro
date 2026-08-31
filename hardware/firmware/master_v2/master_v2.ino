@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.30.2"
+#define MASTER_FW_VERSION  "11.30.3"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -1459,12 +1459,29 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
     if (memcmp(src_uid, master_uid, 4)==0) return;
 
     if (type == MESH_PKT_STATE) {
-        /* Only peers admitted through the PIN-authenticated join are
-         * accepted. Previously any device that emitted one well-formed
-         * state packet enrolled itself, which made the PIN decorative and
-         * opened the firmware-distribution path to outsiders. */
+        /* Admission is proof-based, and by the time a packet reaches here
+         * the proof is already in: mesh_recv_cb verified an HMAC-SHA256
+         * tag over it, keyed with mesh_auth_key -- a secret that leaves a
+         * master only inside the PIN-wrapped JOIN_ACK. A sender whose
+         * gossip verifies has demonstrably been through the join.
+         *
+         * That was NOT true when self-enrolment was removed from here on
+         * 6 Aug: gossip still went out untagged, so anyone could emit a
+         * well-formed state packet and enrol themselves -- which is
+         * exactly what made the PIN decorative. Tagging arrived four days
+         * later. With it, admitting a verified sender reopens nothing,
+         * and it lets two masters that already hold each other's
+         * credentials find each other again without being re-joined. */
         int idx = mesh_find_peer(src_uid);
-        if (idx < 0) return;   /* unknown sender, ignore */
+        if (idx < 0) {
+            if (!mesh_auth_set) return;       /* no key, no proof, no entry */
+            idx = mesh_alloc_peer(src_uid, info->src_addr);
+            if (idx < 0) return;              /* table full */
+            Serial.printf("[MESH] admitted peer %02X%02X%02X%02X "
+                          "(verified gossip)\n",
+                          src_uid[0],src_uid[1],src_uid[2],src_uid[3]);
+            mesh_nvs_save();
+        }
 
         /* Ensure this peer is registered as ESP-NOW peer with AP MAC.
          * Re-register on every gossip in case peer rebooted or was lost.
@@ -1720,6 +1737,14 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             vTaskDelay(pdMS_TO_TICKS(10));
             esp_err_t send_err = esp_now_send(info->src_addr,
                 (const uint8_t*)ack_str.c_str(), ack_str.length()+1);
+            /* Admit the joiner to the peer table. It proved the PIN, which
+             * is the whole point of the join -- and until this line the
+             * table had no writer at all: the gossip path refused anyone
+             * not already in it, and nothing else put anybody there. The
+             * table therefore stayed empty for ever, every gossip packet
+             * was dropped, and no mesh could form. */
+            if (mesh_alloc_peer(src_uid, info->src_addr) < 0)
+                Serial.println("[MESH] peer table full -- joiner not admitted");
             /* Add new master UID to order */
             char new_uid_str[12];
             snprintf(new_uid_str,sizeof(new_uid_str),"%02X%02X%02X%02X",
@@ -1815,6 +1840,11 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                      master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
             master_order_add(self_uid_str);
             mesh_active = true;
+            /* Admit the inviter: it holds the mesh credentials and just
+             * answered our PIN, so it is family by the same rule that
+             * admits us on its side. */
+            if (mesh_alloc_peer(src_uid, info->src_addr) < 0)
+                Serial.println("[MESH] peer table full -- inviter not admitted");
             /* Register sender as peer */
             esp_now_peer_info_t pi={};
             memcpy(pi.peer_addr, info->src_addr, 6);
