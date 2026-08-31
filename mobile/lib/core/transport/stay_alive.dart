@@ -129,7 +129,15 @@ class StayAlive {
     // From the saved vault, not the live stream: the notification has to
     // say something sensible before anything has connected.
     final masters = _ref.read(masterRegistryProvider).value ?? const [];
-    final name = masters.isEmpty ? 'your switches' : masters.first.name;
+    // In a mesh the home is the mesh, not whichever master happens to be
+    // first in the vault — the notification named one room while the app
+    // was controlling the whole house.
+    final name = switch (masters.isEmpty ? null : masters.first) {
+      null => 'your switches',
+      final home when home.inMesh && (home.meshName?.isNotEmpty ?? false) =>
+        home.meshName!,
+      final home => home.name,
+    };
     return switch (link) {
       LinkState.connectedBle => 'Connected to $name over Bluetooth',
       LinkState.connectedWifi => 'Connected to $name over Wi-Fi',

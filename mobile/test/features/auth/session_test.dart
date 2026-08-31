@@ -427,4 +427,71 @@ void main() {
 
     expect(await bootstrap(c), isNot(isA<WrongNetwork>()));
   });
+
+  group('a mesh mate the user never signed into', () {
+    // Only sign-in adds a switch, so the peers a master picked up over
+    // ESP-NOW are not in the registry. Landing on one used to be a dead
+    // end -- "wrong network" for a master standing in the same house,
+    // and no button out of it. The mesh id the master reports for itself
+    // is the proof, and it is proof enough.
+    setUp(() {
+      SharedPreferences.setMockInitialValues({
+        'firstrun.welcome': true,
+        'masters': '[{"uid":"AAAA1111","name":"Hall","meshId":7,'
+            '"meshName":"UnisyncMesh"}]',
+      });
+      when(() => repo.validateToken()).thenAnswer((_) async => true);
+    });
+
+    test('is this home, not a wrong network', () async {
+      when(() => repo.info()).thenAnswer(
+        (_) async => _info.copyWith(uid: 'BBBB2222', mesh: true, meshId: 7),
+      );
+      when(() => store.readToken('AAAA1111')).thenAnswer((_) async => 'tok');
+
+      expect(await bootstrap(makeContainer()), isNot(isA<WrongNetwork>()));
+    });
+
+    test('borrows the home token instead of asking to sign in again',
+        () async {
+      // Tokens are mesh-wide: the firmware derives the session key from
+      // the active password, so a mate validates one it never issued.
+      when(() => repo.info()).thenAnswer(
+        (_) async => _info.copyWith(uid: 'BBBB2222', mesh: true, meshId: 7),
+      );
+      when(() => store.readToken('BBBB2222')).thenAnswer((_) async => null);
+      when(() => store.readToken('AAAA1111')).thenAnswer((_) async => 'tok');
+
+      final c = makeContainer();
+      expect(await bootstrap(c), isA<Authenticated>());
+      expect(c.read(tokenProvider), 'tok');
+    });
+
+    test('a stranger with no mesh is still a wrong network', () async {
+      when(() => repo.info())
+          .thenAnswer((_) async => _info.copyWith(uid: 'FFFF9999'));
+      when(() => store.readToken('AAAA1111')).thenAnswer((_) async => 'tok');
+
+      expect(await bootstrap(makeContainer()), isA<WrongNetwork>());
+    });
+
+    test('a zero mesh id vouches for nobody', () async {
+      // Standalone on the wire. Zero is never a family.
+      when(() => repo.info()).thenAnswer(
+        (_) async => _info.copyWith(uid: 'FFFF9999', mesh: true, meshId: 0),
+      );
+      when(() => store.readToken('AAAA1111')).thenAnswer((_) async => 'tok');
+
+      expect(await bootstrap(makeContainer()), isA<WrongNetwork>());
+    });
+
+    test('a different mesh is a different house', () async {
+      when(() => repo.info()).thenAnswer(
+        (_) async => _info.copyWith(uid: 'FFFF9999', mesh: true, meshId: 9),
+      );
+      when(() => store.readToken('AAAA1111')).thenAnswer((_) async => 'tok');
+
+      expect(await bootstrap(makeContainer()), isA<WrongNetwork>());
+    });
+  });
 }

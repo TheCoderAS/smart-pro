@@ -195,10 +195,10 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
     // check on purpose -- we have no session for a stranger, and showing
     // a login form for one would be the exact mix-up the story calls a
     // bug.
-    final wrong = await _wrongMasterAnswered(info.uid);
+    final wrong = await _wrongMasterAnswered(info);
     if (wrong != null) return wrong;
 
-    final stored = await _store.readToken(info.uid);
+    final stored = await _storedTokenFor(info);
     if (stored == null) return NeedsLogin(info);
 
     // Cache the network name the master reports for itself, so the
@@ -248,16 +248,59 @@ class SessionNotifier extends AsyncNotifier<SessionState> {
   /// One home per app. An unknown master answering means the phone joined
   /// a different Unisync network -- a neighbour's, or a fresh board.
   /// "Join your own network" is actionable; a login form for a stranger's
-  /// switch is the mix-up the story calls a bug. Mesh members are the
-  /// same home and are all registered, so uid membership is the test.
-  Future<WrongNetwork?> _wrongMasterAnswered(String answeredUid) async {
+  /// switch is the mix-up the story calls a bug.
+  ///
+  /// Mesh is the second way to be the same home. Only sign-in adds a
+  /// switch, so a mesh mate the user never signed into is not in the
+  /// registry — and joining its AP used to land on "wrong network" with
+  /// no way forward, even though the mesh id proves it is this house.
+  /// The id, never a zero one, is the test.
+  Future<WrongNetwork?> _wrongMasterAnswered(DeviceInfo info) async {
     try {
       final masters = await ref.read(masterRegistryProvider.future);
       if (masters.isEmpty) return null; // nothing paired yet: adopt
-      if (masters.any((m) => m.uid == answeredUid)) return null;
+      if (masters.any((m) => m.uid == info.uid)) return null;
+      if (_isMeshMate(masters, info)) {
+        log.i('${info.uid} is a mesh mate of this home — adopting');
+        return null;
+      }
       return WrongNetwork(wanted: masters.first);
     } on Object catch (e) {
       log.w('home check skipped: $e');
+    }
+    return null;
+  }
+
+  /// True when the answering master carries this home's mesh id. Zero is
+  /// standalone on both sides and matches nothing.
+  static bool _isMeshMate(List<SavedMaster> masters, DeviceInfo info) {
+    if (!info.mesh || info.meshId == 0) return false;
+    return masters.any((m) => m.inMesh && m.meshId == info.meshId);
+  }
+
+  /// The session token to use for whoever answered.
+  ///
+  /// Tokens are mesh-wide: the firmware derives the session key from the
+  /// active password, so any master sharing the mesh credential validates
+  /// a token it never issued. Falling back to the home's token is what
+  /// stops "sign in again" appearing every time the phone lands on a
+  /// different master of the same mesh.
+  Future<String?> _storedTokenFor(DeviceInfo info) async {
+    final own = await _store.readToken(info.uid);
+    if (own != null) return own;
+    try {
+      final masters = await ref.read(masterRegistryProvider.future);
+      if (!_isMeshMate(masters, info)) return null;
+      for (final m in masters) {
+        if (m.uid == info.uid) continue;
+        final shared = await _store.readToken(m.uid);
+        if (shared != null) {
+          log.i('reusing ${m.uid} token for mesh mate ${info.uid}');
+          return shared;
+        }
+      }
+    } on Object catch (e) {
+      log.w('mesh token lookup skipped: $e');
     }
     return null;
   }

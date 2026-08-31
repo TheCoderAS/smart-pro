@@ -61,6 +61,10 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
   static const _key = 'masters';
   static const _lastUsedKey = 'masters.lastUsed';
 
+  /// uids [ensure] has already declined to add. Keeps the refusal to one
+  /// line per master per launch instead of one per state push.
+  final _refused = <String>{};
+
   /// Bookkeeping only — uid, display name, cached network name, mesh id.
   /// The secrets the vault exists to protect (tokens, remembered
   /// passwords) live in [SecureStore] and never touch this file.
@@ -126,9 +130,16 @@ class MasterRegistryNotifier extends AsyncNotifier<List<SavedMaster>> {
     final current = [...state.value ?? await _load()];
     final i = current.indexWhere((m) => m.uid == uid);
     if (i < 0) {
-      log.d('not recording $uid: only sign-in adds a switch');
+      // Once per uid, not once per call. In a mesh the dashboard sees a
+      // peer's state push about once a second, and each one used to add
+      // a line here — the log a user opens to diagnose something else
+      // was drowned in this single sentence.
+      if (_refused.add(uid)) {
+        log.d('not recording $uid: only sign-in adds a switch');
+      }
       return;
     }
+    _refused.remove(uid);
     final m = current[i];
     final nextName = (name?.isNotEmpty ?? false) ? name! : m.name;
     // The network name is cached from the master's own report every time

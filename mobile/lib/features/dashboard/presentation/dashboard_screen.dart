@@ -83,10 +83,19 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         // instead of a spinner.
         ref.read(snapshotCacheProvider.notifier).save(snap);
         ref.read(switchOverridesProvider.notifier).reconcile(snap.switches);
-        ref.read(masterRegistryProvider.notifier).ensure(
-              uid: snap.selfUid,
-              name: snap.masterName,
-            );
+        // Only the home's own name is worth refreshing. In a mesh the
+        // phone can be attached to any master, and a peer's snapshot has
+        // nothing for the registry — asking anyway earned a refusal line
+        // per snapshot, roughly one a second, which emptied the log
+        // buffer of everything useful within minutes.
+        final home = (ref.read(masterRegistryProvider).value ?? const [])
+            .where((m) => m.uid == snap.selfUid);
+        if (home.isNotEmpty) {
+          ref.read(masterRegistryProvider.notifier).ensure(
+                uid: snap.selfUid,
+                name: snap.masterName,
+              );
+        }
       }
     });
 
@@ -700,6 +709,22 @@ class _EmptyState extends StatelessWidget {
 /// drag a tile onto another to reorder, or lift without moving to
 /// rename. Tap stays toggle-only. A separate reorder screen used to
 /// carry this; the gesture everyone tries first now just works.
+/// What a long-press is carrying. Switch tiles live inside master cards
+/// and both are draggable, so their payloads must be different TYPES.
+/// With both using a bare String, a switch released in place landed in
+/// the CARD's DragTarget underneath — which happily accepts any string
+/// that is not its own uid — so the drag came back `wasAccepted` and the
+/// rename a release-in-place is supposed to open never opened.
+class _SwitchDrag {
+  const _SwitchDrag(this.id);
+  final String id;
+}
+
+class _MasterDrag {
+  const _MasterDrag(this.uid);
+  final String uid;
+}
+
 /// The switch grid, with one long-press doing double duty: drag a tile
 /// onto another to reorder, or lift without moving to rename. Tap stays
 /// toggle-only.
@@ -919,8 +944,8 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
       handleLongPress: false,
     );
     return LayoutBuilder(
-      builder: (context, constraints) => LongPressDraggable<String>(
-        data: widget.sw.id,
+      builder: (context, constraints) => LongPressDraggable<_SwitchDrag>(
+        data: _SwitchDrag(widget.sw.id),
         // Haptic long-press pickup, sized exactly like the resting tile.
         feedback: SizedBox(
           width: constraints.maxWidth,
@@ -949,11 +974,11 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
             );
           }
         },
-        child: DragTarget<String>(
+        child: DragTarget<_SwitchDrag>(
           // Entering a sibling's cell re-arranges the grid right away —
           // this hover IS the reorder; the drop just ends it.
           onWillAcceptWithDetails: (d) {
-            if (d.data == widget.sw.id) return false;
+            if (d.data.id == widget.sw.id) return false;
             widget.onHover(widget.sw.id);
             return true;
           },
@@ -1118,8 +1143,8 @@ class _DraggableMasterCardState extends ConsumerState<_DraggableMasterCard> {
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) => LongPressDraggable<String>(
-        data: widget.section.uid,
+      builder: (context, constraints) => LongPressDraggable<_MasterDrag>(
+        data: _MasterDrag(widget.section.uid),
         feedback: SizedBox(
           width: constraints.maxWidth,
           child: Material(
@@ -1139,9 +1164,9 @@ class _DraggableMasterCardState extends ConsumerState<_DraggableMasterCard> {
             _showMasterMenu(context, ref, widget.section);
           }
         },
-        child: DragTarget<String>(
+        child: DragTarget<_MasterDrag>(
           onWillAcceptWithDetails: (d) {
-            if (d.data == widget.section.uid) return false;
+            if (d.data.uid == widget.section.uid) return false;
             widget.onHover(widget.section.uid);
             return true;
           },
