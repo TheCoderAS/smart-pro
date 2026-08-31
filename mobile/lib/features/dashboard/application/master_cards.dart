@@ -118,15 +118,34 @@ final expandedMasterProvider =
 );
 
 class ExpandedMasterNotifier extends Notifier<String?> {
+  /// True once the user has opened or closed a card themselves. After
+  /// that their choice is the only thing that decides what is open —
+  /// including "nothing". The first card opening itself is a courtesy for
+  /// someone arriving at a dashboard of shut boxes, not a rule, and
+  /// re-applying it every rebuild made collapsing everything impossible.
+  bool _chosen = false;
+
   @override
   String? build() => null;
 
   /// Tapping the open card closes it; tapping another opens that one.
-  void toggle(String uid) => state = (state == uid) ? null : uid;
+  void toggle(String uid) {
+    _chosen = true;
+    state = (state == uid) ? null : uid;
+  }
+
+  /// Shut everything — the user's choice, and it sticks.
+  void collapseAll() {
+    _chosen = true;
+    if (state != null) state = null;
+  }
 
   /// Opens [uid] if nothing is open yet — used to expand the first card on
-  /// arrival so a standalone user never sees a collapsed dashboard.
+  /// arrival so a user never lands on a dashboard of shut boxes. Silent
+  /// once they have chosen for themselves, so "collapse everything" is a
+  /// state the app can actually be in.
   void defaultTo(String uid) {
+    if (_chosen) return;
     if (state == null) state = uid;
   }
 }

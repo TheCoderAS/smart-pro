@@ -8,11 +8,16 @@ import '../../../core/ws/state_dto.dart';
 /// Long-press affordance on a switch tile: rename, and the power-cut
 /// policy that the story puts in this same menu. Both land as authenticated
 /// mutations; the next snapshot repaints every consumer.
+/// [masterUid] names the master that owns this switch — null for the one
+/// the app is connected to. Without it every rename and policy change
+/// landed on whichever master held the link, so renaming a switch from a
+/// peer's card quietly renamed a switch on the connected master instead.
 Future<void> showRenameSwitchSheet(
   BuildContext context,
   WidgetRef ref,
-  SwitchState sw,
-) {
+  SwitchState sw, {
+  String? masterUid,
+}) {
   final controller = TextEditingController(text: sw.name);
   var restore = sw.restore;
   return showModalBottomSheet<void>(
@@ -37,10 +42,18 @@ Future<void> showRenameSwitchSheet(
             Navigator.of(sheetContext).pop();
             try {
               if (renamed) {
-                await control.renameSwitch(id: sw.id, name: name);
+                await control.renameSwitch(
+                  id: sw.id,
+                  name: name,
+                  masterUid: masterUid,
+                );
               }
               if (policyChanged) {
-                await control.setRestore(id: sw.id, restore: restore);
+                await control.setRestore(
+                  id: sw.id,
+                  restore: restore,
+                  masterUid: masterUid,
+                );
               }
             } on Exception {
               messenger.showSnackBar(

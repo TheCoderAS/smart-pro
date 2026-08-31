@@ -941,7 +941,12 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
           // that never really moved is the rename gesture instead.
           widget.onDragEnded();
           if (!details.wasAccepted && _dragDistance < widget.renameSlop) {
-            showRenameSwitchSheet(context, ref, widget.sw);
+            showRenameSwitchSheet(
+              context,
+              ref,
+              widget.sw,
+              masterUid: widget.masterUid,
+            );
           }
         },
         child: DragTarget<String>(
@@ -964,16 +969,42 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
 /// gone quiet keeps its card — with its switches disabled and a last-seen
 /// time — rather than disappearing, so the user sees the state before
 /// acting rather than discovering it through a failed tap.
-class _MasterCards extends ConsumerWidget {
+class _MasterCards extends ConsumerStatefulWidget {
   const _MasterCards({required this.sections});
 
   final List<MasterSection> sections;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_MasterCards> createState() => _MasterCardsState();
+}
+
+class _MasterCardsState extends ConsumerState<_MasterCards> {
+  /// The order shown while a card is being dragged. Cards step aside
+  /// under the finger, exactly as the switch tiles do.
+  List<String>? _previewOrder;
+  String? _dragUid;
+
+  /// A pickup that moves less than this and lands nowhere is the menu
+  /// gesture, not a reorder — the same rule the switch tiles use.
+  static const _menuSlop = 16.0;
+
+  List<MasterSection> get _display {
+    final order = _previewOrder;
+    if (order == null) return widget.sections;
+    final byUid = {for (final s in widget.sections) s.uid: s};
+    return [
+      for (final uid in order) ?byUid.remove(uid),
+      ...byUid.values,
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sections = _display;
     final expanded = ref.watch(expandedMasterProvider);
     // Arriving on a mesh dashboard with everything shut would read as
-    // empty, so the first card opens itself.
+    // empty, so the first card opens itself — once. After the user has
+    // chosen, including choosing to close everything, this stays quiet.
     if (expanded == null && sections.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ref.read(expandedMasterProvider.notifier).defaultTo(sections.first.uid);
@@ -983,9 +1014,139 @@ class _MasterCards extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 20),
       sliver: SliverList.builder(
         itemCount: sections.length,
-        itemBuilder: (context, i) => _MasterCard(
-          section: sections[i],
-          open: sections[i].uid == expanded,
+        findChildIndexCallback: (key) {
+          final uid = (key as ValueKey<String>).value;
+          final index = sections.indexWhere((s) => s.uid == uid);
+          return index < 0 ? null : index;
+        },
+        itemBuilder: (context, i) {
+          final section = sections[i];
+          // Dragging collapses everything (below), so during a drag every
+          // card is a header — small enough to carry around and to drop
+          // accurately, instead of hauling a screenful of switches.
+          final card = _MasterCard(
+            section: section,
+            open: !_dragging && section.uid == expanded,
+          );
+          return KeyedSubtree(
+            key: ValueKey(section.uid),
+            child: _DraggableMasterCard(
+              section: section,
+              menuSlop: _menuSlop,
+              onDragStarted: _startDrag,
+              onHover: _hover,
+              onDragEnded: _endDrag,
+              child: card,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  bool get _dragging => _dragUid != null;
+
+  void _startDrag(String uid) {
+    // Collapse everything first: a card holding twelve switches is not a
+    // thing anyone can drag, and the list would reflow under the finger
+    // as it passed each open one.
+    ref.read(expandedMasterProvider.notifier).collapseAll();
+    setState(() {
+      _dragUid = uid;
+      _previewOrder = [for (final s in _display) s.uid];
+    });
+  }
+
+  void _hover(String overUid) {
+    final drag = _dragUid;
+    final order = _previewOrder;
+    if (drag == null || order == null || drag == overUid) return;
+    final from = order.indexOf(drag);
+    final to = order.indexOf(overUid);
+    if (from < 0 || to < 0 || from == to) return;
+    setState(() {
+      final next = [...order]..removeAt(from);
+      next.insert(
+        from < to ? next.indexOf(overUid) + 1 : next.indexOf(overUid),
+        drag,
+      );
+      _previewOrder = next;
+    });
+  }
+
+  Future<void> _endDrag() async {
+    final preview = _previewOrder;
+    setState(() {
+      _dragUid = null;
+      _previewOrder = null;
+    });
+    if (preview == null) return;
+    // Card order is this phone's own — every member of the house gets
+    // their own nearest master on top, and nothing is sent to the mesh.
+    await ref.read(masterCardOrderProvider.notifier).set(preview);
+  }
+}
+
+/// One master card, pick-up-able. Drag it onto another to reorder; lift
+/// without moving for the card's own menu. The same single long-press
+/// that the switch tiles use, so nothing new has to be learned.
+class _DraggableMasterCard extends ConsumerStatefulWidget {
+  const _DraggableMasterCard({
+    required this.section,
+    required this.menuSlop,
+    required this.onDragStarted,
+    required this.onHover,
+    required this.onDragEnded,
+    required this.child,
+  });
+
+  final MasterSection section;
+  final double menuSlop;
+  final void Function(String uid) onDragStarted;
+  final void Function(String overUid) onHover;
+  final VoidCallback onDragEnded;
+  final Widget child;
+
+  @override
+  ConsumerState<_DraggableMasterCard> createState() =>
+      _DraggableMasterCardState();
+}
+
+class _DraggableMasterCardState extends ConsumerState<_DraggableMasterCard> {
+  double _dragDistance = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) => LongPressDraggable<String>(
+        data: widget.section.uid,
+        feedback: SizedBox(
+          width: constraints.maxWidth,
+          child: Material(
+            color: Colors.transparent,
+            child: Opacity(opacity: 0.9, child: widget.child),
+          ),
+        ),
+        childWhenDragging: Opacity(opacity: 0.25, child: widget.child),
+        onDragStarted: () {
+          _dragDistance = 0;
+          widget.onDragStarted(widget.section.uid);
+        },
+        onDragUpdate: (d) => _dragDistance += d.delta.distance,
+        onDragEnd: (details) {
+          widget.onDragEnded();
+          if (!details.wasAccepted && _dragDistance < widget.menuSlop) {
+            _showMasterMenu(context, ref, widget.section);
+          }
+        },
+        child: DragTarget<String>(
+          onWillAcceptWithDetails: (d) {
+            if (d.data == widget.section.uid) return false;
+            widget.onHover(widget.section.uid);
+            return true;
+          },
+          onAcceptWithDetails: (_) {},
+          builder: (context, candidates, _) => widget.child,
         ),
       ),
     );
@@ -1021,9 +1182,8 @@ class _MasterCard extends ConsumerWidget {
             trailing: Icon(open ? Icons.expand_less : Icons.expand_more),
             onTap: () =>
                 ref.read(expandedMasterProvider.notifier).toggle(section.uid),
-            // The same gesture the switch tiles use for their own admin:
-            // hold the thing you want to change.
-            onLongPress: () => _showMasterMenu(context, ref, section),
+            // No onLongPress here: the draggable wrapper owns that
+            // gesture, and two long-press handlers on one card fight.
           ),
           AnimatedCrossFade(
             duration: const Duration(milliseconds: 220),
@@ -1303,7 +1463,12 @@ class _SwitchTileState extends ConsumerState<SwitchTile> {
             onTap: live ? () => _toggle(on) : null,
             // Rename works on either transport (firmware v11.18.0).
             onLongPress: widget.handleLongPress
-                ? () => showRenameSwitchSheet(context, ref, sw)
+                ? () => showRenameSwitchSheet(
+                      context,
+                      ref,
+                      sw,
+                      masterUid: widget.masterUid,
+                    )
                 : null,
             onTapDown: live ? (_) => setState(() => _pressed = true) : null,
             onTapUp: live ? (_) => setState(() => _pressed = false) : null,
