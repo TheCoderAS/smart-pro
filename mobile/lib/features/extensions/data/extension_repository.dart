@@ -74,6 +74,16 @@ class ExtensionRepository {
   Future<void> remove({required int slot}) =>
       _post(Api.remove, {'slot': slot});
 
+  /// "Cleanup dead extension slots": the master forgets every board it
+  /// cannot currently reach. There is no extension list in the app, so
+  /// this — offered on a master's own card — is how a board that died
+  /// stops holding a slot for ever. [targetUid] names another master in
+  /// the mesh; null is the one the app is connected to.
+  Future<void> cleanupDead({String? targetUid}) => _post(
+        Api.extCleanup,
+        {if (targetUid != null && targetUid.isNotEmpty) 'target_uid': targetUid},
+      );
+
   Future<void> _post(String path, Map<String, Object?> data) async {
     try {
       await _dio.post<dynamic>(path, data: data);

@@ -44,20 +44,36 @@ abstract interface class ControlTransport {
   /// The extensions attached to this master.
   Future<List<ExtensionInfo>> extensions();
 
-  /// Persist a new switch order (comma-joined ids on the wire).
-  Future<void> reorder(List<String> orderedIds);
+  /// Persist a new switch order (comma-joined ids on the wire). The
+  /// order belongs to the master that owns the switches and survives its
+  /// power cycles, so [masterUid] names which master to store it on —
+  /// null for the one the app is connected to.
+  Future<void> reorder(List<String> orderedIds, {String? masterUid});
 
   /// Renames — work on either transport since firmware v11.18.0
   /// (`rename_ext` / `rename_sw` / `rename_master`). Assignment
   /// (assign/reject/replace/remove) is still Wi-Fi-only.
   Future<void> renameExtension({required int slot, required String name});
-  Future<void> renameSwitch({required String id, required String name});
-  Future<void> renameMaster(String name);
+  Future<void> renameSwitch({
+    required String id,
+    required String name,
+    String? masterUid,
+  });
+  Future<void> renameMaster(String name, {String? masterUid});
+
+  /// Forget every extension slot [masterUid] cannot reach — "cleanup
+  /// dead extension slots". The master decides what unreachable means;
+  /// the app never second-guesses its presence tracking.
+  Future<void> cleanupExtensions({String? masterUid});
 
   /// Per-switch power-cut policy: restore the last state, or start off.
   /// The master owns it; the app only asks for a change and waits for the
   /// next snapshot to confirm.
-  Future<void> setRestore({required String id, required bool restore});
+  Future<void> setRestore({
+    required String id,
+    required bool restore,
+    String? masterUid,
+  });
 
   /// The master's running version + the images staged in its library.
   /// Firmware *transfer* still requires Wi-Fi.

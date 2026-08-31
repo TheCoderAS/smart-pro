@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.30.3"
+#define MASTER_FW_VERSION  "11.31.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -825,6 +825,13 @@ static uint32_t fwrx_last_ms = 0;
  * callback and the bus task far above; Arduino's auto-prototype pass is
  * not reliable enough to depend on here. */
 static void     ext_reset_identity(extension_t *e);
+/* Adoption sends the welcome frame, and is defined above the bus code
+ * that owns it -- same reason as the rest of this block. */
+static void     send_welcome(const uint8_t *uid, uint8_t addr,
+                             bool r1, bool r2);
+/* Called from the mesh CONFIG receiver, which sits above both. */
+static int      ext_cleanup_dead(void);
+static void     nvs_save_switch_name(const char *id, const char *name);
 /* Presence and gossip. Both name types defined above but *below* the first
  * function definition in the sketch, so without these the auto-generated
  * prototypes land before the typedefs and fail to parse. */
@@ -2034,6 +2041,30 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                 notify_ui();
             }
 
+        /* Rename ONE switch by id -- only apply if this is the target.
+         * Distinct from "rename_switch" above, which renames an extension
+         * slot. `order` carries the switch id. */
+        } else if (strcmp(cmd, "rename_sw_id") == 0 &&
+                   strlen(name) > 0 && strlen(order) > 0) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0) {
+                nvs_save_switch_name(order, name);
+                Serial.printf("[MESH] switch %s renamed: %s\n", order, name);
+                notify_ui();
+            }
+
+        /* Cleanup dead extension slots -- only apply if this is the target */
+        } else if (strcmp(cmd, "cleanup_exts") == 0) {
+            char self_uid[12];
+            snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                     master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+            if (strcmp(target_uid, self_uid) == 0) {
+                int gone = ext_cleanup_dead();
+                Serial.printf("[MESH] cleanup: %d slot(s) forgotten\n", gone);
+            }
+
         /* Reorder switches -- only apply if this is the target */
         } else if (strcmp(cmd, "reorder_switches") == 0 && strlen(order) > 0) {
             char self_uid[12];
@@ -2703,6 +2734,84 @@ static uint8_t next_free_addr(void) {
     return ADDR_UNASSIGNED;
 }
 
+/* Adopt a verified extension into a free slot, exactly as /api/assign
+ * does -- because by the time this is called the board has already
+ * answered a random-nonce challenge and had its HMAC verified. The story
+ * is explicit that extensions "appear on the dashboard automatically
+ * with default names -- no pairing step, ever", and a returning board is
+ * already restored without asking. A first-time board is the same event
+ * with an empty slot, so it is treated the same way.
+ *
+ * The default name carries the slot number so two boards never both show
+ * "Switch 1", which the story also requires. Returns the slot, or -1. */
+static int ext_adopt(const uint8_t *uid) {
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    int slot = find_empty_slot();
+    if (slot < 0) { xSemaphoreGive(state_mutex); return -1; }
+    uint8_t new_addr = next_free_addr();
+    extension_t *e = &extensions[slot];
+    memcpy(e->uid, uid, 4);
+    ext_reset_identity(e);
+    e->address      = new_addr;
+    e->state        = EXT_ONLINE;
+    e->missed       = 0;
+    e->relay1       = false;
+    e->relay2       = false;
+    e->last_seen_ms = millis();
+    e->polled_once  = true;
+    char def_name[24];
+    snprintf(def_name, sizeof(def_name), "Switch %d", slot + 1);
+    strncpy(e->name, def_name, sizeof(e->name)-1);
+    e->name[sizeof(e->name)-1] = 0;
+    xSemaphoreGive(state_mutex);
+
+    nvs_save(uid, slot, def_name);
+    send_welcome(uid, new_addr, false, false);
+    /* Grace period: 1 s before polling so the extension can save EEPROM. */
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    extensions[slot].last_seen_ms = millis() + 1000;
+    extensions[slot].missed       = 0;
+    xSemaphoreGive(state_mutex);
+    Serial.printf("[EXT] adopted %02X%02X%02X%02X as \"%s\" slot%d addr=0x%02X\n",
+                  uid[0],uid[1],uid[2],uid[3], def_name, slot+1, new_addr);
+    notify_ui();
+    return slot;
+}
+
+/* Forget every slot this master cannot currently reach. The app offers
+ * this as "cleanup dead extension slots" on a master; there is no
+ * extension list to remove things from one at a time, by decree. The
+ * master decides what "dead" means -- its own debounced presence, the
+ * same judgement the dashboard shows. Returns how many were forgotten. */
+static int ext_cleanup_dead(void) {
+    uint32_t now = millis();
+    int gone = 0;
+    for (int i = 0; i < MAX_EXTENSIONS; i++) {
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (extensions[i].state == EXT_EMPTY ||
+            ext_presence(&extensions[i], now) == PRES_ONLINE) {
+            xSemaphoreGive(state_mutex);
+            continue;
+        }
+        uint8_t uid[4]; memcpy(uid, extensions[i].uid, 4);
+        char gone_name[32];
+        strncpy(gone_name, extensions[i].name, sizeof(gone_name)-1);
+        gone_name[sizeof(gone_name)-1] = 0;
+        extensions[i].state   = EXT_EMPTY;
+        extensions[i].address = ADDR_UNASSIGNED;
+        memset(extensions[i].uid, 0, 4);
+        ext_reset_identity(&extensions[i]);
+        xSemaphoreGive(state_mutex);
+        nvs_remove(uid);
+        nvs_forget_slot(i);
+        gone++;
+        Serial.printf("[EXT] forgot unreachable slot%d (\"%s\")\n",
+                      i+1, gone_name);
+    }
+    if (gone) notify_ui();
+    return gone;
+}
+
 /* ================================================================
  * PENDING QUEUE
  * ================================================================ */
@@ -2929,13 +3038,14 @@ static void handle_response(const uint8_t *frame) {
         return;
     }
 
-    /* Brand new verified extension - add to pending queue */
-    xSemaphoreTake(state_mutex,portMAX_DELAY);
-    pending_add(uid);
-    xSemaphoreGive(state_mutex);
-    Serial.printf("[SEC] Auth OK - new ext %02X%02X%02X%02X awaiting assign\n",
+    /* Brand new extension, and it has just proved itself: the challenge
+     * above is a random nonce and its response was HMAC-verified. There
+     * is nothing left for a human to decide, so it is adopted on the
+     * spot -- no pending queue, no "awaiting assign", no pairing step. */
+    Serial.printf("[SEC] Auth OK - new ext %02X%02X%02X%02X\n",
                   uid[0],uid[1],uid[2],uid[3]);
-    notify_ui();
+    if (ext_adopt(uid) < 0)
+        Serial.println("[EXT] no free slot -- extension not adopted");
 }
 
 /* ================================================================
@@ -3795,10 +3905,15 @@ static void setup_web(void) {
         e->last_seen_ms=millis(); e->polled_once=true;
         strncpy(e->name,name.c_str(),sizeof(e->name)-1);
         e->name[sizeof(e->name)-1]='\0';
+        char saved_name[sizeof(e->name)];
+        strncpy(saved_name,e->name,sizeof(saved_name)-1);
+        saved_name[sizeof(saved_name)-1]='\0';
         pending_remove(uid);
         xSemaphoreGive(state_mutex);
 
-        nvs_save(uid,slot,"Switch");
+        /* Persist the name we just accepted. This wrote the literal
+         * "Switch", so any assigned name reverted on the next boot. */
+        nvs_save(uid,slot,saved_name);
         send_welcome(uid,new_addr,false,false);
         /* Grace period: 1s before polling so extension can save EEPROM */
         xSemaphoreTake(state_mutex,portMAX_DELAY);
@@ -3913,6 +4028,31 @@ static void setup_web(void) {
         nvs_forget_slot(slot);
         notify_ui();
         server.send(200,"application/json","{\"ok\":true}");
+    });
+
+    /* Forget every extension slot this master cannot reach. There is no
+     * extension list in the app any more, so this is how a dead board
+     * stops occupying a slot -- offered as "cleanup dead extension
+     * slots" on the master's own card. */
+    server.on("/api/ext/cleanup", HTTP_POST, [](){
+        if (!auth_ok()) return;
+        String tgt = server.arg("target_uid");
+        char self_uid[12];
+        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+        if (tgt.length() && !tgt.equalsIgnoreCase(self_uid)) {
+            if (!mesh_active) {
+                server.send(400,"application/json","{\"error\":\"not in mesh\"}");
+                return;
+            }
+            mesh_send_config("cleanup_exts", tgt.c_str(), nullptr, nullptr, -1);
+            /* The peer does the work and reports it in its own gossip. */
+            server.send(200,"application/json","{\"ok\":true,\"queued\":true}");
+            return;
+        }
+        int gone = ext_cleanup_dead();
+        String resp = "{\"ok\":true,\"removed\":" + String(gone) + "}";
+        server.send(200,"application/json",resp);
     });
 
     /* Rename individual switch */
@@ -5064,6 +5204,26 @@ static void setup_web(void) {
             } else {
                 mesh_send_config("reorder_switches", target_uid.c_str(),
                                  nullptr, order.c_str(), -1);
+            }
+
+        } else if (cmd == "rename_sw_id") {
+            /* Rename one switch by id. `order` carries the id. */
+            if (is_self) {
+                if (order.length() && name.length()) {
+                    nvs_save_switch_name(order.c_str(), name.c_str());
+                    notify_ui();
+                }
+            } else {
+                mesh_send_config("rename_sw_id", target_uid.c_str(),
+                                 name.c_str(), order.c_str(), -1);
+            }
+
+        } else if (cmd == "cleanup_exts") {
+            if (is_self) {
+                ext_cleanup_dead();
+            } else {
+                mesh_send_config("cleanup_exts", target_uid.c_str(),
+                                 nullptr, nullptr, -1);
             }
 
         } else if (cmd == "set_restore") {
@@ -6477,6 +6637,28 @@ static void ble_handle_request(const char *json) {
         return;
     }
 
+    /* Every admin verb below accepts an optional peer uid, exactly as
+     * "relay" does: Bluetooth is a full control path for the whole home,
+     * not just for the master the phone's radio happens to hold. An
+     * empty or self uid means "this master"; anything else is forwarded
+     * over the mesh with the same CONFIG packet the HTTP path uses.
+     * Returns 1 = forwarded, 0 = it is us, -1 = refused (with res set). */
+    auto route_uid = [&](const char *puid, const char *fwd_cmd,
+                         const char *fwd_name, const char *fwd_order,
+                         int fwd_slot) -> int {
+        if (!puid || !puid[0]) return 0;
+        char self_uid[12];
+        snprintf(self_uid, sizeof(self_uid), "%02X%02X%02X%02X",
+                 master_uid[0], master_uid[1], master_uid[2], master_uid[3]);
+        if (!strcmp(puid, self_uid)) return 0;
+        if (!mesh_active)  { res["err"] = "not in mesh"; return -1; }
+        uint8_t tmp[4];
+        if (!mesh_uid_parse(puid, tmp)) { res["err"] = "bad uid"; return -1; }
+        mesh_send_config(fwd_cmd, puid, fwd_name, fwd_order, fwd_slot);
+        res["ok"] = true;
+        return 1;
+    };
+
     if (!strcmp(cmd, "relay")) {
         const char *id = req["id"] | "";
         bool st = req["s"] | false;
@@ -6586,7 +6768,9 @@ static void ble_handle_request(const char *json) {
         /* Rename one switch, e.g. id "ext0_1" or "master_2". */
         const char *id = req["id"]   | "";
         const char *nm = req["name"] | "";
-        if (!id[0] || !nm[0]) { res["err"] = "bad id or name"; }
+        int routed = route_uid(req["uid"] | "", "rename_sw_id", nm, id, -1);
+        if (routed) { /* forwarded or refused */ }
+        else if (!id[0] || !nm[0]) { res["err"] = "bad id or name"; }
         else {
             nvs_save_switch_name(id, nm);
             notify_ui();
@@ -6596,7 +6780,10 @@ static void ble_handle_request(const char *json) {
         /* Per-switch restore policy, same shape as rename_sw. Bluetooth is
          * a full control path, so the setting is reachable there too. */
         const char *id = req["id"] | "";
-        if (!id[0] || !switch_id_valid(String(id))) { res["err"] = "bad id"; }
+        int routed = route_uid(req["uid"] | "", "set_restore", id, nullptr,
+                               (req["restore"] | false) ? 1 : 0);
+        if (routed) { /* forwarded or refused */ }
+        else if (!id[0] || !switch_id_valid(String(id))) { res["err"] = "bad id"; }
         else {
             nvs_save_restore(id, req["restore"] | false);
             notify_ui();
@@ -6604,7 +6791,9 @@ static void ble_handle_request(const char *json) {
         }
     } else if (!strcmp(cmd, "rename_master")) {
         const char *nm = req["name"] | "";
-        if (!nm[0]) { res["err"] = "bad name"; }
+        int routed = route_uid(req["uid"] | "", "rename_master", nm, nullptr, -1);
+        if (routed) { /* forwarded or refused */ }
+        else if (!nm[0]) { res["err"] = "bad name"; }
         else {
             xSemaphoreTake(state_mutex, portMAX_DELAY);
             strncpy(master_name, nm, sizeof(master_name)-1);
@@ -6618,7 +6807,10 @@ static void ble_handle_request(const char *json) {
         /* Body is the same comma-separated switch id list the HTTP
          * endpoint takes. */
         const char *ord = req["order"] | "";
-        if (!ord[0]) { res["err"] = "empty order"; }
+        int routed = route_uid(req["uid"] | "", "reorder_switches", nullptr,
+                               ord, -1);
+        if (routed) { /* forwarded or refused */ }
+        else if (!ord[0]) { res["err"] = "empty order"; }
         else {
             xSemaphoreTake(state_mutex, portMAX_DELAY);
             switch_order = String(ord);
@@ -6627,6 +6819,14 @@ static void ble_handle_request(const char *json) {
             notify_ui();
             Serial.printf("[BLE] switch order updated\n");
             res["ok"] = true;
+        }
+    } else if (!strcmp(cmd, "cleanup_exts")) {
+        int routed = route_uid(req["uid"] | "", "cleanup_exts", nullptr,
+                               nullptr, -1);
+        if (!routed) {
+            int gone = ext_cleanup_dead();
+            res["ok"]      = true;
+            res["removed"] = gone;
         }
     } else if (!strcmp(cmd, "fwlist")) {
         /* What is already staged on THIS master. The app compares this
