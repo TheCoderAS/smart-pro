@@ -31,6 +31,8 @@ abstract final class Api {
   static const replace = '/api/replace'; // TOKEN, uid + slot + name
   static const rename = '/api/rename'; // TOKEN, slot + name
   static const remove = '/api/remove'; // TOKEN, slot
+  // TOKEN, optional target_uid — forget every unreachable extension slot
+  static const extCleanup = '/api/ext/cleanup';
 
   // Mesh
   static const meshStatus = '/api/mesh/status'; // TOKEN

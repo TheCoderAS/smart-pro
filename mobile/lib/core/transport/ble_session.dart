@@ -715,10 +715,17 @@ class BleControlTransport implements ControlTransport {
     ];
   }
 
+  // Every admin verb carries the optional peer uid: the master holding
+  // the link forwards it over the mesh, so Bluetooth reaches the whole
+  // home rather than only the box the radio found.
   @override
-  Future<void> reorder(List<String> orderedIds) async {
+  Future<void> reorder(List<String> orderedIds, {String? masterUid}) async {
     await _send(
-      (p) => BleCommands.reorder(proof: p, order: orderedIds.join(',')),
+      (p) => BleCommands.reorder(
+        proof: p,
+        order: orderedIds.join(','),
+        masterUid: masterUid,
+      ),
     );
   }
 
@@ -729,19 +736,48 @@ class BleControlTransport implements ControlTransport {
   }
 
   @override
-  Future<void> renameSwitch({required String id, required String name}) async {
-    await _send((p) => BleCommands.renameSwitch(proof: p, id: id, name: name));
+  Future<void> renameSwitch({
+    required String id,
+    required String name,
+    String? masterUid,
+  }) async {
+    await _send((p) => BleCommands.renameSwitch(
+          proof: p,
+          id: id,
+          name: name,
+          masterUid: masterUid,
+        ));
   }
 
   @override
-  Future<void> renameMaster(String name) async {
-    await _send((p) => BleCommands.renameMaster(proof: p, name: name));
+  Future<void> renameMaster(String name, {String? masterUid}) async {
+    await _send((p) => BleCommands.renameMaster(
+          proof: p,
+          name: name,
+          masterUid: masterUid,
+        ));
   }
 
   @override
-  Future<void> setRestore({required String id, required bool restore}) async {
+  Future<void> cleanupExtensions({String? masterUid}) async {
     await _send(
-      (p) => BleCommands.setRestore(proof: p, id: id, restore: restore),
+      (p) => BleCommands.cleanupExtensions(proof: p, masterUid: masterUid),
+    );
+  }
+
+  @override
+  Future<void> setRestore({
+    required String id,
+    required bool restore,
+    String? masterUid,
+  }) async {
+    await _send(
+      (p) => BleCommands.setRestore(
+        proof: p,
+        id: id,
+        restore: restore,
+        masterUid: masterUid,
+      ),
     );
   }
 

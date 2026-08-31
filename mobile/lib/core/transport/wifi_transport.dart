@@ -5,6 +5,7 @@ import '../../features/extensions/data/extension_repository.dart';
 import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/data/firmware_repository.dart';
 import '../../features/firmware/domain/firmware_models.dart';
+import '../../features/mesh/data/mesh_repository.dart';
 import '../../features/switches/data/switch_repository.dart';
 import '../api/failure.dart';
 import '../logging/log.dart';
@@ -100,23 +101,76 @@ class WifiControlTransport implements ControlTransport {
   @override
   Future<List<ExtensionInfo>> extensions() => _ext.list();
 
+  /// Admin aimed at another master in the mesh goes through the mesh's
+  /// own config channel, which the connected master forwards. A null uid
+  /// is the master we are talking to, and takes the direct endpoint.
+  MeshRepository get _mesh => _ref.read(meshRepositoryProvider);
+
   @override
-  Future<void> reorder(List<String> orderedIds) => _switch.reorder(orderedIds);
+  Future<void> reorder(List<String> orderedIds, {String? masterUid}) {
+    if (masterUid == null || masterUid.isEmpty) {
+      return _switch.reorder(orderedIds);
+    }
+    return _mesh.config(
+      cmd: 'reorder_switches',
+      targetUid: masterUid,
+      extra: {'order': orderedIds.join(',')},
+    );
+  }
 
   @override
   Future<void> renameExtension({required int slot, required String name}) =>
       _ext.rename(slot: slot, name: name);
 
   @override
-  Future<void> renameSwitch({required String id, required String name}) =>
-      _switch.rename(id: id, name: name);
+  Future<void> renameSwitch({
+    required String id,
+    required String name,
+    String? masterUid,
+  }) {
+    if (masterUid == null || masterUid.isEmpty) {
+      return _switch.rename(id: id, name: name);
+    }
+    // `rename_switch` in the mesh protocol renames an extension SLOT;
+    // renaming one switch by id is its own command.
+    return _mesh.config(
+      cmd: 'rename_sw_id',
+      targetUid: masterUid,
+      extra: {'name': name, 'order': id},
+    );
+  }
 
   @override
-  Future<void> renameMaster(String name) => _auth.renameMaster(name);
+  Future<void> renameMaster(String name, {String? masterUid}) {
+    if (masterUid == null || masterUid.isEmpty) {
+      return _auth.renameMaster(name);
+    }
+    return _mesh.config(
+      cmd: 'rename_master',
+      targetUid: masterUid,
+      extra: {'name': name},
+    );
+  }
 
   @override
-  Future<void> setRestore({required String id, required bool restore}) =>
-      _switch.setRestore(id: id, restore: restore);
+  Future<void> cleanupExtensions({String? masterUid}) =>
+      _ref.read(extensionRepositoryProvider).cleanupDead(targetUid: masterUid);
+
+  @override
+  Future<void> setRestore({
+    required String id,
+    required bool restore,
+    String? masterUid,
+  }) {
+    if (masterUid == null || masterUid.isEmpty) {
+      return _switch.setRestore(id: id, restore: restore);
+    }
+    return _mesh.config(
+      cmd: 'set_restore',
+      targetUid: masterUid,
+      extra: {'name': id, 'slot': restore ? 1 : 0},
+    );
+  }
 
   @override
   Future<FwStatus> fwStatus() async {

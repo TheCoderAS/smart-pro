@@ -3,7 +3,6 @@ import 'package:go_router/go_router.dart';
 
 import '../features/auth/presentation/session_gate.dart';
 import '../features/dashboard/presentation/reorder_masters_screen.dart';
-import '../features/extensions/presentation/extensions_screen.dart';
 import '../features/firmware/presentation/firmware_screen.dart';
 import '../features/mesh/presentation/mesh_screen.dart';
 import '../features/onboarding/presentation/add_master_screen.dart';
@@ -18,7 +17,6 @@ abstract final class Routes {
   static const reorderMasters = '/masters/reorder';
   static const recovery = '/recovery';
   static const addMaster = '/add-master';
-  static const extensions = '/extensions';
   static const mesh = '/mesh';
   static const firmware = '/firmware';
   static const settings = '/settings';
@@ -44,10 +42,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.addMaster,
         builder: (context, state) => const AddMasterScreen(),
-      ),
-      GoRoute(
-        path: Routes.extensions,
-        builder: (context, state) => const ExtensionsScreen(),
       ),
       GoRoute(
         path: Routes.mesh,

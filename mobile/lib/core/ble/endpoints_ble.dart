@@ -54,11 +54,20 @@ abstract final class BleCommands {
   static Map<String, Object?> extensions(BleProof proof) =>
       _cmd(proof, {'c': 'exts'});
 
+  /// Every admin verb below takes the same optional peer uid `relay`
+  /// does: in a mesh the master holding the Bluetooth link forwards the
+  /// command on, so "which master" is never limited by which one the
+  /// radio happens to have found.
   static Map<String, Object?> reorder({
     required BleProof proof,
     required String order,
+    String? masterUid,
   }) =>
-      _cmd(proof, {'c': 'reorder', 'order': order});
+      _cmd(proof, {
+        'c': 'reorder',
+        'order': order,
+        if (masterUid != null && masterUid.isNotEmpty) 'uid': masterUid,
+      });
 
   static Map<String, Object?> renameExtension({
     required BleProof proof,
@@ -71,22 +80,51 @@ abstract final class BleCommands {
     required BleProof proof,
     required String id,
     required String name,
+    String? masterUid,
   }) =>
-      _cmd(proof, {'c': 'rename_sw', 'id': id, 'name': name});
+      _cmd(proof, {
+        'c': 'rename_sw',
+        'id': id,
+        'name': name,
+        if (masterUid != null && masterUid.isNotEmpty) 'uid': masterUid,
+      });
 
   /// Per-switch power-cut policy. Same shape as `rename_sw`.
   static Map<String, Object?> setRestore({
     required BleProof proof,
     required String id,
     required bool restore,
+    String? masterUid,
   }) =>
-      _cmd(proof, {'c': 'set_restore', 'id': id, 'restore': restore});
+      _cmd(proof, {
+        'c': 'set_restore',
+        'id': id,
+        'restore': restore,
+        if (masterUid != null && masterUid.isNotEmpty) 'uid': masterUid,
+      });
 
   static Map<String, Object?> renameMaster({
     required BleProof proof,
     required String name,
+    String? masterUid,
   }) =>
-      _cmd(proof, {'c': 'rename_master', 'name': name});
+      _cmd(proof, {
+        'c': 'rename_master',
+        'name': name,
+        if (masterUid != null && masterUid.isNotEmpty) 'uid': masterUid,
+      });
+
+  /// Forget every extension slot the target master cannot reach. There
+  /// is no extension list in the app, so this is how a dead board stops
+  /// holding a slot.
+  static Map<String, Object?> cleanupExtensions({
+    required BleProof proof,
+    String? masterUid,
+  }) =>
+      _cmd(proof, {
+        'c': 'cleanup_exts',
+        if (masterUid != null && masterUid.isNotEmpty) 'uid': masterUid,
+      });
 
   /// Firmware images staged on the master + its own version. Transfer
   /// still requires Wi-Fi.

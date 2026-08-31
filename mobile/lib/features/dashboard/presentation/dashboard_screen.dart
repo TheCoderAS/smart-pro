@@ -15,6 +15,7 @@ import '../../../core/transport/link_state.dart';
 import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
 import '../../../core/transport/transport_manager.dart';
+import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/transport_refusal.dart';
 import '../../../core/ws/snapshot_cache.dart';
 import '../../../core/ws/state_dto.dart';
@@ -127,6 +128,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             snapshot: snap,
             status: status,
             transport: transport,
+            // Every switch in the home, across every master — the count
+            // under a mesh's name has to mean the mesh, not whichever
+            // master the phone happens to be talking to.
+            allSwitches: switches,
           ),
           if (snap == null && bleFailed)
             const SliverFillRemaining(
@@ -149,12 +154,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             // switches in a collapsible card would just add a tap. A mesh:
             // one card per master, one open at a time (story Epic 7).
             if (sections.length <= 1)
-              _SwitchGrid(
-                switches: switches,
-                // Always the master we're connected to when there is only
-                // one section, so this is null — see MasterSection.relayUid.
-                masterUid:
-                    sections.isEmpty ? null : sections.first.relayUid,
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                sliver: SliverToBoxAdapter(
+                  child: ReorderableSwitchGrid(
+                    switches: switches,
+                    // Always the master we're connected to when there is
+                    // only one section, so this is null — see
+                    // MasterSection.relayUid.
+                    masterUid:
+                        sections.isEmpty ? null : sections.first.relayUid,
+                  ),
+                ),
               )
             else
               _MasterCards(sections: sections),
@@ -176,11 +187,15 @@ class _DashboardHeader extends ConsumerWidget {
     required this.snapshot,
     required this.status,
     required this.transport,
+    required this.allSwitches,
   });
 
   final StateSnapshot? snapshot;
   final SocketStatus status;
   final TransportKind transport;
+
+  /// Every reachable switch in the home, masters and peers alike.
+  final List<SwitchState> allSwitches;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -199,7 +214,7 @@ class _DashboardHeader extends ConsumerWidget {
     final meshName = (home?.inMesh ?? false) ? (home!.meshName ?? '') : '';
     final meshed = meshName.isNotEmpty;
     final name = meshed ? meshName : masterName;
-    final switches = snapshot?.switches ?? const <SwitchState>[];
+    final switches = allSwitches;
     final onCount = switches.where((s) => s.on).length;
 
     return SliverAppBar(
@@ -216,11 +231,6 @@ class _DashboardHeader extends ConsumerWidget {
           icon: const Icon(Icons.receipt_long_rounded),
           tooltip: 'Logs',
           onPressed: () => context.push(Routes.logs),
-        ),
-        IconButton(
-          icon: const Icon(Icons.extension_rounded),
-          tooltip: l10n.menuExtensions,
-          onPressed: () => context.push(Routes.extensions),
         ),
         IconButton(
           icon: const Icon(Icons.settings_rounded),
@@ -690,17 +700,39 @@ class _EmptyState extends StatelessWidget {
 /// drag a tile onto another to reorder, or lift without moving to
 /// rename. Tap stays toggle-only. A separate reorder screen used to
 /// carry this; the gesture everyone tries first now just works.
-class _SwitchGrid extends ConsumerStatefulWidget {
-  const _SwitchGrid({required this.switches, this.masterUid});
+/// The switch grid, with one long-press doing double duty: drag a tile
+/// onto another to reorder, or lift without moving to rename. Tap stays
+/// toggle-only.
+///
+/// One widget for both places switches are shown — the flat
+/// single-master view and each master's card in a mesh — because the
+/// gesture, the optimistic paint and the save are identical; only the
+/// master they belong to differs.
+class ReorderableSwitchGrid extends ConsumerStatefulWidget {
+  const ReorderableSwitchGrid({
+    required this.switches,
+    this.masterUid,
+    this.enabled = true,
+    super.key,
+  });
 
   final List<SwitchState> switches;
+
+  /// The master that owns these switches, or null for the one the app is
+  /// connected to. The order is stored on that master and survives its
+  /// power cycles, so this decides where the save lands.
   final String? masterUid;
 
+  /// False when the owning master itself is unreachable.
+  final bool enabled;
+
   @override
-  ConsumerState<_SwitchGrid> createState() => _SwitchGridState();
+  ConsumerState<ReorderableSwitchGrid> createState() =>
+      _ReorderableSwitchGridState();
 }
 
-class _SwitchGridState extends ConsumerState<_SwitchGrid> {
+class _ReorderableSwitchGridState
+    extends ConsumerState<ReorderableSwitchGrid> {
   /// The order the user last committed, painted immediately and kept
   /// until the master's snapshots confirm it (or the save fails).
   List<String>? _localOrder;
@@ -730,47 +762,47 @@ class _SwitchGridState extends ConsumerState<_SwitchGrid> {
   @override
   Widget build(BuildContext context) {
     final switches = _display;
-    return SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      sliver: SliverGrid(
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 220,
-          mainAxisExtent: 128,
-          crossAxisSpacing: 14,
-          mainAxisSpacing: 14,
-        ),
-        delegate: SliverChildBuilderDelegate(
-          (context, i) {
-            final sw = switches[i];
-            // Keyed at the top level so the live preview MOVES each
-            // tile's element instead of recreating it — recreating the
-            // dragged tile mid-gesture would kill the drag (its
-            // onDragEnd dies with the state) and leave the grid stuck
-            // in preview.
-            return KeyedSubtree(
-              key: ValueKey(sw.id),
-              child: _DraggableSwitchTile(
-                sw: sw,
-                masterUid: widget.masterUid,
-                renameSlop: _renameSlop,
-                onDragStarted: _startDrag,
-                onHover: _hover,
-                onDragEnded: _endDrag,
-              )
-                  .animate()
-                  .fadeIn(duration: 260.ms, delay: (40 * i).ms)
-                  .slideY(begin: 0.15, curve: Curves.easeOut),
-            );
-          },
-          childCount: switches.length,
-          // The other half of the move-don't-recreate contract.
-          findChildIndexCallback: (key) {
-            final id = (key as ValueKey<String>).value;
-            final index = switches.indexWhere((s) => s.id == id);
-            return index < 0 ? null : index;
-          },
-        ),
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      // Explicit, and never null: a GridView with no padding inherits
+      // MediaQuery's — the status-bar inset — which inside a master card
+      // showed up as a phantom gutter above the first row.
+      padding: EdgeInsets.zero,
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 220,
+        mainAxisExtent: 128,
+        crossAxisSpacing: 14,
+        mainAxisSpacing: 14,
       ),
+      itemCount: switches.length,
+      // Keyed, with the index callback, so the live preview MOVES each
+      // tile's element instead of recreating it — recreating the dragged
+      // tile mid-gesture would kill the drag (its onDragEnd dies with the
+      // state) and leave the grid stuck in preview.
+      findChildIndexCallback: (key) {
+        final id = (key as ValueKey<String>).value;
+        final index = switches.indexWhere((s) => s.id == id);
+        return index < 0 ? null : index;
+      },
+      itemBuilder: (context, i) {
+        final sw = switches[i];
+        return KeyedSubtree(
+          key: ValueKey(sw.id),
+          child: _DraggableSwitchTile(
+            sw: sw,
+            masterUid: widget.masterUid,
+            enabled: widget.enabled,
+            renameSlop: _renameSlop,
+            onDragStarted: _startDrag,
+            onHover: _hover,
+            onDragEnded: _endDrag,
+          )
+              .animate()
+              .fadeIn(duration: 260.ms, delay: (40 * i).ms)
+              .slideY(begin: 0.15, curve: Curves.easeOut),
+        );
+      },
     );
   }
 
@@ -819,7 +851,11 @@ class _SwitchGridState extends ConsumerState<_SwitchGrid> {
     if (!changed) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await ref.read(activeControlProvider).reorder(preview);
+      // Stored on the master that owns these switches, so the order is
+      // the same for every phone in the house and survives a power cut.
+      await ref
+          .read(activeControlProvider)
+          .reorder(preview, masterUid: widget.masterUid);
       // Nudge a fresh snapshot so the master's order catches up without
       // waiting on the next spontaneous push.
       await ref.read(transportCoordinatorProvider).refreshState();
@@ -853,10 +889,12 @@ class _DraggableSwitchTile extends ConsumerStatefulWidget {
     required this.onDragStarted,
     required this.onHover,
     required this.onDragEnded,
+    this.enabled = true,
   });
 
   final SwitchState sw;
   final String? masterUid;
+  final bool enabled;
   final double renameSlop;
   final void Function(String id) onDragStarted;
   final void Function(String overId) onHover;
@@ -877,6 +915,7 @@ class _DraggableSwitchTileState extends ConsumerState<_DraggableSwitchTile> {
     final tile = SwitchTile(
       sw: widget.sw,
       masterUid: widget.masterUid,
+      enabled: widget.enabled,
       handleLongPress: false,
     );
     return LayoutBuilder(
@@ -982,6 +1021,9 @@ class _MasterCard extends ConsumerWidget {
             trailing: Icon(open ? Icons.expand_less : Icons.expand_more),
             onTap: () =>
                 ref.read(expandedMasterProvider.notifier).toggle(section.uid),
+            // The same gesture the switch tiles use for their own admin:
+            // hold the thing you want to change.
+            onLongPress: () => _showMasterMenu(context, ref, section),
           ),
           AnimatedCrossFade(
             duration: const Duration(milliseconds: 220),
@@ -994,29 +1036,167 @@ class _MasterCard extends ConsumerWidget {
                       padding: EdgeInsets.all(12),
                       child: Text('No switches reachable right now.'),
                     )
-                  : GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 220,
-                        mainAxisExtent: 128,
-                        crossAxisSpacing: 14,
-                        mainAxisSpacing: 14,
-                      ),
-                      itemCount: section.switches.length,
-                      itemBuilder: (context, i) => SwitchTile(
-                        sw: section.switches[i],
-                        // Self is driven directly; a peer is relayed.
-                        masterUid: section.relayUid,
-                        enabled: section.online,
-                      ),
+                  // The same grid the flat view uses, so a mesh keeps
+                  // every gesture a single master has: hold to rename,
+                  // drag to reorder. Self is driven directly; a peer is
+                  // relayed, and its order saves on the peer itself.
+                  : ReorderableSwitchGrid(
+                      switches: section.switches,
+                      masterUid: section.relayUid,
+                      enabled: section.online,
                     ),
             ),
             secondChild: const SizedBox(width: double.infinity),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Hold a master card for the things that belong to the master rather
+/// than to one switch. Both work on either transport and for any master
+/// in the mesh — the connected one forwards what isn't its own.
+Future<void> _showMasterMenu(
+  BuildContext context,
+  WidgetRef ref,
+  MasterSection section,
+) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    builder: (sheetContext) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                section.name,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.drive_file_rename_outline),
+            title: const Text('Rename this switch board'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _renameMaster(context, ref, section);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.cleaning_services_outlined),
+            title: const Text('Cleanup dead extension slots'),
+            subtitle: const Text(
+              'Forget the boards this one can no longer reach.',
+            ),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              _cleanupExtensions(context, ref, section);
+            },
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<void> _renameMaster(
+  BuildContext context,
+  WidgetRef ref,
+  MasterSection section,
+) async {
+  final controller = TextEditingController(text: section.name);
+  final name = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Rename'),
+      content: StatefulBuilder(
+        builder: (context, setState) {
+          final value = controller.text.trim();
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLength: 24,
+                decoration: const InputDecoration(labelText: 'Name'),
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 8),
+              FormActions(
+                canSave: value.isNotEmpty,
+                onCancel: () => Navigator.of(dialogContext).pop(),
+                onSave: () => Navigator.of(dialogContext).pop(value),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+  controller.dispose();
+  if (name == null || name.isEmpty || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await ref
+        .read(activeControlProvider)
+        .renameMaster(name, masterUid: section.relayUid);
+    await ref.read(transportCoordinatorProvider).refreshState();
+    messenger.showSnackBar(const SnackBar(content: Text('Renamed.')));
+  } on Exception {
+    messenger.showSnackBar(
+      const SnackBar(content: Text("Couldn't rename — check the connection.")),
+    );
+  }
+}
+
+Future<void> _cleanupExtensions(
+  BuildContext context,
+  WidgetRef ref,
+  MasterSection section,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Cleanup dead extension slots?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '${section.name} forgets every switch board it can no longer '
+            'reach, along with their names and settings. Boards that are '
+            'simply switched off will come back as new ones — so do this '
+            'for hardware that is gone for good.',
+          ),
+          const SizedBox(height: 16),
+          FormActions(
+            saveLabel: 'Cleanup',
+            destructive: true,
+            onCancel: () => Navigator.of(dialogContext).pop(false),
+            onSave: () => Navigator.of(dialogContext).pop(true),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (!(confirmed ?? false) || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await ref
+        .read(activeControlProvider)
+        .cleanupExtensions(masterUid: section.relayUid);
+    await ref.read(transportCoordinatorProvider).refreshState();
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Unreachable boards forgotten.')),
+    );
+  } on Exception {
+    messenger.showSnackBar(
+      const SnackBar(content: Text("Couldn't reach that switch board.")),
     );
   }
 }
