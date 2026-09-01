@@ -66,7 +66,7 @@ void main() {
   test('a master is removable only while it is reachable', () {
     // Removal needs the target to delete its own credentials and say so,
     // so an unreachable one cannot be removed on either transport.
-    const online = MeshPeer(uid: 'A', presenceRaw: 'online');
+    const online = MeshPeer(uid: 'A'); // presenceRaw defaults to 'online'
     const offline = MeshPeer(uid: 'B', presenceRaw: 'offline');
     const flapping = MeshPeer(uid: 'C', presenceRaw: 'intermittent');
     expect(online.removable, isTrue);
