@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/dio_client.dart';
 import '../../../core/api/endpoints.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../domain/mesh_models.dart';
 
 final meshRepositoryProvider = Provider<MeshRepository>((ref) {
@@ -14,16 +15,24 @@ final meshStatusProvider =
   MeshStatusNotifier.new,
 );
 
+/// Read through the active transport, not straight off [MeshRepository].
+///
+/// The Mesh screen renders nothing until this resolves, so while it went
+/// over HTTP the screen could not load at all in Bluetooth mode — and the
+/// Leave and Remove buttons it carries never appeared, however well the
+/// commands behind them worked. Fitting the doors is not the same as
+/// opening the room.
 class MeshStatusNotifier extends AsyncNotifier<MeshStatus> {
   @override
   Future<MeshStatus> build() {
-    return ref.watch(meshRepositoryProvider).status();
+    // watch, so flipping transport re-reads from the one now in force.
+    return ref.watch(activeControlProvider).meshStatus();
   }
 
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(
-      () => ref.read(meshRepositoryProvider).status(),
+      () => ref.read(activeControlProvider).meshStatus(),
     );
   }
 }

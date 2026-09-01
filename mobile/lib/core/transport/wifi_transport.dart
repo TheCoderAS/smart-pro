@@ -6,6 +6,7 @@ import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/data/firmware_repository.dart';
 import '../../features/firmware/domain/firmware_models.dart';
 import '../../features/mesh/data/mesh_repository.dart';
+import '../../features/mesh/domain/mesh_models.dart';
 import '../../features/switches/data/switch_repository.dart';
 import '../api/failure.dart';
 import '../logging/log.dart';
@@ -193,4 +194,7 @@ class WifiControlTransport implements ControlTransport {
 
   @override
   Future<void> kickFromMesh(String uid) => _mesh.kick(uid: uid);
+
+  @override
+  Future<MeshStatus> meshStatus() => _mesh.status();
 }

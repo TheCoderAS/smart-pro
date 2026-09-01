@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/domain/firmware_models.dart';
+import '../../features/mesh/domain/mesh_models.dart';
 import '../api/dio_client.dart';
 import '../ble/advert.dart';
 import '../ble/ble_control_client.dart';
@@ -838,6 +839,13 @@ class BleControlTransport implements ControlTransport {
     _throwOnErr(await _send(
       (p) => BleCommands.kickFromMesh(proof: p, uid: uid),
     ));
+  }
+
+  @override
+  Future<MeshStatus> meshStatus() async {
+    final map = await _send((p) => BleCommands.mesh(p));
+    _throwOnErr(map);
+    return MeshStatus.fromJson(Map<String, dynamic>.from(map));
   }
 
   /// The master refuses a kick it cannot honour -- an offline target that

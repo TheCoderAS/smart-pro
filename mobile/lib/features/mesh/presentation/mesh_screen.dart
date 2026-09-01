@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
 import '../../../core/logging/log.dart';
+import '../../../core/transport/ble_session.dart' show MeshActionFailed;
 import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
+import '../../../core/widgets/wifi_guard.dart';
 import '../../../core/wifi/wifi_service.dart';
 import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
 import '../../auth/application/session.dart';
@@ -101,8 +103,7 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        "Mesh settings need the switch's Wi-Fi. Pull down "
-                        'to try again.',
+                        'Pull down to try again.',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
@@ -366,6 +367,11 @@ class _PeerTile extends ConsumerWidget {
       );
     } on ApiFailure catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    } on MeshActionFailed catch (e) {
+      // Over Bluetooth a refusal arrives as the master's own sentence
+      // rather than an HTTP status — "master is offline; power it on and
+      // try again". Uncaught, it took the screen down instead.
+      messenger.showSnackBar(SnackBar(content: Text(e.reason)));
     }
     await ref.read(meshStatusProvider.notifier).refresh();
   }
@@ -385,13 +391,20 @@ class _Actions extends ConsumerWidget {
           FilledButton.icon(
             icon: const Icon(Icons.add),
             label: const Text('Create a mesh'),
-            onPressed: () => _createMesh(context, ref),
+            // Still Wi-Fi: creating a mesh rebuilds the AP under a new
+            // SSID and password. Guarded here because the screen itself
+            // now loads over Bluetooth.
+            onPressed: () {
+              if (requireWifi(context, ref)) _createMesh(context, ref);
+            },
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             icon: const Icon(Icons.login),
             label: const Text('Join an existing mesh'),
-            onPressed: () => _joinMesh(context, ref),
+            onPressed: () {
+              if (requireWifi(context, ref)) _joinMesh(context, ref);
+            },
           ),
         ] else ...[
           FilledButton.icon(
@@ -399,9 +412,12 @@ class _Actions extends ConsumerWidget {
             label: const Text('Add a switch to this mesh'),
             // The invite is fetched and used inside the flow; the PIN
             // never reaches the screen (v5.1 Epic 7).
-            onPressed: () => Navigator.of(context).push<void>(
-              MaterialPageRoute(builder: (_) => const AddToMeshScreen()),
-            ),
+            onPressed: () {
+              if (!requireWifi(context, ref)) return;
+              Navigator.of(context).push<void>(
+                MaterialPageRoute(builder: (_) => const AddToMeshScreen()),
+              );
+            },
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
@@ -413,7 +429,9 @@ class _Actions extends ConsumerWidget {
           OutlinedButton.icon(
             icon: const Icon(Icons.password),
             label: const Text('Change mesh password'),
-            onPressed: () => _changePassword(context, ref),
+            onPressed: () {
+              if (requireWifi(context, ref)) _changePassword(context, ref);
+            },
           ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
@@ -440,6 +458,8 @@ class _Actions extends ConsumerWidget {
       await ref.read(meshStatusProvider.notifier).refresh();
     } on ApiFailure catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+    } on MeshActionFailed catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(e.reason)));
     }
   }
 
