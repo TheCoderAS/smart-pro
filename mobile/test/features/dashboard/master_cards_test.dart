@@ -80,6 +80,47 @@ void main() {
       expect(sections.single.relayUid, isNull);
     });
 
+    group('an offline master takes its switches with it', () {
+      // The states a peer gossiped before it went are the last thing it
+      // said, not the truth — they keep reporting themselves online. Left
+      // in, they padded the count under the home's name and sat in the
+      // card as tiles nothing would answer.
+      List<MasterSection> withPeer(String presence) => sectionsFrom(
+            snap(peers: [
+              PeerState(
+                uid: 'BBBB2222',
+                name: 'Kitchen',
+                presenceRaw: presence,
+                switches: const [peerSwitch, localOffline],
+              ),
+            ]),
+            const [],
+          );
+
+      test('offline: no switches, so nothing counts them', () {
+        expect(withPeer('offline')[1].switches, isEmpty);
+      });
+
+      test('offline: and none are blamed on an extension', () {
+        // The card says "Offline · last seen …". The dashboard's note
+        // must not also claim an extension is unreachable.
+        expect(withPeer('offline')[1].hiddenSwitches, 0);
+      });
+
+      test('online: its reachable switches are still there', () {
+        final peer = withPeer('online')[1];
+        expect(peer.switches.map((s) => s.id), ['master_1']);
+        expect(peer.hiddenSwitches, 1); // the offline extension
+      });
+
+      test('intermittent keeps its switches', () {
+        // Half of "intermittent" is a master that is up and settling.
+        // Emptying a whole room every time one flaps is worse than the
+        // flapping.
+        expect(withPeer('intermittent')[1].switches, hasLength(1));
+      });
+    });
+
     test('an offline peer keeps its card', () {
       // Vanishing is the flapping the story rules out — the card stays,
       // showing the state, so nobody discovers it through a failed tap.
