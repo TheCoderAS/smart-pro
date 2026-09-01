@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/failure.dart';
 import '../../../core/logging/log.dart';
+import '../../../core/transport/transport_manager.dart';
 import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
@@ -359,7 +360,7 @@ class _PeerTile extends ConsumerWidget {
     if (!(confirmed ?? false) || !context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await ref.read(meshRepositoryProvider).kick(uid: peer.uid);
+      await ref.read(activeControlProvider).kickFromMesh(peer.uid);
       messenger.showSnackBar(
         SnackBar(content: Text('$name left the mesh.')),
       );
@@ -567,7 +568,7 @@ class _Actions extends ConsumerWidget {
     if (name == null || name.isEmpty) return;
     if (!context.mounted) return;
     await _guard(context, ref, () async {
-      await ref.read(meshRepositoryProvider).rename(name: name);
+      await ref.read(activeControlProvider).renameMesh(name);
     });
   }
 
@@ -653,7 +654,7 @@ class _Actions extends ConsumerWidget {
     if (!(confirmed ?? false)) return;
     if (!context.mounted) return;
     await _guard(context, ref, () async {
-      await ref.read(meshRepositoryProvider).leave();
+      await ref.read(activeControlProvider).leaveMesh();
     });
   }
 

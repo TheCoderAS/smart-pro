@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../features/auth/presentation/session_gate.dart';
-import '../features/dashboard/presentation/reorder_masters_screen.dart';
 import '../features/firmware/presentation/firmware_screen.dart';
 import '../features/mesh/presentation/mesh_screen.dart';
 import '../features/onboarding/presentation/add_master_screen.dart';
@@ -14,7 +13,6 @@ import '../features/settings/presentation/settings_screen.dart';
 /// so deep links stay discoverable in one place.
 abstract final class Routes {
   static const home = '/';
-  static const reorderMasters = '/masters/reorder';
   static const recovery = '/recovery';
   static const addMaster = '/add-master';
   static const mesh = '/mesh';
@@ -30,10 +28,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.home,
         builder: (context, state) => const SessionGate(),
-      ),
-      GoRoute(
-        path: Routes.reorderMasters,
-        builder: (context, state) => const ReorderMastersScreen(),
       ),
       GoRoute(
         path: Routes.recovery,

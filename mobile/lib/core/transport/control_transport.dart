@@ -78,4 +78,19 @@ abstract interface class ControlTransport {
   /// The master's running version + the images staged in its library.
   /// Firmware *transfer* still requires Wi-Fi.
   Future<FwStatus> fwStatus();
+
+  /// Rename the mesh. Every member follows, so the whole home changes
+  /// name together — which is why this is not [renameMaster].
+  Future<void> renameMesh(String name);
+
+  /// Take the master holding this link out of its mesh.
+  Future<void> leaveMesh();
+
+  /// Remove another master from the mesh, by uid.
+  ///
+  /// Getting out of a home must not depend on the transport the home is
+  /// built on. These three were Wi-Fi-only, which made Bluetooth a mode
+  /// you could drive a mesh from and not undo — the dead end the story
+  /// rules out.
+  Future<void> kickFromMesh(String uid);
 }
