@@ -133,4 +133,23 @@ abstract final class BleCommands {
 
   static Map<String, Object?> mesh(BleProof proof) =>
       _cmd(proof, {'c': 'mesh'});
+
+  /// Renames the MESH, not this master. Firmware 11.32.0.
+  static Map<String, Object?> renameMesh({
+    required BleProof proof,
+    required String name,
+  }) =>
+      _cmd(proof, {'c': 'mesh_rename', 'name': name});
+
+  /// This master leaves its mesh. Firmware 11.32.0.
+  static Map<String, Object?> leaveMesh(BleProof proof) =>
+      _cmd(proof, {'c': 'mesh_leave'});
+
+  /// Removes another master, by uid. Never routed to a peer: the kick is
+  /// issued by the master holding the link. Firmware 11.32.0.
+  static Map<String, Object?> kickFromMesh({
+    required BleProof proof,
+    required String uid,
+  }) =>
+      _cmd(proof, {'c': 'mesh_kick', 'uid': uid});
 }

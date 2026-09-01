@@ -10,6 +10,7 @@ import '../../../app/l10n/app_localizations.dart';
 import '../../../app/router.dart';
 import '../../../core/api/failure.dart';
 import '../../../core/storage/master_registry.dart';
+import '../../../core/transport/ble_session.dart' show MeshActionFailed;
 import '../../../core/transport/control_transport.dart';
 import '../../../core/transport/stay_alive.dart';
 import '../../../core/transport/transport_coordinator.dart';
@@ -27,9 +28,12 @@ import '../application/theme_mode.dart';
 
 /// The real installed version, read from the platform (never hardcoded —
 /// a hardcoded string drifted from the release the moment it shipped).
+///
+/// Display version only. The build number is CI's bookkeeping: it names
+/// a run, not the app someone is holding.
 final appVersionProvider = FutureProvider<String>((ref) async {
   final info = await PackageInfo.fromPlatform();
-  return 'Version ${info.version} (build ${info.buildNumber})';
+  return 'Version ${info.version}';
 });
 
 class SettingsScreen extends ConsumerWidget {
@@ -56,8 +60,6 @@ class SettingsScreen extends ConsumerWidget {
     // In a mesh, this phone is set up with the whole home, not one box —
     // so that is what it disconnects from.
     final disconnectName = meshName ?? masterName;
-    final hasPeers =
-        ref.watch(activeStateProvider).value?.peers.isNotEmpty ?? false;
     final version = ref.watch(appVersionProvider).value ?? 'Version —';
 
     return Scaffold(
@@ -123,19 +125,23 @@ class SettingsScreen extends ConsumerWidget {
             ),
           ),
           const Divider(),
-          const _SectionHeader('This switch'),
-          if (info != null)
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: Text('Master ${info.uid}'),
-              subtitle: Text('Firmware ${info.fw}'),
-            ),
+          _SectionHeader(meshName != null ? 'This home' : 'This switch'),
+          // No uid/firmware tile: in a mesh it named whichever box the
+          // radio happened to hold, under a header about the whole home,
+          // and the running version is one tap away under Firmware update.
           ListTile(
             leading: const Icon(Icons.drive_file_rename_outline),
-            title: const Text('Rename'),
+            title: Text(
+              meshName != null ? 'Rename this mesh' : 'Rename this master',
+            ),
             subtitle: const Text('The name at the top of the home screen.'),
-            enabled: info != null,
-            onTap: info == null ? null : () => _renameMaster(context, ref),
+            // In a mesh that name IS the mesh's, so renaming the master
+            // changed nothing a person could see. Both work on either
+            // transport (firmware 11.32.0 for the mesh).
+            onTap: meshName != null
+                ? () => _renameMesh(context, ref, meshName)
+                : (info == null ? null : () => _renameMaster(context, ref)),
+            enabled: meshName != null || info != null,
           ),
           ListTile(
             leading: const Icon(Icons.hub_outlined),
@@ -146,20 +152,16 @@ class SettingsScreen extends ConsumerWidget {
                   : 'Not in a mesh. Link switches into one home.',
             ),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              if (requireWifi(context, ref)) {
-                unawaited(context.push(Routes.mesh));
-              }
-            },
+            // Not gated on Wi-Fi any more. Leaving a mesh and removing a
+            // master from it are the two ways out of a home, and needing
+            // Wi-Fi for them made Bluetooth a mode you could drive a mesh
+            // from and never undo. Creating, inviting and joining still
+            // ask for Wi-Fi on the screen itself — they rebuild the AP.
+            onTap: () => unawaited(context.push(Routes.mesh)),
           ),
-          if (hasPeers)
-            ListTile(
-              leading: const Icon(Icons.reorder_rounded),
-              title: const Text('Reorder masters'),
-              subtitle: const Text('The card order on the home screen.'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => unawaited(context.push(Routes.reorderMasters)),
-            ),
+          // No "Reorder masters" screen: the card order is a long-press
+          // and drag on the home screen, and two ways to do one thing is
+          // one more than the screen needs.
           ListTile(
             leading: const Icon(Icons.system_update_outlined),
             title: const Text('Firmware update'),
@@ -180,13 +182,6 @@ class SettingsScreen extends ConsumerWidget {
           const Divider(),
           const _SectionHeader('Reliability'),
           const _StayAliveTile(),
-          ListTile(
-            leading: const Icon(Icons.receipt_long_outlined),
-            title: const Text('Logs'),
-            subtitle: const Text('What the app has been doing.'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.push(Routes.logs),
-          ),
           const Divider(),
           ListTile(
             leading: Icon(
@@ -284,6 +279,98 @@ class SettingsScreen extends ConsumerWidget {
       wifi.join(ssid, fresh);
     }
     await ref.read(sessionProvider.notifier).handlePasswordChanged(fresh);
+  }
+
+  /// Renames the MESH, which is what the home screen actually shows once
+  /// masters are linked. Works on either transport: over Wi-Fi through
+  /// /api/mesh/rename, over Bluetooth through the mesh_rename verb added
+  /// in firmware 11.32.0.
+  ///
+  /// Every member follows the rename and changes SSID together, so over
+  /// Wi-Fi the phone's own network disappears mid-flight — the copy says
+  /// so rather than letting it look like a failure.
+  Future<void> _renameMesh(
+    BuildContext context,
+    WidgetRef ref,
+    String? currentName,
+  ) async {
+    final overWifi =
+        ref.read(currentTransportProvider) == TransportKind.wifi;
+    final controller = TextEditingController(text: currentName ?? '');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename this mesh'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            final value = controller.text.trim();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLength: 31,
+                  decoration: const InputDecoration(labelText: 'Mesh name'),
+                  onChanged: (_) => setState(() {}),
+                ),
+                if (overWifi)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Every switch changes network name together, so this '
+                      'phone will drop off and rejoin under the new one.',
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                FormActions(
+                  canSave: value.isNotEmpty && value != currentName,
+                  onCancel: () => Navigator.of(dialogContext).pop(),
+                  onSave: () => Navigator.of(dialogContext).pop(value),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(activeControlProvider).renameMesh(name);
+    } on Exception catch (e) {
+      // The master's own words when it has them: over Bluetooth it says
+      // why it refused, and paraphrasing that helps nobody.
+      final msg = switch (e) {
+        ApiFailure() => e.describe(),
+        MeshActionFailed() => e.reason,
+        _ => "Couldn't rename — check the connection.",
+      };
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
+      return;
+    }
+    // Cached so every screen names the home right, on either transport
+    // and offline — the same reason the mesh id is cached.
+    final home = ref.read(masterRegistryProvider).value?.firstOrNull;
+    if (home != null && home.inMesh) {
+      await ref.read(masterRegistryProvider.notifier).setMesh(
+            uid: home.uid,
+            inMesh: true,
+            meshId: home.meshId!,
+            meshName: name,
+          );
+    }
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          overWifi
+              ? 'Renamed to "$name". Rejoin the new network when it appears.'
+              : 'Renamed to "$name".',
+        ),
+      ),
+    );
   }
 
   Future<void> _renameMaster(BuildContext context, WidgetRef ref) async {

@@ -184,4 +184,13 @@ class WifiControlTransport implements ControlTransport {
     }
     return FwStatus(master: master, images: images);
   }
+
+  @override
+  Future<void> renameMesh(String name) => _mesh.rename(name: name);
+
+  @override
+  Future<void> leaveMesh() => _mesh.leave();
+
+  @override
+  Future<void> kickFromMesh(String uid) => _mesh.kick(uid: uid);
 }

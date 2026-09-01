@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.31.3"
+#define MASTER_FW_VERSION  "11.32.0"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -2704,6 +2704,157 @@ static void mesh_nvs_clear(void) {
         prefs.end();
         strncpy(mesh_pass,"12345678",sizeof(mesh_pass)-1);
         ble_update_adv_data();
+}
+
+/* ================================================================
+ * MESH MEMBERSHIP, OFF THE WEB SERVER
+ * ================================================================
+ * Leaving a mesh and removing a master from it are the two ways out of
+ * a home, and until now both needed Wi-Fi. That made Bluetooth a mode
+ * you could get stuck in: the app could see the mesh, drive every
+ * switch in it, and not undo it.
+ *
+ * These mirror the bodies of /api/mesh/{leave,kick,rename}. The
+ * handlers are deliberately NOT reused: they are WebServer lambdas that
+ * answer through `server`, and kick pumps server.handleClient() while it
+ * waits for the target's acknowledgement. They are also the paths in
+ * daily use, and this firmware is not compiled where it is written.
+ * Rewriting them blind to save a duplicate was the worse trade.
+ *
+ * If the policy changes in one, change it in the other.
+ * ================================================================ */
+
+/* Drop this master out of its mesh. Returns false if it was not in one. */
+static bool mesh_leave_now(void) {
+    if (!mesh_active) return false;
+    char self_uid[12];
+    snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+
+    StaticJsonDocument<64> doc;
+    doc["type"] = MESH_PKT_LEAVE;
+    doc["uid"]  = self_uid;
+    String payload; serializeJson(doc,payload);
+    mesh_broadcast(payload.c_str(),payload.length()+1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    master_order_remove(self_uid);
+    mesh_nvs_clear();
+
+    /* Back to this device's own SSID and credential. */
+    uint8_t tmac[6];
+    esp_read_mac(tmac, ESP_MAC_WIFI_STA);
+    snprintf(unique_ssid, sizeof(unique_ssid), "Unisync-%02X%02X",
+             tmac[4], tmac[5]);
+    WiFi.softAPdisconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    /* Never start an open access point. */
+    if (strlen(device_pass) < PASS_MIN_LEN) {
+        Serial.println("[AUTH] device password missing at AP start -- using factory value");
+        strncpy(device_pass, factory_pass, sizeof(device_pass)-1);
+        device_pass[sizeof(device_pass)-1] = 0;
+    }
+    WiFi.softAP(unique_ssid, device_pass, AP_CHANNEL);
+    Serial.printf("[WIFI] Reverted to unique SSID: %s\n", unique_ssid);
+    strncpy(mesh_name, "Unisync", sizeof(mesh_name)-1);
+    notify_ui();
+    return true;
+}
+
+/* Rename the mesh. Every member follows via the broadcast, so the whole
+ * home changes SSID together. Returns false if not in a mesh or the
+ * name is empty. */
+static bool mesh_rename_now(const char *name) {
+    if (!mesh_active || !name) return false;
+    String n(name);
+    n.trim();
+    if (n.length() == 0) return false;
+    if (n.length() > 31) n = n.substring(0, 31);
+
+    strncpy(mesh_name, n.c_str(), sizeof(mesh_name)-1);
+    mesh_name[sizeof(mesh_name)-1] = 0;
+    mesh_nvs_save();
+
+    char self_uid[12];
+    snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+    StaticJsonDocument<256> bcast;
+    bcast["type"] = MESH_PKT_PASS_CHG;   /* carries both name and pass */
+    bcast["uid"]  = self_uid;
+    bcast["name"] = mesh_name;
+    bcast["pass"] = mesh_pass;
+    String bpayload; serializeJson(bcast, bpayload);
+    mesh_broadcast(bpayload.c_str(), bpayload.length()+1);
+    Serial.printf("[MESH] Rename broadcast: %s\n", mesh_name);
+
+    WiFi.softAPdisconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    WiFi.softAP(mesh_name, mesh_pass, AP_CHANNEL);
+    Serial.printf("[WIFI] SSID changed to: %s\n", mesh_name);
+    notify_ui();
+    return true;
+}
+
+/* Remove another master from the mesh. 0 on success; on failure returns
+ * a negative code and points *err at a sentence fit to show a person.
+ *
+ * An offline target is refused rather than reported as removed: it would
+ * never hear the kick, would keep the mesh credentials, and would rejoin
+ * the moment it was powered on. */
+static int mesh_kick_now(const char *tgt_hex, const char **err) {
+    static const char *e_nomesh  = "not in mesh";
+    static const char *e_uid     = "uid must be 8 hex chars";
+    static const char *e_self    = "use leave to remove this master";
+    static const char *e_member  = "not a member";
+    static const char *e_offline = "master is offline; power it on and try again";
+    static const char *e_ack     = "master did not confirm removal; try again";
+
+    if (!mesh_active)               { *err = e_nomesh; return -1; }
+    if (!tgt_hex || strlen(tgt_hex) != 8) { *err = e_uid; return -2; }
+
+    char self_uid[12];
+    snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
+             master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
+    if (!strcasecmp(tgt_hex, self_uid)) { *err = e_self; return -3; }
+
+    uint8_t tu[4];
+    for (int k=0;k<4;k++) {
+        char b[3] = { tgt_hex[k*2], tgt_hex[k*2+1], 0 };
+        tu[k] = (uint8_t)strtoul(b, NULL, 16);
+    }
+    int idx = mesh_find_peer(tu);
+    if (idx < 0)                    { *err = e_member;  return -4; }
+    if (!mesh_peers[idx].online)    { *err = e_offline; return -5; }
+
+    /* Arm before sending: a fast acknowledgement must not be cleared by
+     * a reset that happens after the broadcast. */
+    kick_acked = false;
+
+    StaticJsonDocument<128> doc;
+    doc["type"]   = MESH_PKT_KICK;
+    doc["uid"]    = self_uid;
+    doc["target"] = tgt_hex;
+    String payload; serializeJson(doc,payload);
+    mesh_broadcast(payload.c_str(), payload.length()+1);
+
+    /* Wait for the target to confirm it deleted its credentials. Plain
+     * vTaskDelay here -- unlike the HTTP path there is no client to pump,
+     * and this runs on task_bus, not a callback. */
+    uint32_t t0 = millis();
+    while (!kick_acked && (millis() - t0) < 3000) vTaskDelay(pdMS_TO_TICKS(20));
+    if (!kick_acked) {
+        Serial.printf("[MESH] %s never confirmed deletion\n", tgt_hex);
+        *err = e_ack;
+        return -6;
+    }
+
+    if (esp_now_is_peer_exist(mesh_peers[idx].mac))
+        esp_now_del_peer(mesh_peers[idx].mac);
+    memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
+    master_order_remove(tgt_hex);
+    notify_ui();
+    Serial.printf("[MESH] kicked %s, deletion confirmed\n", tgt_hex);
+    return 0;
 }
 
 /* ================================================================
@@ -6932,6 +7083,30 @@ static void ble_handle_request(const char *json) {
         int online = 0;
         for (int i=0;i<MAX_MESH_MASTERS;i++) if (mesh_peers[i].online) online++;
         res["peer_count"] = online;
+
+    /* Getting out of a home must not require the transport the home is
+     * built on. Over Bluetooth these were unreachable, so a phone in
+     * Bluetooth mode could drive every switch in a mesh and not undo it.
+     *
+     * Deliberately NOT routed to a peer: leaving is this master's own
+     * decision, and a kick is issued by the master holding the link. The
+     * app reaches another master by connecting to it. */
+    } else if (!strcmp(cmd, "mesh_leave")) {
+        if (mesh_leave_now()) res["ok"] = true;
+        else                  res["err"] = "not in mesh";
+    } else if (!strcmp(cmd, "mesh_rename")) {
+        const char *nm = req["name"] | "";
+        if (mesh_rename_now(nm)) {
+            res["ok"]        = true;
+            res["mesh_name"] = mesh_name;
+        } else {
+            res["err"] = mesh_active ? "name required" : "not in mesh";
+        }
+    } else if (!strcmp(cmd, "mesh_kick")) {
+        const char *tgt = req["uid"] | "";
+        const char *why = "";
+        if (mesh_kick_now(tgt, &why) == 0) res["ok"] = true;
+        else                               res["err"] = why;
     } else {
         Serial.printf("[BLE] unknown command '%s'\n", cmd);
         res["err"] = "unknown command";

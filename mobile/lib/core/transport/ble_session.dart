@@ -820,4 +820,39 @@ class BleControlTransport implements ControlTransport {
     final map = await _send((p) => BleCommands.fwList(p));
     return FwStatus.fromJson(Map<String, dynamic>.from(map));
   }
+
+  @override
+  Future<void> renameMesh(String name) async {
+    _throwOnErr(await _send(
+      (p) => BleCommands.renameMesh(proof: p, name: name),
+    ));
+  }
+
+  @override
+  Future<void> leaveMesh() async {
+    _throwOnErr(await _send((p) => BleCommands.leaveMesh(p)));
+  }
+
+  @override
+  Future<void> kickFromMesh(String uid) async {
+    _throwOnErr(await _send(
+      (p) => BleCommands.kickFromMesh(proof: p, uid: uid),
+    ));
+  }
+
+  /// The master refuses a kick it cannot honour -- an offline target that
+  /// would keep its credentials and rejoin, most of all -- and says why.
+  /// Swallowing that would show a removal that did not happen.
+  void _throwOnErr(Map<String, Object?> res) {
+    final err = res['err'];
+    if (err is String && err.isNotEmpty) throw MeshActionFailed(err);
+  }
+}
+
+/// A mesh change the master declined, carrying its own words for it.
+class MeshActionFailed implements Exception {
+  const MeshActionFailed(this.reason);
+  final String reason;
+  @override
+  String toString() => reason;
 }
