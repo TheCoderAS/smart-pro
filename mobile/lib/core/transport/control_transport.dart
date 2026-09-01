@@ -1,5 +1,6 @@
 import '../../features/extensions/domain/extension_models.dart';
 import '../../features/firmware/domain/firmware_models.dart';
+import '../../features/mesh/domain/mesh_models.dart';
 
 /// Which physical path control commands and state currently flow over.
 enum TransportKind { wifi, ble }
@@ -93,4 +94,13 @@ abstract interface class ControlTransport {
   /// you could drive a mesh from and not undo — the dead end the story
   /// rules out.
   Future<void> kickFromMesh(String uid);
+
+  /// The mesh and every master in it.
+  ///
+  /// Here, rather than straight off [MeshRepository], because the Mesh
+  /// screen renders nothing until this resolves — so leaving this on HTTP
+  /// while the actions above moved to the transport fitted the doors and
+  /// sealed the room: over Bluetooth the screen showed "needs Wi-Fi" and
+  /// the Leave and Remove buttons never appeared at all.
+  Future<MeshStatus> meshStatus();
 }

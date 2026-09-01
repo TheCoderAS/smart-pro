@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.32.0"
+#define MASTER_FW_VERSION  "11.32.1"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -6842,10 +6842,12 @@ static void ble_handle_request(const char *json) {
     Serial.printf("[BLE] cmd='%s' ctr=%lu\n", cmd,
                   (unsigned long)(req["k"] | 0));
 
-    /* Heap: the "exts" reply now carries presence and last-seen per slot on
-     * top of names, versions and available images, and this runs on the BLE
-     * task's stack. */
-    DynamicJsonDocument res(3072);
+    /* Heap: the "exts" reply carries presence and last-seen per slot on
+     * top of names, versions and available images, and "mesh" now carries
+     * the whole member list -- the same document /api/mesh/status builds,
+     * which sizes itself at 4096 for exactly that reason. This runs on the
+     * BLE task's stack, so none of it belongs there. */
+    DynamicJsonDocument res(4096);
 
     /* There is no login here, by design: the password must never cross
      * Bluetooth. Every command carries a proof of a token obtained over
@@ -7077,12 +7079,48 @@ static void ble_handle_request(const char *json) {
             }
         }
     } else if (!strcmp(cmd, "mesh")) {
-        res["active"]    = mesh_active;
-        res["mesh_name"] = mesh_name;
-        res["fw"]        = MASTER_FW_VERSION;
+        /* The same document /api/mesh/status serves, because the Mesh
+         * screen is the same screen. It used to answer with four scalars
+         * and no member list, so over Bluetooth that screen had nothing
+         * to draw -- and the Leave and Remove buttons it carries could
+         * never appear. Adding the verbs without this made Bluetooth a
+         * mode with the doors fitted and the room sealed.
+         *
+         * Counted on presence, not the raw online flag, so the number
+         * agrees with the cards listed under it. */
+        uint32_t now_ms = millis();
         int online = 0;
-        for (int i=0;i<MAX_MESH_MASTERS;i++) if (mesh_peers[i].online) online++;
+        for (int i=0;i<MAX_MESH_MASTERS;i++)
+            if (peer_presence(&mesh_peers[i], now_ms) == PRES_ONLINE) online++;
+        res["active"]     = mesh_active;
+        res["mesh_name"]  = mesh_name;
+        res["fw"]         = MASTER_FW_VERSION;
         res["peer_count"] = online;
+        res["syncing"]    = master_pull_active || master_serve_busy;
+        res["cred_stale"] = cred_stale;
+        /* Every member, reachable or not: an offline master still gets a
+         * card, with a last-seen time and Remove greyed out. */
+        JsonArray pv = res.createNestedArray("peers");
+        for (int i=0;i<MAX_MESH_MASTERS;i++) {
+            bool has_uid=false;
+            for (int k=0;k<4;k++) if (mesh_peers[i].uid[k]) { has_uid=true; break; }
+            if (!has_uid) continue;
+            JsonObject o = pv.createNestedObject();
+            char puid[12];
+            snprintf(puid,sizeof(puid),"%02X%02X%02X%02X",
+                     mesh_peers[i].uid[0],mesh_peers[i].uid[1],
+                     mesh_peers[i].uid[2],mesh_peers[i].uid[3]);
+            presence_t ppr = peer_presence(&mesh_peers[i], now_ms);
+            o["uid"]       = puid;
+            o["name"]      = mesh_peers[i].name;
+            o["online"]    = (ppr == PRES_ONLINE);
+            o["presence"]  = presence_str(ppr);
+            o["last_seen"] = seconds_since(mesh_peers[i].last_seen_ms, now_ms);
+            char vb[16];
+            snprintf(vb,sizeof(vb),"%u.%u.%u",
+                     mesh_peers[i].fw[0],mesh_peers[i].fw[1],mesh_peers[i].fw[2]);
+            o["fw"] = vb;
+        }
 
     /* Getting out of a home must not require the transport the home is
      * built on. Over Bluetooth these were unreachable, so a phone in
