@@ -42,7 +42,6 @@ abstract final class Api {
   static const meshLeave = '/api/mesh/leave'; // TOKEN
   static const meshKick = '/api/mesh/kick'; // TOKEN, uid (online only)
   static const meshRename = '/api/mesh/rename'; // TOKEN, name
-  static const meshPasswd = '/api/mesh/passwd'; // TOKEN, old + pass + name
   static const meshRelay = '/api/mesh/relay'; // TOKEN, peer_uid + sw_id + ch
   static const meshConfig = '/api/mesh/config'; // TOKEN, cmd + target_uid + …
 
