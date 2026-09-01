@@ -100,8 +100,20 @@ class BleSessionController extends Notifier<BleSessionState> {
   /// the wedged operation forever. The app sat on "Reconnecting" for half
   /// an hour while the master, back in range and advertising, logged not
   /// one connection attempt.
-  static const linkOpCap = Duration(seconds: 30);
-  static const scanOpGrace = Duration(seconds: 10);
+  /// Derived, not guessed: the worst legitimate scan plus the client's
+  /// own 12 s connect timeout, with room to spare. At 30 s it was
+  /// narrower than the two operations it wraps.
+  static const linkOpCap = Duration(seconds: 45);
+
+  /// Slack on top of [BleScanner.budget], so a scan that legitimately
+  /// spends its whole budget is never thrown away.
+  ///
+  /// This was `window + 10s` — 16 s for a 6 s window — against a
+  /// scanner that could spend `8 + 6 + 2`, the same 16 s. The timeout
+  /// fired at the exact instant collect() returned, so every beacon it
+  /// had heard was discarded before the ranking ever ran. Zero headroom
+  /// is not a timeout, it is a coin toss the caller always lost.
+  static const scanOpGrace = Duration(seconds: 5);
 
   /// Bumped when a gated operation is abandoned. An abandoned attempt may
   /// still complete much later; the epoch check stops it installing its
@@ -199,12 +211,15 @@ class BleSessionController extends Notifier<BleSessionState> {
     ScanMode mode = ScanMode.lowLatency,
   }) {
     // The timeout is on the gated result, so a collect that never returns
-    // still releases the gate for the scans queued behind it.
+    // still releases the gate for the scans queued behind it. It is the
+    // scanner's own budget plus slack — a backstop for a plugin that has
+    // stopped answering, never a second opinion on how long a scan may
+    // take.
     final result = _scanGate
         .then((_) => ref
             .read(bleScannerProvider)
             .collect(meshId: _meshId, window: window, mode: mode))
-        .timeout(window + scanOpGrace);
+        .timeout(BleScanner.budget(window) + scanOpGrace);
     _scanGate = result.then((_) {}, onError: (_) {});
     return result;
   }
@@ -341,15 +356,34 @@ class BleSessionController extends Notifier<BleSessionState> {
     // must not stomp whatever a fresh attempt has since established.
     final epoch = _linkEpoch;
     state = state.copyWith(status: BleSessionStatus.scanning);
+
+    // Scanning and connecting fail for different reasons and get
+    // different messages. They shared one catch, which reported every
+    // scan timeout as "ble connect failed" — so a log full of connect
+    // failures came from a run that never attempted a single connection,
+    // and the master's silence looked like the app's problem was
+    // elsewhere. A diagnosis cost a full round trip to that one line.
+    final List<MasterBeacon> beacons;
     try {
       // A slightly generous window: the whole point is hearing the RIGHT
       // beacon, and the added master can be the quietest voice in the
       // room right after a mode switch (it was busy being the Wi-Fi
       // master; its single radio starves its own advertising).
-      final beacons = await _scan(
+      beacons = await _scan(
         mode: mode,
         window: const Duration(seconds: 6),
       );
+    } on Object catch (e) {
+      log.w('ble scan failed: $e');
+      if (epoch != _linkEpoch) return;
+      state = const BleSessionState(
+        status: BleSessionStatus.failed,
+        error: 'Bluetooth scan did not finish — still looking.',
+      );
+      return;
+    }
+
+    try {
       if (epoch != _linkEpoch) return;
       final want = _targetUid?.toUpperCase();
       bool isTarget(MasterBeacon b) =>

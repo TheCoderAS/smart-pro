@@ -61,7 +61,10 @@ class BleControlClient {
   /// Per-connection command counter; starts at 1, resets with the nonce.
   int _counter = 0;
 
-  static const _connectTimeout = Duration(seconds: 12);
+  /// Public because the session derives its own link budget from it:
+  /// a cap that does not outlast a scan plus this is a cap that
+  /// abandons connects it should have waited for.
+  static const connectTimeout = Duration(seconds: 12);
 
   /// A command is one write and one notify over a link that is already up,
   /// so six seconds was never a plausible success — it was only ever how
@@ -107,7 +110,7 @@ class BleControlClient {
   Future<void> connect() async {
     final connectedCompleter = Completer<void>();
     _conn = _ble
-        .connectToDevice(id: deviceId, connectionTimeout: _connectTimeout)
+        .connectToDevice(id: deviceId, connectionTimeout: connectTimeout)
         .listen(
           (u) {
             if (u.connectionState == DeviceConnectionState.connected) {
@@ -129,7 +132,7 @@ class BleControlClient {
             }
           },
         );
-    await connectedCompleter.future.timeout(_connectTimeout);
+    await connectedCompleter.future.timeout(connectTimeout);
 
     // A high-performance connection interval: writes stay in the tens of
     // milliseconds even when something else brushes the radio. Without
