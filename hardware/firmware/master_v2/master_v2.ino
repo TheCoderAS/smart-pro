@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.31.2"
+#define MASTER_FW_VERSION  "11.31.3"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -733,8 +733,21 @@ static bool     ble_connected   = false;
  * startAdvertising() returned true -- while the controller stayed
  * silent, and the same lesson cost us a ghost SSID when softAP was
  * called from the ESP-NOW callback (11.30.2). The callbacks now only
- * raise this flag. */
-static volatile bool ble_adv_restart_req = false;
+ * raise this flag.
+ *
+ * Two kinds, and the difference is not cosmetic. RESYNC stops before it
+ * starts, which is the whole point of 11.31.1: only the stop can
+ * reconcile a host that believes it is advertising with a controller
+ * that is not. RESUME just starts.
+ *
+ * A connection must only ever get RESUME. The link coming up already
+ * stopped advertising, so there is nothing to reconcile -- and stopping
+ * and restarting the radio ~10 ms into a connection lands squarely on
+ * the phone's MTU exchange and service discovery. 11.31.1 sent RESYNC
+ * here and broke exactly that: mtu=0, "characteristic not found or
+ * discovered", GATT 133, on a master sitting at -40 dBm. */
+typedef enum { ADV_REQ_NONE = 0, ADV_REQ_RESUME, ADV_REQ_RESYNC } adv_req_t;
+static volatile adv_req_t ble_adv_req = ADV_REQ_NONE;
 
 /* When the last connection came or went. The idle re-arm below measures
  * from here so it never interferes with a phone that is actively
@@ -7033,10 +7046,12 @@ class BleSrvCB : public NimBLEServerCallbacks {
         ble_update_adv_data();
         /* Keep advertising while slots remain. Without this one client --
          * hostile or merely forgotten -- hides the master from everyone.
-         * Raised here, done on task_bus: see ble_adv_restart_req. */
+         * Raised here, done on task_bus: see ble_adv_req. RESUME, never
+         * RESYNC: the link coming up already stopped advertising, and a
+         * stop/start here lands on the phone's service discovery. */
         ble_last_conn_event_ms = millis();
         ble_rearm_strikes      = 0;
-        if (ble_conn_count < BLE_MAX_CONN) ble_adv_restart_req = true;
+        if (ble_conn_count < BLE_MAX_CONN) ble_adv_req = ADV_REQ_RESUME;
         /* Ask for a larger MTU so a state document needs fewer chunks.
          * The phone may refuse; chunking copes either way. */
         s->setDataLen(info.getConnHandle(), 251);
@@ -7074,7 +7089,7 @@ class BleSrvCB : public NimBLEServerCallbacks {
          * on task_bus now, ~10 ms later and out of callback context. */
         ble_last_conn_event_ms = millis();
         ble_rearm_strikes      = 0;
-        ble_adv_restart_req    = true;
+        ble_adv_req            = ADV_REQ_RESYNC;
     }
     void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
         Serial.printf("[BLE] MTU now %u\n", mtu);
@@ -7196,18 +7211,27 @@ static void ble_stack_restart(void) {
  * ever called stopAdvertising() -- so once the two disagreed, the belief
  * was stuck true and the watchdog had nothing left to notice. Two bench
  * masters sat silent for an hour with the watchdog reporting "restart
- * OK". The stop before every start is the point: it is the only call
- * that resyncs the host with the controller. */
+ * OK". The stop before the start is the point: it is the only call that
+ * resyncs the host with the controller.
+ *
+ * But only where there is a disagreement to resync. 11.31.1 stopped
+ * before EVERY start, including the one that follows a client
+ * connecting, and that put a radio stop/start ~10 ms into a live
+ * connection -- on top of the phone's MTU exchange and service
+ * discovery. The master answered at -40 dBm and the phone still got
+ * mtu=0 and "characteristic not found". So: stop when nobody is
+ * connected, never under a live client. */
 static void ble_adv_tick(void) {
     if (!ble_server) return;
     const uint32_t now = millis();
 
     /* A GAP callback asked for a restart. Honour it here, out of
      * callback context, where it actually takes effect. */
-    if (ble_adv_restart_req) {
-        ble_adv_restart_req = false;
+    if (ble_adv_req != ADV_REQ_NONE) {
+        const adv_req_t req = ble_adv_req;
+        ble_adv_req = ADV_REQ_NONE;
         if (ble_conn_count < BLE_MAX_CONN) {
-            NimBLEDevice::stopAdvertising();
+            if (req == ADV_REQ_RESYNC) NimBLEDevice::stopAdvertising();
             if (NimBLEDevice::startAdvertising()) {
                 ble_rearm_strikes = 0;
             } else {
@@ -7224,7 +7248,10 @@ static void ble_adv_tick(void) {
         last_adv_check = now;
         if (ble_conn_count < BLE_MAX_CONN &&
             !NimBLEDevice::getAdvertising()->isAdvertising()) {
-            NimBLEDevice::stopAdvertising();
+            /* Stop only with nobody connected. Under a live client this
+             * fires within 3 s of the link coming up -- right on top of
+             * service discovery. */
+            if (ble_conn_count == 0) NimBLEDevice::stopAdvertising();
             bool ok = NimBLEDevice::startAdvertising();
             Serial.printf("[BLE] advertising was OFF with %u slot(s) free -- restart %s\n",
                           (unsigned)(BLE_MAX_CONN - ble_conn_count),
