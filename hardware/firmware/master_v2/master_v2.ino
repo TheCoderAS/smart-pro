@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.32.1"
+#define MASTER_FW_VERSION  "11.32.2"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -1980,6 +1980,7 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
                         esp_now_del_peer(mesh_peers[idx].mac);
                     memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
                     master_order_remove(tgt);
+                    mesh_nvs_save();   /* or the next boot restores it */
                     notify_ui();
                 }
             }
@@ -1996,9 +1997,26 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
             ack["type"] = MESH_PKT_KICK_ACK;
             ack["uid"]  = self_uid;
             String out; serializeJson(ack, out);
-            /* mesh_nvs_clear() dropped our key, so this goes out untagged;
-             * the remover accepts KICK_ACK on that basis alone. */
-            mesh_broadcast(out.c_str(), out.length()+1);
+            /* Straight to esp_now_send, deliberately.
+             *
+             * mesh_nvs_clear() above set mesh_active = false, and BOTH
+             * mesh_broadcast() and mesh_send() open with `if (!mesh_active)
+             * return`. So this acknowledgement was assembled, handed to a
+             * function that dropped it on the floor, and never left the
+             * radio -- every time, not as a race. The remover then waited
+             * out its three seconds, reported "master did not confirm
+             * removal", and kept the peer it had just successfully
+             * removed, while this board rebooted standalone.
+             *
+             * Untagged is correct and expected: the key is gone, and
+             * mesh_recv_cb admits KICK_ACK on exactly that basis. The
+             * delete-first order is kept -- a device must never hold both
+             * identities, even for the length of a broadcast. */
+            uint8_t bcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+            esp_err_t ar = esp_now_send(bcast, (const uint8_t *)out.c_str(),
+                                        out.length()+1);
+            Serial.printf("[MESH] removal acknowledged: %s\n",
+                          ar == ESP_OK ? "sent" : "send failed");
         }
         delay(300);
         ESP.restart();
@@ -2801,7 +2819,11 @@ static bool mesh_rename_now(const char *name) {
  * An offline target is refused rather than reported as removed: it would
  * never hear the kick, would keep the mesh credentials, and would rejoin
  * the moment it was powered on. */
-static int mesh_kick_now(const char *tgt_hex, const char **err) {
+/* [pump_http] keeps the web server responsive during the wait. Only
+ * task_web may call server.handleClient(); the BLE verb runs on
+ * task_bus and leaves it false. */
+static int mesh_kick_now(const char *tgt_hex, const char **err,
+                         bool pump_http = false) {
     static const char *e_nomesh  = "not in mesh";
     static const char *e_uid     = "uid must be 8 hex chars";
     static const char *e_self    = "use leave to remove this master";
@@ -2837,23 +2859,37 @@ static int mesh_kick_now(const char *tgt_hex, const char **err) {
     String payload; serializeJson(doc,payload);
     mesh_broadcast(payload.c_str(), payload.length()+1);
 
-    /* Wait for the target to confirm it deleted its credentials. Plain
-     * vTaskDelay here -- unlike the HTTP path there is no client to pump,
-     * and this runs on task_bus, not a callback. */
+    /* Wait for the target to confirm it deleted its credentials. */
     uint32_t t0 = millis();
-    while (!kick_acked && (millis() - t0) < 3000) vTaskDelay(pdMS_TO_TICKS(20));
-    if (!kick_acked) {
-        Serial.printf("[MESH] %s never confirmed deletion\n", tgt_hex);
-        *err = e_ack;
-        return -6;
+    while (!kick_acked && (millis() - t0) < 3000) {
+        if (pump_http) server.handleClient();
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
+    bool confirmed = kick_acked;
+    if (!confirmed) Serial.printf("[MESH] %s never confirmed deletion\n", tgt_hex);
 
+    /* Drop it either way.
+     *
+     * Refusing on a missing acknowledgement left a member nobody could
+     * delete: the target had taken the kick and gone, and every retry
+     * failed the same way because it was no longer listening. An offline
+     * target is already refused above, which is the case that reasoning
+     * was actually about. Here the packet went out to a peer we could
+     * hear, so the removal stands and the caller is told it was not
+     * confirmed rather than told it failed. */
     if (esp_now_is_peer_exist(mesh_peers[idx].mac))
         esp_now_del_peer(mesh_peers[idx].mac);
     memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
     master_order_remove(tgt_hex);
+    /* Persist it. Without this the removal lived in RAM only, and the
+     * next boot restored the peer from NVS -- named, since 11.31.2 --
+     * as a permanent offline master. A voluntary LEAVE has always saved;
+     * a kick never did. */
+    mesh_nvs_save();
     notify_ui();
-    Serial.printf("[MESH] kicked %s, deletion confirmed\n", tgt_hex);
+    Serial.printf("[MESH] kicked %s, deletion %s\n",
+                  tgt_hex, confirmed ? "confirmed" : "UNCONFIRMED");
+    if (!confirmed) { *err = e_ack; return 1; }
     return 0;
 }
 
@@ -5036,75 +5072,39 @@ static void setup_web(void) {
      * credentials and restarts standalone; the mesh itself is unchanged --
      * name, password and keys all stay as they were, so nobody else is
      * logged out and no peer is stranded. */
+    /* One implementation, shared with the BLE verb.
+     *
+     * This used to carry its own copy of the whole sequence, and the copies
+     * drifted: the fixes for a lost acknowledgement and for persisting the
+     * removal would have had to be made twice, which is exactly how the
+     * acknowledgement bug survived on one path. */
     server.on("/api/mesh/kick", HTTP_POST, [](){
         if (!auth_ok()) return;
-        if (!mesh_active) {
-            server.send(400,"application/json","{\"error\":\"not in mesh\"}");
-            return;
-        }
         String tgt = server.arg("uid");
-        char self_uid[12];
-        snprintf(self_uid,sizeof(self_uid),"%02X%02X%02X%02X",
-                 master_uid[0],master_uid[1],master_uid[2],master_uid[3]);
-        if (tgt.length()!=8) {
-            server.send(400,"application/json","{\"error\":\"uid must be 8 hex chars\"}");
+        const char *why = "";
+        int r = mesh_kick_now(tgt.c_str(), &why, /*pump_http=*/true);
+        if (r >= 0) {
+            StaticJsonDocument<192> d;
+            d["ok"] = true;
+            /* r == 1: removed here, but the target never acknowledged.
+             * Reported so the caller can say so rather than claim a clean
+             * removal -- and never as a failure, which is what left a
+             * member nobody could delete. */
+            if (r == 1) d["note"] = why;
+            String out; serializeJson(d, out);
+            server.send(200, "application/json", out);
             return;
         }
-        if (tgt.equalsIgnoreCase(self_uid)) {
-            server.send(400,"application/json",
-                "{\"error\":\"use /api/mesh/leave to remove this master\"}");
-            return;
+        int code = 400;
+        switch (r) {
+            case -4: code = 404; break;   /* not a member  */
+            case -5: code = 409; break;   /* target offline */
+            default: code = 400; break;
         }
-        uint8_t tu[4];
-        for (int k=0;k<4;k++){ char b[3]={tgt[k*2],tgt[k*2+1],0};
-            tu[k]=(uint8_t)strtoul(b,NULL,16); }
-        int idx = mesh_find_peer(tu);
-        if (idx < 0) {
-            server.send(404,"application/json","{\"error\":\"not a member\"}");
-            return;
-        }
-        /* Refuse an offline target. It would never hear the kick, so it
-         * would keep the mesh credentials and rejoin when powered on --
-         * the app would have shown a removal that did not happen. Enforced
-         * here rather than left to the app. */
-        if (!mesh_peers[idx].online) {
-            server.send(409,"application/json",
-                "{\"error\":\"master is offline; power it on and try again\"}");
-            return;
-        }
-
-        /* Arm before sending: a fast acknowledgment must not be cleared
-         * by a reset that happens after the broadcast. */
-        kick_acked = false;
-
-        StaticJsonDocument<128> doc;
-        doc["type"]   = MESH_PKT_KICK;
-        doc["uid"]    = self_uid;
-        doc["target"] = tgt.c_str();
-        String payload; serializeJson(doc,payload);
-        mesh_broadcast(payload.c_str(), payload.length()+1);
-        /* Wait for the target to confirm it deleted its credentials before
-         * reporting success. Without this the app would show a removal
-         * that may not have happened. */
-        uint32_t t0 = millis();
-        while (!kick_acked && (millis() - t0) < 3000) {
-            server.handleClient();
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        if (!kick_acked) {
-            Serial.printf("[MESH] %s never confirmed deletion\n", tgt.c_str());
-            server.send(504,"application/json",
-                "{\"error\":\"master did not confirm removal; try again\"}");
-            return;
-        }
-        /* Confirmed: now drop it locally. */
-        if (esp_now_is_peer_exist(mesh_peers[idx].mac))
-            esp_now_del_peer(mesh_peers[idx].mac);
-        memset(&mesh_peers[idx], 0, sizeof(mesh_peer_t));
-        master_order_remove(tgt.c_str());
-        notify_ui();
-        Serial.printf("[MESH] kicked %s, deletion confirmed\n", tgt.c_str());
-        server.send(200,"application/json","{\"ok\":true}");
+        StaticJsonDocument<192> d;
+        d["error"] = why;
+        String out; serializeJson(d, out);
+        server.send(code, "application/json", out);
     });
 
     server.on("/api/mesh/leave", HTTP_POST, [](){
@@ -7143,8 +7143,16 @@ static void ble_handle_request(const char *json) {
     } else if (!strcmp(cmd, "mesh_kick")) {
         const char *tgt = req["uid"] | "";
         const char *why = "";
-        if (mesh_kick_now(tgt, &why) == 0) res["ok"] = true;
-        else                               res["err"] = why;
+        /* >= 0, not == 0: 1 means removed here without an acknowledgement,
+         * which is a removal, not a failure. Treating it as an error is
+         * what left a member nobody could delete. */
+        int r = mesh_kick_now(tgt, &why);
+        if (r >= 0) {
+            res["ok"] = true;
+            if (r == 1) res["note"] = why;
+        } else {
+            res["err"] = why;
+        }
     } else {
         Serial.printf("[BLE] unknown command '%s'\n", cmd);
         res["err"] = "unknown command";
