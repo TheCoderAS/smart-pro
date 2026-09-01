@@ -113,11 +113,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ? const <MasterSection>[]
         : sectionsFrom(snap, ref.watch(masterCardOrderProvider));
     final switches = [for (final sec in sections) ...sec.switches];
-    final hiddenOffline = snap == null
-        ? 0
-        : (snap.switches.length +
-                snap.peers.fold<int>(0, (n, p) => n + p.switches.length)) -
-            switches.length;
+    // Only switches held back by an unreachable *extension*. An offline
+    // master's switches are gone too, but they are its card's story to
+    // tell — counting them here would blame an extension for a master
+    // that is simply switched off.
+    final hiddenOffline =
+        sections.fold<int>(0, (n, sec) => n + sec.hiddenSwitches);
 
     // Over BLE, a failed scan/connect would otherwise spin forever —
     // surface it with a retry instead.

@@ -12,11 +12,23 @@ class MasterSection {
     required this.isSelf,
     required this.presence,
     required this.lastSeen,
+    this.hiddenSwitches = 0,
   });
 
   final String uid;
   final String name;
+
+  /// The switches this master can actually drive right now. Empty for a
+  /// master that is offline — see [sectionsFrom].
   final List<SwitchState> switches;
+
+  /// Switches held back because their **extension** is unreachable, which
+  /// is what the dashboard's "they come back on their own" note counts.
+  ///
+  /// Always 0 for an offline master: none of its switches are hidden for
+  /// that reason, and blaming an extension for a master outage would be a
+  /// lie in the one place a user goes to understand what is wrong.
+  final int hiddenSwitches;
 
   /// True for the master the app is talking to. Its switches are driven
   /// directly; everyone else's are relayed across the mesh.
@@ -41,6 +53,19 @@ class MasterSection {
 ///
 /// A standalone master yields exactly one section, which is why the mesh
 /// dashboard and the standalone dashboard are the same screen.
+/// An offline master's switches leave the dashboard with it.
+///
+/// The switch states a peer gossiped before it went are the last thing it
+/// said, not the truth: they keep reporting themselves online long after
+/// the master carrying them has gone. Left in, they padded the count under
+/// the home's name and sat in the card as tiles nothing would answer. A
+/// master that cannot be reached has no reachable switches, and the card's
+/// own "Offline · last seen …" is the honest thing to show instead.
+///
+/// Keyed on [Presence.offline] alone. Intermittent is deliberately spared:
+/// half of what it means is a master that is up and merely settling, and
+/// hiding a whole room's switches for a minute every time one flaps would
+/// be worse than the problem.
 List<MasterSection> sectionsFrom(StateSnapshot snap, List<String> order) {
   final sections = <MasterSection>[
     MasterSection(
@@ -51,16 +76,28 @@ List<MasterSection> sectionsFrom(StateSnapshot snap, List<String> order) {
       isSelf: true,
       presence: Presence.online,
       lastSeen: 0,
+      hiddenSwitches: snap.switches.where((s) => !s.online).length,
     ),
     for (final p in snap.peers)
-      MasterSection(
-        uid: p.uid,
-        name: p.name.isEmpty ? p.uid : p.name,
-        switches: p.switches.where((s) => s.online).toList(growable: false),
-        isSelf: false,
-        presence: p.presence,
-        lastSeen: p.lastSeen,
-      ),
+      if (p.presence == Presence.offline)
+        MasterSection(
+          uid: p.uid,
+          name: p.name.isEmpty ? p.uid : p.name,
+          switches: const [],
+          isSelf: false,
+          presence: p.presence,
+          lastSeen: p.lastSeen,
+        )
+      else
+        MasterSection(
+          uid: p.uid,
+          name: p.name.isEmpty ? p.uid : p.name,
+          switches: p.switches.where((s) => s.online).toList(growable: false),
+          isSelf: false,
+          presence: p.presence,
+          lastSeen: p.lastSeen,
+          hiddenSwitches: p.switches.where((s) => !s.online).length,
+        ),
   ];
 
   if (order.isEmpty) return sections;
