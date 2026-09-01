@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.31.0"
+#define MASTER_FW_VERSION  "11.31.1"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -728,6 +728,24 @@ static NimBLECharacteristic *ble_snonce_char = nullptr;
 static uint8_t      ble_snonce[8] = {0};
 static bool     ble_connected   = false;
 
+/* Advertising has to be (re)started from task_web, never from a GAP
+ * callback. Restarting it inside onDisconnect looked like it worked --
+ * startAdvertising() returned true -- while the controller stayed
+ * silent, and the same lesson cost us a ghost SSID when softAP was
+ * called from the ESP-NOW callback (11.30.2). The callbacks now only
+ * raise this flag. */
+static volatile bool ble_adv_restart_req = false;
+
+/* When the last connection came or went. The idle re-arm below measures
+ * from here so it never interferes with a phone that is actively
+ * connecting. */
+static uint32_t ble_last_conn_event_ms = 0;
+
+/* Consecutive idle re-arms that did not get a client. After enough of
+ * them the host and the controller are assumed to disagree beyond what
+ * a stop/start can fix, and the whole stack is rebuilt. */
+static uint8_t  ble_rearm_strikes = 0;
+
 /* Deferred credential change: reply first, then restart the AP, so the
  * caller learns the outcome instead of inferring it from a dropped
  * connection. */
@@ -788,6 +806,8 @@ static void     factory_reset(void);
 static void     reset_button_tick(void);
 static void     ble_recovery_begin(void);
 static void     ble_recovery_apply(void);
+static void     ble_adv_tick(void);
+static void     ble_stack_restart(void);
 static void     mesh_broadcast_pass_change(void);
 static bool     mesh_send(const uint8_t *mac, const void *data, size_t len);
 static void     mesh_broadcast(const void *data, size_t len);
@@ -3435,22 +3455,8 @@ static void task_bus(void *arg) {
         static uint32_t last_reap = 0;
         if (millis() - last_reap >= 2000) { last_reap = millis(); ble_reap_connections(); }
 
-        /* Advertising watchdog. Every restart path can fail once (the
-         * radio is shared with Wi-Fi and the mesh), and a single ignored
-         * failure meant no beacon until a power cycle -- the bench saw
-         * exactly that after a long out-of-range disconnect. If a slot is
-         * free and we are silent, start again and say so. */
-        static uint32_t last_adv_check = 0;
-        if (millis() - last_adv_check >= 3000) {
-            last_adv_check = millis();
-            if (ble_conn_count < BLE_MAX_CONN &&
-                !NimBLEDevice::getAdvertising()->isAdvertising()) {
-                bool adv_ok = NimBLEDevice::startAdvertising();
-                Serial.printf("[BLE] advertising was OFF with %u slot(s) free -- restart %s\n",
-                              (unsigned)(BLE_MAX_CONN - ble_conn_count),
-                              adv_ok ? "OK" : "FAILED");
-            }
-        }
+        /* Advertising: deferred restarts, plus the idle re-arm. */
+        ble_adv_tick();
 
         reset_button_tick();
         ble_recovery_apply();
@@ -6975,8 +6981,11 @@ class BleSrvCB : public NimBLEServerCallbacks {
                       h, ble_conn_count);
         ble_update_adv_data();
         /* Keep advertising while slots remain. Without this one client --
-         * hostile or merely forgotten -- hides the master from everyone. */
-        if (ble_conn_count < BLE_MAX_CONN) NimBLEDevice::startAdvertising();
+         * hostile or merely forgotten -- hides the master from everyone.
+         * Raised here, done on task_web: see ble_adv_restart_req. */
+        ble_last_conn_event_ms = millis();
+        ble_rearm_strikes      = 0;
+        if (ble_conn_count < BLE_MAX_CONN) ble_adv_restart_req = true;
         /* Ask for a larger MTU so a state document needs fewer chunks.
          * The phone may refuse; chunking copes either way. */
         s->setDataLen(info.getConnHandle(), 251);
@@ -7003,12 +7012,18 @@ class BleSrvCB : public NimBLEServerCallbacks {
                       reason, ble_conn_count);
         ble_update_adv_data();
         /* Keep advertising so the phone can hop to whichever master is
-         * nearest as the user moves, without any manual step. A failed
-         * start here (radio busy with Wi-Fi at this exact moment) used to
-         * go unnoticed and left this master BLE-invisible until a power
-         * cycle; now it is logged and the watchdog in task_web retries. */
-        if (!NimBLEDevice::startAdvertising())
-            Serial.println("[BLE] adv restart FAILED after disconnect (watchdog will retry)");
+         * nearest as the user moves, without any manual step.
+         *
+         * This used to call startAdvertising() right here, and that is
+         * what left two bench masters BLE-invisible for an hour: called
+         * from inside the GAP disconnect callback it returned true, the
+         * host recorded itself as advertising, and the controller never
+         * came up. Nothing could then notice, because isAdvertising()
+         * only ever reports the host's own belief. The restart happens
+         * on task_web now, ~10 ms later and out of callback context. */
+        ble_last_conn_event_ms = millis();
+        ble_rearm_strikes      = 0;
+        ble_adv_restart_req    = true;
     }
     void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
         Serial.printf("[BLE] MTU now %u\n", mtu);
@@ -7084,6 +7099,111 @@ static void ble_reap_connections(void) {
                           ble_conns[i].handle, why);
             ble_server->disconnect(ble_conns[i].handle);
         }
+    }
+}
+
+/* How often an idle master re-arms its advertising, and how many
+ * re-arms the radio may openly refuse before the stack is rebuilt. */
+#define BLE_REARM_MS      60000UL
+#define BLE_REARM_STRIKES 5
+
+/* Rebuild the whole BLE stack. The last resort before a power cycle,
+ * for a controller that keeps refusing to advertise.
+ *
+ * Every handle dies with the stack, so the connection table goes with
+ * it. The callback objects ble_recovery_begin() news up are not
+ * reclaimed here; a few dozen bytes on a path that should run about
+ * never is a better trade than staying invisible. */
+static void ble_stack_restart(void) {
+    Serial.println("[BLE] advertising still refused -- rebuilding the stack");
+    for (int i = 0; i < BLE_MAX_CONN; i++) ble_conns[i].used = false;
+    ble_conn_count  = 0;
+    ble_connected   = false;
+    ble_req_len     = 0;
+    ble_req_ready   = false;
+    ble_req_handle  = 0xFFFF;
+    ble_req_conn    = 0xFFFF;
+    ble_server      = nullptr;
+    ble_chal_char   = nullptr;
+    ble_result_char = nullptr;
+    ble_rsp_char    = nullptr;
+    ble_state_char  = nullptr;
+    ble_snonce_char = nullptr;
+    NimBLEDevice::deinit(true);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ble_recovery_begin();
+    ble_rearm_strikes      = 0;
+    ble_last_conn_event_ms = millis();
+}
+
+/* Everything that keeps this master findable. Runs from task_web only.
+ *
+ * The history matters, because the obvious version of this was already
+ * tried and did not work. 11.30.x watched isAdvertising() every 3 s and
+ * called startAdvertising() when it read false. That flag is the host's
+ * own belief, not the controller's state, and nothing in this firmware
+ * ever called stopAdvertising() -- so once the two disagreed, the belief
+ * was stuck true and the watchdog had nothing left to notice. Two bench
+ * masters sat silent for an hour with the watchdog reporting "restart
+ * OK". The stop before every start is the point: it is the only call
+ * that resyncs the host with the controller. */
+static void ble_adv_tick(void) {
+    if (!ble_server) return;
+    const uint32_t now = millis();
+
+    /* A GAP callback asked for a restart. Honour it here, out of
+     * callback context, where it actually takes effect. */
+    if (ble_adv_restart_req) {
+        ble_adv_restart_req = false;
+        if (ble_conn_count < BLE_MAX_CONN) {
+            NimBLEDevice::stopAdvertising();
+            if (NimBLEDevice::startAdvertising()) {
+                ble_rearm_strikes = 0;
+            } else {
+                ble_rearm_strikes++;
+                Serial.println("[BLE] adv restart refused (idle re-arm will retry)");
+            }
+        }
+    }
+
+    /* Fast path, kept from 11.30.x: when the host itself admits it is
+     * not advertising, fix it within 3 s rather than waiting a minute. */
+    static uint32_t last_adv_check = 0;
+    if (now - last_adv_check >= 3000) {
+        last_adv_check = now;
+        if (ble_conn_count < BLE_MAX_CONN &&
+            !NimBLEDevice::getAdvertising()->isAdvertising()) {
+            NimBLEDevice::stopAdvertising();
+            bool ok = NimBLEDevice::startAdvertising();
+            Serial.printf("[BLE] advertising was OFF with %u slot(s) free -- restart %s\n",
+                          (unsigned)(BLE_MAX_CONN - ble_conn_count),
+                          ok ? "OK" : "FAILED");
+            if (ok) ble_rearm_strikes = 0;
+            else    ble_rearm_strikes++;
+        }
+    }
+
+    /* The idle re-arm, and the reason this version exists. Nobody is
+     * connected, nothing has happened for a minute: stop and start
+     * again unconditionally. It costs two HCI commands, it is invisible
+     * to anyone using the system, and it is the only thing that can
+     * clear a host/controller disagreement the flag above cannot see. */
+    if (ble_conn_count > 0) return;
+    if (now - ble_last_conn_event_ms < BLE_REARM_MS) return;
+    static uint32_t last_rearm = 0;
+    if (last_rearm && (now - last_rearm) < BLE_REARM_MS) return;
+    last_rearm = now;
+
+    NimBLEDevice::stopAdvertising();
+    ble_update_adv_data();
+    if (!NimBLEDevice::startAdvertising()) {
+        ble_rearm_strikes++;
+        Serial.printf("[BLE] idle re-arm refused (%u/%u)\n",
+                      (unsigned)ble_rearm_strikes, (unsigned)BLE_REARM_STRIKES);
+        /* Only an outright refusal counts toward a rebuild. Going a long
+         * time with nobody connected is normal for a light switch and
+         * must never be read as a fault. */
+        if (ble_rearm_strikes >= BLE_REARM_STRIKES) ble_stack_restart();
     }
 }
 
