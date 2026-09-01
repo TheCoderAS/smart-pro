@@ -35,7 +35,7 @@
 
 /* Single source of truth for the master version. Referenced by the boot
  * banner and served over /api/info; never duplicate it in the UI. */
-#define MASTER_FW_VERSION  "11.31.1"
+#define MASTER_FW_VERSION  "11.31.2"
 #define WEBSOCKETS_MAX_DATA_SIZE 16384
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -696,7 +696,7 @@ static uint8_t  ble_nonce[8]      = {0};
  * rather than resetting it. */
 static uint8_t  rec_fails         = 0;
 static uint32_t rec_next_ms       = 0;
-static bool     ble_recover_ready = false;   /* apply from task_web */
+static bool     ble_recover_ready = false;   /* apply from task_bus */
 static char     ble_new_pass[64]  = {0};
 static NimBLECharacteristic *ble_rsp_char   = nullptr;
 static NimBLECharacteristic *ble_state_char = nullptr;
@@ -728,7 +728,7 @@ static NimBLECharacteristic *ble_snonce_char = nullptr;
 static uint8_t      ble_snonce[8] = {0};
 static bool     ble_connected   = false;
 
-/* Advertising has to be (re)started from task_web, never from a GAP
+/* Advertising has to be (re)started from task_bus, never from a GAP
  * callback. Restarting it inside onDisconnect looked like it worked --
  * startAdvertising() returned true -- while the controller stayed
  * silent, and the same lesson cost us a ghost SSID when softAP was
@@ -868,9 +868,15 @@ static bool     switch_id_valid(const String &id);
 static void     nvs_load_switch_name(const char *id, char *name, int nlen);
 static void     relay_state_save(void);
 static void     relay_state_save_now(void);
+static void     mesh_nvs_save(void);
+static void     mesh_nvs_tick(void);
 static bool     nvs_load_restore(const char *id);
 static void     nvs_save_restore(const char *id, bool restore);
 static void     master_ver_parse(const char *s, uint8_t *v);
+
+/* Set when the mesh record changed on a task that must not touch flash
+ * (the ESP-NOW receive callback). task_bus commits it. */
+static bool     mesh_nvs_dirty = false;
 static void     task_fwsync(void *arg);
 static void     hmac_sha256(const uint8_t *key, const uint8_t *msg,
                             uint32_t mlen, uint8_t *out32);
@@ -1273,6 +1279,15 @@ static void gossip_emit(JsonDocument &doc, const char *what) {
         payload = "";
         serializeJson(doc, payload);
     }
+    /* Then the name, which rides along on every packet as a repair for a
+     * receiver that has none. It is trimmed before switch state is ever
+     * risked: the header always has room for it, so dropping it here only
+     * costs the repair, never the name itself. */
+    if (payload.length() + 1 > MESH_MTU && doc.containsKey("nm")) {
+        doc.remove("nm");
+        payload = "";
+        serializeJson(doc, payload);
+    }
     if (payload.length() + 1 > MESH_MTU) {
         Serial.printf("[MESH] %s packet %u bytes, over the %u limit -- dropped\n",
                       what, (unsigned)payload.length()+1, (unsigned)MESH_MTU);
@@ -1326,6 +1341,7 @@ static void mesh_gossip(void) {
         StaticJsonDocument<MESH_MTU + 64> doc;
         doc["type"] = MESH_PKT_STATE;
         doc["uid"]  = uid_str;
+        doc["nm"]   = master_name;   /* trimmed by gossip_emit if tight */
         doc["t"]    = n;
         JsonArray a = doc.createNestedArray("sw");
         for (int i = 0; i < nchanged; i++) {
@@ -1360,6 +1376,7 @@ static void mesh_gossip(void) {
     StaticJsonDocument<MESH_MTU + 64> doc;
     doc["type"] = MESH_PKT_STATE;
     doc["uid"]  = uid_str;
+    doc["nm"]   = master_name;   /* trimmed by gossip_emit if tight */
     doc["t"]    = n;
     JsonArray a = doc.createNestedArray("sw");
     for (uint8_t i = first; i < n && i < first + GOSSIP_SW_MAX; i++) {
@@ -1553,8 +1570,19 @@ static void mesh_recv_cb(const esp_now_recv_info_t *info,
          * for an absent key would blank the peer's name on every window. */
         if (doc.containsKey("nm")) {
             const char *pname = doc["nm"] | "Master";
-            strncpy(mesh_peers[idx].name, pname, sizeof(mesh_peers[idx].name)-1);
-            mesh_peers[idx].name[sizeof(mesh_peers[idx].name)-1] = 0;
+            /* Only on a real change: this runs on every gossip header,
+             * and the name is now persisted -- writing flash twice a
+             * second to store the same string is how NVS wears out. */
+            if (strncmp(mesh_peers[idx].name, pname,
+                        sizeof(mesh_peers[idx].name)-1) != 0) {
+                strncpy(mesh_peers[idx].name, pname,
+                        sizeof(mesh_peers[idx].name)-1);
+                mesh_peers[idx].name[sizeof(mesh_peers[idx].name)-1] = 0;
+                /* Deferred: NVS from the ESP-NOW callback is the shape of
+                 * bug that gave us a ghost SSID in 11.30.2. task_bus
+                 * commits it. */
+                mesh_nvs_dirty = true;
+            }
         }
         if (doc.containsKey("fw"))
             master_ver_parse(doc["fw"] | "0.0.0", mesh_peers[idx].fw);
@@ -2592,6 +2620,13 @@ static void mesh_nvs_save(void) {
         prefs.putBytes(key,mesh_peers[i].mac,6);
         snprintf(key,sizeof(key),"pu%d",j);
         prefs.putBytes(key,mesh_peers[i].uid,4);
+        /* The name goes with them. Saving uid and MAC but not the name
+         * meant every reboot restored a peer the app could only render
+         * as eight hex digits -- and it stayed that way until a gossip
+         * HEADER happened to arrive, which for an offline peer is never.
+         * A name is identity; it belongs in the record. */
+        snprintf(key,sizeof(key),"pn%d",j);
+        prefs.putString(key,mesh_peers[i].name);
         j++;
     }
     prefs.end();
@@ -2615,6 +2650,11 @@ static void mesh_nvs_load(void) {
             prefs.getBytes(key,mesh_peers[i].mac,6);
             snprintf(key,sizeof(key),"pu%d",i);
             prefs.getBytes(key,mesh_peers[i].uid,4);
+            snprintf(key,sizeof(key),"pn%d",i);
+            String pn = prefs.getString(key,"");
+            strncpy(mesh_peers[i].name, pn.c_str(),
+                    sizeof(mesh_peers[i].name)-1);
+            mesh_peers[i].name[sizeof(mesh_peers[i].name)-1] = 0;
             /* Set last_seen to now so peer doesn't immediately timeout.
              * Will be corrected by first gossip or marked offline after
              * MESH_PEER_TIMEOUT if peer never responds. */
@@ -2696,6 +2736,14 @@ static void relay_state_save(void) {
  * power cut would be worse than a flash write. */
 static void relay_state_save_now(void) {
     relay_state_flush();
+}
+
+/* Commits a mesh record a callback could not write itself. Same OTA rule
+ * as the relay state: the flash driver is busy with the image. */
+static void mesh_nvs_tick(void) {
+    if (!mesh_nvs_dirty || ota_in_progress) return;
+    mesh_nvs_dirty = false;
+    mesh_nvs_save();
 }
 
 /* Called from the bus loop. Never writes during an OTA: the flash driver
@@ -3457,6 +3505,9 @@ static void task_bus(void *arg) {
 
         /* Advertising: deferred restarts, plus the idle re-arm. */
         ble_adv_tick();
+
+        /* A peer name learned on the ESP-NOW callback, written here. */
+        mesh_nvs_tick();
 
         reset_button_tick();
         ble_recovery_apply();
@@ -6982,7 +7033,7 @@ class BleSrvCB : public NimBLEServerCallbacks {
         ble_update_adv_data();
         /* Keep advertising while slots remain. Without this one client --
          * hostile or merely forgotten -- hides the master from everyone.
-         * Raised here, done on task_web: see ble_adv_restart_req. */
+         * Raised here, done on task_bus: see ble_adv_restart_req. */
         ble_last_conn_event_ms = millis();
         ble_rearm_strikes      = 0;
         if (ble_conn_count < BLE_MAX_CONN) ble_adv_restart_req = true;
@@ -7020,7 +7071,7 @@ class BleSrvCB : public NimBLEServerCallbacks {
          * host recorded itself as advertising, and the controller never
          * came up. Nothing could then notice, because isAdvertising()
          * only ever reports the host's own belief. The restart happens
-         * on task_web now, ~10 ms later and out of callback context. */
+         * on task_bus now, ~10 ms later and out of callback context. */
         ble_last_conn_event_ms = millis();
         ble_rearm_strikes      = 0;
         ble_adv_restart_req    = true;
@@ -7079,7 +7130,7 @@ static void ble_update_adv_data(void) {
 }
 
 /* Free slots held by clients that never authenticated, or that
- * authenticated and then went quiet. Runs from task_web. Without this a
+ * authenticated and then went quiet. Runs from task_bus. Without this a
  * single squatter can occupy a connection for ever. */
 static void ble_reap_connections(void) {
     if (!ble_server) return;
@@ -7136,7 +7187,7 @@ static void ble_stack_restart(void) {
     ble_last_conn_event_ms = millis();
 }
 
-/* Everything that keeps this master findable. Runs from task_web only.
+/* Everything that keeps this master findable. Runs from task_bus only.
  *
  * The history matters, because the obvious version of this was already
  * tried and did not work. 11.30.x watched isAdvertising() every 3 s and
@@ -7274,7 +7325,7 @@ static void ble_recovery_begin(void) {
                   advertised, mid_now, started ? "OK" : "FAILED");
 }
 
-/* Called from task_web: performs the change the BLE callback authorised. */
+/* Called from task_bus: performs the change the BLE callback authorised. */
 static void ble_recovery_apply(void) {
     if (!ble_recover_ready) return;
     ble_recover_ready = false;
