@@ -218,6 +218,7 @@ class SettingsScreen extends ConsumerWidget {
   Future<void> _changePassword(BuildContext context, WidgetRef ref) async {
     // Changing the password is a Wi-Fi-only flow (BLE spec v2 §9).
     if (!requireWifi(context, ref)) return;
+    final currentController = TextEditingController();
     final controller = TextEditingController();
     final confirmController = TextEditingController();
     final ok = await showDialog<bool>(
@@ -227,10 +228,16 @@ class SettingsScreen extends ConsumerWidget {
         content: StatefulBuilder(
           builder: (context, setState) {
             final fresh = controller.text;
-            final canSave = fresh.length >= 8 && fresh == confirmController.text;
+            final canSave = currentController.text.isNotEmpty &&
+                fresh.length >= 8 &&
+                fresh == confirmController.text;
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                PasswordField(
+                  controller: currentController,
+                  label: 'Current password',
+                ),
                 PasswordField(
                   controller: controller,
                   label: 'New password',
@@ -256,17 +263,41 @@ class SettingsScreen extends ConsumerWidget {
       ),
     );
     final fresh = controller.text;
+    final current = currentController.text;
+    currentController.dispose();
     controller.dispose();
     confirmController.dispose();
     if (!(ok ?? false)) return;
     if (!context.mounted) return;
 
     final messenger = ScaffoldMessenger.of(context);
+    // Prove the current password before changing it. /api/password is
+    // token-authenticated and takes no `old`, so the check is a login
+    // with what the user typed -- the one endpoint that verifies a
+    // password against the credential actually in force (which in a mesh
+    // is the mesh's, not this box's).
+    //
+    // The cost is bounded and worth naming: five wrong entries lock
+    // *new* sign-ins for five minutes (AUTH_MAX_FAILS / AUTH_LOCKOUT_MS).
+    // It cannot strand anyone -- auth_valid() reads the token and never
+    // consults that lock, so this session keeps working -- and a correct
+    // entry resets the counter to zero before anything is changed.
     try {
-      // Reply first, Wi-Fi restart ~400 ms later (API §6).
-      await ref.read(authRepositoryProvider).setPassword(fresh);
+      await ref.read(authRepositoryProvider).changePasswordVerified(
+            current: current,
+            fresh: fresh,
+          );
     } on ApiFailure catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(switch (e) {
+            // 401 here means one thing only, and "Not authorized (401)"
+            // is not it.
+            Unauthorized() => 'That is not the current password.',
+            _ => e.describe(),
+          }),
+        ),
+      );
       return;
     }
     messenger.showSnackBar(

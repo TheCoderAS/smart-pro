@@ -54,6 +54,30 @@ class AuthRepository {
   /// TOKEN endpoint closes and login() is required. On an owned master
   /// the X-Auth interceptor supplies the token automatically and the
   /// API §6 reconnect dance applies to the caller.
+  /// Changes the password, but only once the current one is proven.
+  ///
+  /// `/api/password` is token-authenticated and takes no `old`, so the
+  /// proof is a login with what the user typed — the one endpoint that
+  /// checks a password against the credential actually in force (in a
+  /// mesh, the mesh's rather than this box's).
+  ///
+  /// Separate and public so the order is testable on its own: nothing is
+  /// changed unless [current] is right. A wrong one throws [Unauthorized]
+  /// and [setPassword] is never reached.
+  ///
+  /// Cost, named because it is real: five wrong entries lock *new*
+  /// sign-ins for five minutes (AUTH_MAX_FAILS / AUTH_LOCKOUT_MS in the
+  /// firmware). It cannot strand anyone — the master's token check never
+  /// consults that lock, so the session in hand keeps working — and a
+  /// correct entry resets the counter before anything changes.
+  Future<void> changePasswordVerified({
+    required String current,
+    required String fresh,
+  }) async {
+    await login(current);
+    await setPassword(fresh);
+  }
+
   Future<void> setPassword(String password) async {
     try {
       await _dio.post<dynamic>(

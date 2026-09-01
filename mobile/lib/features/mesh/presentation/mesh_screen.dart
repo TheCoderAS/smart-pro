@@ -9,7 +9,6 @@ import '../../../core/widgets/connection_bar.dart';
 import '../../../core/widgets/form_actions.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../../core/widgets/wifi_guard.dart';
-import '../../../core/wifi/wifi_service.dart';
 import '../../../core/ws/state_dto.dart' show Presence, lastSeenLabel;
 import '../../auth/application/session.dart';
 import '../../onboarding/application/first_run.dart';
@@ -419,20 +418,12 @@ class _Actions extends ConsumerWidget {
               );
             },
           ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.edit_outlined),
-            label: const Text('Rename mesh'),
-            onPressed: () => _renameMesh(context, ref),
-          ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.password),
-            label: const Text('Change mesh password'),
-            onPressed: () {
-              if (requireWifi(context, ref)) _changePassword(context, ref);
-            },
-          ),
+          // Renaming the mesh and changing its password both live in
+          // Settings, and both already act on the MESH when there is one:
+          // "Rename this mesh" calls the same renameMesh, and
+          // /api/password branches on mesh_active and broadcasts the new
+          // credential to every member. Two roads to one place is how a
+          // screen grows a second, subtly different way to do a thing.
           const SizedBox(height: 8),
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
@@ -583,14 +574,6 @@ class _Actions extends ConsumerWidget {
     navigator.popUntil((r) => r.isFirst);
   }
 
-  Future<void> _renameMesh(BuildContext context, WidgetRef ref) async {
-    final name = await _promptText(context, 'Rename mesh', 'Mesh name');
-    if (name == null || name.isEmpty) return;
-    if (!context.mounted) return;
-    await _guard(context, ref, () async {
-      await ref.read(activeControlProvider).renameMesh(name);
-    });
-  }
 
   Future<void> _joinMesh(BuildContext context, WidgetRef ref) async {
     final macController = TextEditingController();
@@ -677,115 +660,4 @@ class _Actions extends ConsumerWidget {
       await ref.read(activeControlProvider).leaveMesh();
     });
   }
-
-  Future<void> _changePassword(BuildContext context, WidgetRef ref) async {
-    final oldController = TextEditingController();
-    final newController = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Change mesh password'),
-        content: StatefulBuilder(
-          builder: (context, setState) {
-            final canSave = newController.text.length >= 8 &&
-                oldController.text.isNotEmpty;
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                PasswordField(
-                  controller: oldController,
-                  label: 'Current password',
-                ),
-                PasswordField(
-                  controller: newController,
-                  label: 'New password',
-                  helper: 'At least 8 characters. Every master takes '
-                      'the change; every signed-in device must sign in '
-                      'again.',
-                  helperMaxLines: 3,
-                ),
-                const SizedBox(height: 16),
-                FormActions(
-                  saveLabel: 'Change',
-                  canSave: canSave,
-                  onCancel: () => Navigator.of(dialogContext).pop(false),
-                  onSave: () => Navigator.of(dialogContext).pop(true),
-                ),
-              ],
-            );
-          },
-        ),
-      ),
-    );
-    final old = oldController.text;
-    final fresh = newController.text;
-    oldController.dispose();
-    newController.dispose();
-    if (!(ok ?? false) || fresh.length < 8) return;
-    if (!context.mounted) return;
-
-    final messenger = ScaffoldMessenger.of(context);
-    final meshName = status.meshName;
-    try {
-      // Reply comes back BEFORE the Wi-Fi restarts (API §6).
-      await ref.read(meshRepositoryProvider).changePassword(
-            old: old,
-            pass: fresh,
-            name: meshName,
-          );
-    } on ApiFailure catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.describe())));
-      return;
-    }
-
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Password changed. Reconnecting…'),
-      ),
-    );
-    // Best-effort Wi-Fi rejoin with the new credential, then the
-    // login-retry dance.
-    final wifi = ref.read(wifiServiceProvider);
-    final ssid = await wifi.currentSsid();
-    if (ssid != null) {
-      // Fire and forget — join() may block on a system prompt.
-      // The session retry loop below tolerates either outcome.
-      // ignore: unawaited_futures
-      wifi.join(ssid, fresh);
-    }
-    await ref.read(sessionProvider.notifier).handlePasswordChanged(fresh);
-  }
-}
-
-Future<String?> _promptText(
-  BuildContext context,
-  String title,
-  String label,
-) async {
-  final controller = TextEditingController();
-  final result = await showDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        maxLength: 32,
-        decoration: InputDecoration(labelText: label),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(controller.text.trim()),
-          child: const Text('Save'),
-        ),
-      ],
-    ),
-  );
-  controller.dispose();
-  return result;
 }

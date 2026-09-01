@@ -89,16 +89,6 @@ class MeshRepository {
   Future<void> rename({required String name}) =>
       _post(Api.meshRename, {'name': name});
 
-  /// Mesh-wide password change. The reply arrives BEFORE the Wi-Fi
-  /// restarts (~400 ms later, API §6) — callers run the reconnect
-  /// dance after this resolves.
-  Future<void> changePassword({
-    required String old,
-    required String pass,
-    required String name,
-  }) =>
-      _post(Api.meshPasswd, {'old': old, 'pass': pass, 'name': name});
-
   /// Advanced per-peer admin (API §5).
   Future<void> config({
     required String cmd,
